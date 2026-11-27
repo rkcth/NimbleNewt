@@ -135,6 +135,21 @@ for (const backend of backends) {
     assert.deepEqual(calls, [{ attemptId: ATT, scope: { taskId: TASK, projectId: PROJECT }, request }], "asked while the attempt itself is busy (it is at its end): the busy check does not hold a check back");
   });
 
+  suite("a check of the changed test files is not carried to a remote host (card W09 second slice): the host gets the other checks only, and the report has no list, so the dispatcher cannot pass that check", async (c) => {
+    const r1 = await c.host("r1");
+    const responder = new WorkspaceResponder({ client: r1.client, busy: () => [ATT], port: { run: async () => ({ ok: false, reason: "not a workspace request" }) }, verify: async () => ({ ...good, changedTests: { count: 1, files: [], plan: { text: "" } } } as never) });
+    const handle = hostWith(c as never);
+    const withTests: DoneCheckRequest = { ...request, checks: [...request.checks, { name: "changed tests", run: ["node", "--test"], timeoutMs: 1000, changedTests: true }] };
+    const pending = handle.verify(ATT, { taskId: TASK, projectId: PROJECT }, withTests);
+    await wait(() => r1.client.workspaceRequests());
+    const listed = await r1.client.workspaceRequests();
+    assert.deepEqual(listed[0]!.verify?.checks, request.checks, "only the plain checks went to the host");
+    responder.handle(listed);
+    const got = await pending;
+    assert.equal("changedTests" in got, false, "a list the host sends anyway is not carried back");
+    assert.ok(!got.checks.some((x) => x.name === "changed tests"));
+  });
+
   suite("a host that cannot check, fails, or sends a report that does not fit gives no report: the dispatcher is told it could not look, never a pass (card H12a)", async (c) => {
     const r1 = await c.host("r1");
     const run = async (verify: WorkspaceResponder extends never ? never : ConstructorParameters<typeof WorkspaceResponder>[0]["verify"], req: DoneCheckRequest = request) => {

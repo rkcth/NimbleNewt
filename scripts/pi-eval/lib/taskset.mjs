@@ -34,6 +34,7 @@ export function loadTaskset(file) {
     if (!(Number.isFinite(timeoutMinutes) && timeoutMinutes > 0)) problems.push(`${where}: no timeout for size ${t?.size}`);
     const acceptance = loadAcceptance(root, t, where, problems);
     // W09 fixes: the task's own package tests for the done's check (lib/worker-run.mjs doneChecks): plain relative file paths, never a held-out or acceptance test (by name, in either its source or its built form).
+    if (t?.clauseTests !== undefined && typeof t.clauseTests !== "boolean") problems.push(`${where}: clauseTests must be true or false`);
     if (t?.doneTests !== undefined) {
       if (!Array.isArray(t.doneTests) || t.doneTests.length > 50) problems.push(`${where}: doneTests must be a list of at most 50 test files`);
       else {
@@ -54,9 +55,12 @@ export function loadTaskset(file) {
       timeoutMinutes,
       copy: t?.copy ?? d.copy ?? [],
       setup: t?.setup ?? d.setup ?? null,
+      // W09 second slice: whether the worker bench's done check also runs the change's own tests and maps PLAN.md to the CONTRACT bullets (lib/worker-run.mjs doneChecks). A task's own value wins over the default.
+      clauseTests: (t?.clauseTests ?? d.clauseTests) === true,
       test: t?.test ?? d.test,
     };
   });
+  if (d.clauseTests !== undefined && typeof d.clauseTests !== "boolean") problems.push("defaults.clauseTests must be true or false");
   if (tasks.length === 0) problems.push("tasks is empty");
   if (problems.length > 0) throw new Error(`taskset ${file}:\n- ${problems.join("\n- ")}`);
   const variants = Object.fromEntries(Object.entries(raw.variants).map(([k, v]) => [k, { ...v, promptPath: v.prompt ? join(root, v.prompt) : null }]));

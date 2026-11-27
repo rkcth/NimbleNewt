@@ -105,7 +105,10 @@ export class RemoteWorkerHost implements WorkerHost {
    * check asked); anything that does not fit, an unanswered or refused request, is thrown, so the dispatcher records "could not check" and the done does not count (fail closed, never a pass). The worker's report is the worker's word,
    * as its work is: the controller cannot run the checks itself on another machine.
    */
-  async verify(attemptId: string, scope: { readonly taskId: string; readonly projectId: string }, request: DoneCheckRequest): Promise<DoneCheckReport> {
+  async verify(attemptId: string, scope: { readonly taskId: string; readonly projectId: string }, given: DoneCheckRequest): Promise<DoneCheckReport> {
+    // Card W09 second slice: a check of the changed test files is not carried to a remote host (the wire has no list of them back), so it is never run there as a bare command; the dispatcher finds no list and says the check could
+    // not be made (fail closed).
+    const request: DoneCheckRequest = given.checks.some((c) => c.changedTests === true) ? { ...given, checks: given.checks.filter((c) => c.changedTests !== true) } : given;
     const requestId = `wsr-${base32(randomBytes(20)).slice(0, 20)}`;
     const waitMs = Math.min(3_600_000, request.checks.reduce((n, c) => n + c.timeoutMs, 0) + 60_000);
     const answer = await this.remote.askVerify(this.by, this.hostId, requestId, attemptId, scope, request, { waitMs });

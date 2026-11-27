@@ -185,6 +185,13 @@ export class LocalWorkspaces {
     return { ...(await this.#options.git.doneState({ gitDir: where.gitDir, checkout: where.checkout, paths })), agentCommits: false };
   }
 
+  /** Card W09 second slice: the test files the task's change adds or changes, their test names and built files, and its PLAN.md (`GitBridge.changedTests`). `undefined`: this host holds no checkout for the task. */
+  async changedTests(call: { readonly taskId: string; readonly projectId: string }): Promise<Awaited<ReturnType<GitBridge["changedTests"]>> | undefined> {
+    const where = this.locate(call);
+    if (where === undefined) return undefined;
+    return this.#options.git.changedTests({ gitDir: where.gitDir, checkout: where.checkout });
+  }
+
   /**
    * What a submit of the task's work is checked against (card H12n, `GitBridge.submitView`): the checkout's base, the landing branch's head, the files the agent changed and the files the landing branch changed since the base.
    * The landing branch's head is the one the author's refresh goes to (card H12p follow-up, `WorkspaceHost.landingHead`): the owner's landing branch when one is set, else the shared repository's checked-out head. A landing

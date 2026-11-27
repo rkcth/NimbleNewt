@@ -721,17 +721,31 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
  * sandbox (`localWorkerParts(...).checks`). A check that throws is reported `not-run` with the reason; the controller never takes it as passed.
  */
 export function doneVerifier(parts: {
-  readonly workspaces: { doneState(scope: { readonly taskId: string; readonly projectId: string }, paths: readonly string[]): Promise<{ uncommitted: readonly string[]; uncommittedCount: number; ahead: number; changed: number; agentCommits?: boolean; evidence: readonly { path: string; present: boolean; why?: string }[] } | undefined> };
+  readonly workspaces: {
+    doneState(scope: { readonly taskId: string; readonly projectId: string }, paths: readonly string[]): Promise<{ uncommitted: readonly string[]; uncommittedCount: number; ahead: number; changed: number; agentCommits?: boolean; evidence: readonly { path: string; present: boolean; why?: string }[] } | undefined>;
+    /** Card W09 second slice (`LocalWorkspaces.changedTests`). Absent: a check with `changedTests` is not run, and the controller cannot take it as passed. */
+    changedTests?(scope: { readonly taskId: string; readonly projectId: string }): Promise<ChangedTests | undefined>;
+  };
   readonly checks: { run(attemptId: string, check: HostCheck): Promise<HostCheckResult> };
-}): (attemptId: string, scope: { readonly taskId: string; readonly projectId: string }, request: { readonly checks: readonly { readonly name: string; readonly run: readonly string[]; readonly timeoutMs: number }[]; readonly evidence: readonly string[]; readonly maxOutputBytes: number }) => Promise<{ checkout: boolean; tree?: { uncommitted: readonly string[]; uncommittedCount: number; ahead: number; changed: number; agentCommits?: boolean }; evidence?: readonly { path: string; present: boolean; why?: string }[]; checks: ({ name: string } & HostCheckResult)[] }> {
+}): (attemptId: string, scope: { readonly taskId: string; readonly projectId: string }, request: { readonly checks: readonly { readonly name: string; readonly run: readonly string[]; readonly timeoutMs: number; readonly changedTests?: boolean }[]; readonly evidence: readonly string[]; readonly maxOutputBytes: number }) => Promise<{ checkout: boolean; tree?: { uncommitted: readonly string[]; uncommittedCount: number; ahead: number; changed: number; agentCommits?: boolean }; evidence?: readonly { path: string; present: boolean; why?: string }[]; checks: ({ name: string } & HostCheckResult)[]; changedTests?: ChangedTests }> {
   return async (attemptId, scope, request) => {
     const state = await parts.workspaces.doneState(scope, request.evidence);
     const ran: ({ name: string } & HostCheckResult)[] = [];
+    let changedTests: ChangedTests | undefined;
     for (const c of request.checks) {
+      if (c.changedTests === true) {
+        // Card W09 second slice: the change's test files are listed after the checks before this one ran (the build), and run from their built files. A change with none, or with one not built, is not run: the controller
+        // judges that from the list. After the run the change is listed again, and the run counts only when the same files are there (a test that rewrites the checkout cannot swap what was run); the plan and names read then are reported.
+        const one = await runChangedTests(parts, attemptId, scope, c, request.maxOutputBytes);
+        ran.push(one.run);
+        changedTests = one.tests;
+        continue;
+      }
       try { ran.push({ name: c.name, ...(await parts.checks.run(attemptId, { run: c.run, timeoutMs: c.timeoutMs, maxOutputBytes: request.maxOutputBytes })) }); }
       catch (error) { ran.push({ name: c.name, state: "not-run", reason: safeText(error, 300) }); }
     }
-    if (state === undefined) return { checkout: false, checks: ran };
+    const withTests = <T extends object>(report: T): T & { changedTests?: ChangedTests } => (changedTests === undefined ? report : { ...report, changedTests });
+    if (state === undefined) return withTests({ checkout: false, checks: ran });
     // The checks run in the agent's own checkout while its tool call waits, so a check (or a parallel tool call) can change what the first look saw (W05 follow-up). When any check ran, the checkout is looked at again: the done never gains from a
     // change (an evidence file that is gone now is not present, a change count that fell is the smaller one) and a checkout that cannot be looked at again is not verified. Files a check only adds (build output) do not turn the first look into a failure.
     let last = state;
@@ -741,7 +755,7 @@ export function doneVerifier(parts: {
       if (again === undefined) {
         // The controller shows this after "could not be run by the host:", so it says the check did run and why its pass is not taken (second review: the bare "could not be looked at again" read as the check never running).
         const reason = "it ran and passed, but the checkout could not be looked at again after the checks ran, so the pass is not taken; calling work.end again checks again";
-        return { checkout: true, tree: { uncommitted: state.uncommitted, uncommittedCount: state.uncommittedCount, ahead: state.ahead, changed: state.changed, ...(state.agentCommits === undefined ? {} : { agentCommits: state.agentCommits }) }, evidence: state.evidence.filter((e) => !e.present), checks: ran.map((c) => (c.state === "passed" ? { name: c.name, state: "not-run" as const, reason } : c)) };
+        return withTests({ checkout: true, tree: { uncommitted: state.uncommitted, uncommittedCount: state.uncommittedCount, ahead: state.ahead, changed: state.changed, ...(state.agentCommits === undefined ? {} : { agentCommits: state.agentCommits }) }, evidence: state.evidence.filter((e) => !e.present), checks: ran.map((c) => (c.state === "passed" ? { name: c.name, state: "not-run" as const, reason } : c)) });
       }
       // Matched by path, not by place in the list: an entry the second look does not name is not known to be there now.
       const evidence: { path: string; present: boolean; why?: string }[] = [];
@@ -753,6 +767,34 @@ export function doneVerifier(parts: {
       }
       last = { ...state, ahead: Math.min(state.ahead, again.ahead), changed: Math.min(state.changed, again.changed), evidence };
     }
-    return { checkout: true, tree: { uncommitted: last.uncommitted, uncommittedCount: last.uncommittedCount, ahead: last.ahead, changed: last.changed, ...(last.agentCommits === undefined ? {} : { agentCommits: last.agentCommits }) }, evidence: last.evidence, checks: ran };
+    return withTests({ checkout: true, tree: { uncommitted: last.uncommitted, uncommittedCount: last.uncommittedCount, ahead: last.ahead, changed: last.changed, ...(last.agentCommits === undefined ? {} : { agentCommits: last.agentCommits }) }, evidence: last.evidence, checks: ran });
   };
+}
+
+/** What `LocalWorkspaces.changedTests` reports (card W09 second slice). */
+type ChangedTests = { count: number; files: { path: string; built: string | null; titles: string[] }[]; plan: { text: string } | { why: string } };
+
+/** The same files, in the same order, built from the same places. */
+const sameTests = (a: ChangedTests, b: ChangedTests): boolean => a.count === b.count && a.files.length === b.files.length && a.files.every((f, i) => f.path === b.files[i]!.path && f.built === b.files[i]!.built);
+
+/** One check with `changedTests` (card W09 second slice): list, run from the built files, list again. The report is never a pass unless the run passed with the same files before and after. */
+async function runChangedTests(
+  parts: Parameters<typeof doneVerifier>[0], attemptId: string, scope: { readonly taskId: string; readonly projectId: string },
+  c: { readonly name: string; readonly run: readonly string[]; readonly timeoutMs: number }, maxOutputBytes: number,
+): Promise<{ run: { name: string } & HostCheckResult; tests?: ChangedTests }> {
+  const notRun = (reason: string, tests?: ChangedTests): { run: { name: string } & HostCheckResult; tests?: ChangedTests } => ({ run: { name: c.name, state: "not-run", reason }, ...(tests === undefined ? {} : { tests }) });
+  if (parts.workspaces.changedTests === undefined) return notRun("this host cannot list the test files of a change");
+  let before: ChangedTests | undefined;
+  try { before = await parts.workspaces.changedTests(scope); } catch (error) { return notRun(`the test files of the change could not be listed: ${safeText(error, 200)}`); }
+  if (before === undefined) return notRun("this host holds no checkout for the task");
+  // Nothing to run, too many, or one not built: the controller says which from the list (never a pass).
+  if (before.count === 0 || before.count > before.files.length || before.files.some((f) => f.built === null)) return notRun("the change's test files cannot be run as they are", before);
+  let result: HostCheckResult;
+  try { result = await parts.checks.run(attemptId, { run: [...c.run, ...before.files.map((f) => f.built!)], timeoutMs: c.timeoutMs, maxOutputBytes }); }
+  catch (error) { return notRun(safeText(error, 300), before); }
+  let after: ChangedTests | undefined;
+  try { after = await parts.workspaces.changedTests(scope); } catch { after = undefined; }
+  if (after === undefined) return { run: result.state === "passed" ? { name: c.name, state: "not-run", reason: "the tests ran and passed, but the change could not be listed again after they ran, so the pass is not taken" } : { name: c.name, ...result }, tests: before };
+  if (!sameTests(before, after)) return { run: result.state === "passed" ? { name: c.name, state: "not-run", reason: "the tests ran and passed, but the change's test files were different after they ran, so the pass is not taken" } : { name: c.name, ...result }, tests: after };
+  return { run: { name: c.name, ...result }, tests: after };
 }

@@ -9,6 +9,7 @@
   },
   "defaults": {
     "repeats": 3,
+    "clauseTests": true,
     "timeoutMinutes": {
       "S": 60,
       "M": 120,
@@ -80,6 +81,10 @@
         "dist/chat/commands-one-line.test.js",
         "dist/chat/commands-preview.test.js",
         "dist/chat/coordinator.test.js"
+      ],
+      "doneTests": [
+        "packages/controller/dist/chat/host-move-words.test.js",
+        "packages/controller/dist/chat/invite-direct.test.js"
       ]
     },
     {
@@ -96,6 +101,10 @@
       "testFiles": [
         "dist/chat/release-owner-words.test.js",
         "dist/chat/release-words.test.js"
+      ],
+      "doneTests": [
+        "packages/controller/dist/chat/host-move-words.test.js",
+        "packages/controller/dist/chat/commands-preview.test.js"
       ]
     },
     {
@@ -118,6 +127,10 @@
         "dist/chat/grant-consequence.test.js",
         "dist/chat/policy-edit.test.js",
         "dist/chat/status.test.js"
+      ],
+      "doneTests": [
+        "packages/controller/dist/chat/host-move-words.test.js",
+        "packages/controller/dist/api/widening.test.js"
       ]
     },
     {
@@ -137,6 +150,10 @@
         "dist/api/start-integration.test.js",
         "dist/chat/landing-proposal.test.js",
         "dist/chat/release-words.test.js"
+      ],
+      "doneTests": [
+        "packages/controller/dist/chat/host-move-words.test.js",
+        "packages/controller/dist/chat/commands-preview.test.js"
       ]
     },
     {
@@ -157,6 +174,10 @@
         "dist/dispatch/first-call-hops.test.js",
         "dist/dispatch/local-worker-guards.test.js",
         "dist/dispatch/runtime-guards.test.js"
+      ],
+      "doneTests": [
+        "packages/controller/dist/api/widening.test.js",
+        "packages/controller/dist/dispatch/network.test.js"
       ]
     },
     {
@@ -184,6 +205,10 @@
         "dist/chat/grant-dates.test.js",
         "dist/chat/policy-edit.test.js",
         "dist/remote/quiet-hosts.test.js"
+      ],
+      "doneTests": [
+        "packages/controller/dist/remote/placement-settings.test.js",
+        "packages/controller/dist/api/widening.test.js"
       ]
     },
     {
@@ -202,6 +227,10 @@
         "dist/chat/standup-commands.test.js",
         "dist/standups/standups.test.js",
         "dist/status/status.test.js"
+      ],
+      "doneTests": [
+        "packages/controller/dist/chat/host-move-words.test.js",
+        "packages/controller/dist/chat/commands-preview.test.js"
       ]
     },
     {
@@ -221,6 +250,10 @@
         "dist/lifecycle/dispatch-ports.test.js",
         "dist/lifecycle/stop-sequences.test.js",
         "dist/status/status.test.js"
+      ],
+      "doneTests": [
+        "packages/controller/dist/status/shown.test.js",
+        "packages/controller/dist/lifecycle/handoff-sources.test.js"
       ]
     },
     {
@@ -247,6 +280,10 @@
         "dist/dispatch/handoff-call.test.js",
         "dist/dispatch/route-change.test.js",
         "dist/lifecycle/handoff.test.js"
+      ],
+      "doneTests": [
+        "packages/controller/dist/api/widening.test.js",
+        "packages/controller/dist/api/start-roles.test.js"
       ]
     }
   ]

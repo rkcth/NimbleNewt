@@ -200,9 +200,9 @@ test("W09 fixes: the done's check runs the task's declared package tests after t
   const task = { setup: { argv: ["node", "node_modules/typescript/bin/tsc", "--build"] }, doneTests: ["packages/controller/dist/chat/model-interpreter.test.js"] };
   assert.deepEqual(doneChecks(task), [...buildCheck(task), { name: "the task's package tests", run: [SANDBOX_NODE, "--test", "packages/controller/dist/chat/model-interpreter.test.js"], timeoutSeconds: 1800 }]);
   assert.deepEqual(doneChecks({ setup: task.setup }), buildCheck(task), "no declared tests: the build only");
-  // The task set as shipped declares none, and loads.
+  // The task set as shipped declares them for every task since card W09's second slice (scripts/pi-eval/done-tests-at-base.mjs shows each passing at the task's base and solution), and loads.
   const set = loadTaskset(join(here, "pi-eval", "taskset.json"));
-  assert.ok(set.tasks.every((t) => t.doneTests === undefined));
+  assert.ok(set.tasks.every((t) => Array.isArray(t.doneTests) && t.doneTests.length > 0));
   const dir = tmp("doneTests");
   try {
     const raw = JSON.parse(readFileSync(join(here, "pi-eval", "taskset.json"), "utf8"));

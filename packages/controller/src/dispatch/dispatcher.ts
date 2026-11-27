@@ -38,6 +38,7 @@ import { redactText } from "../security/redact.js";
 import { ACTIVITY_LIMITS, clipText } from "../activity/activity.js";
 import { quotedLine } from "../decisions/records.js";
 import { quoted } from "../status/explain.js";
+import { changedTestsOf, clausePlanProblem } from "./clause-plan.js";
 import type { Principal } from "../security/principals.js";
 import { DISPATCHER_PRINCIPAL, type TaskCredentialService } from "../security/task-credentials.js";
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
@@ -1174,7 +1175,7 @@ export class DispatcherService {
       if (path === undefined) fail(`Required evidence ${quoted(item, 200)} is not named: give it in work.end evidence as { item, path } with the file of your checkout that holds it.`);
       else wanted.push({ item, path });
     }
-    const checks = contract.checks.map((c) => ({ name: c.name, run: [...c.run], timeoutMs: (c.timeoutSeconds ?? CHECK_SECONDS) * 1000 }));
+    const checks = contract.checks.map((c) => ({ name: c.name, run: [...c.run], timeoutMs: (c.timeoutSeconds ?? CHECK_SECONDS) * 1000, ...(c.changedTests === true ? { changedTests: true } : {}) }));
     const host = this.#deps.workers.find((w) => w.hostId === b.hostId);
     let report: DoneCheckReport | undefined;
     if (host?.verify === undefined) {
@@ -1222,6 +1223,15 @@ export class DispatcherService {
       }
       for (const c of checks) {
         const r = (Array.isArray(report.checks) ? report.checks : []).find((x) => x?.name === c.name);
+        if (c.changedTests === true) {
+          // Card W09 second slice: the check runs the test files the change adds or changes. The host lists them; a host that does not (an older or a remote one) leaves the check unmade, never passed.
+          const t = changedTestsOf(report.changedTests);
+          if (t === undefined) { ran.push({ name: c.name, state: "not-run" }); cannot(`Check ${quoted(c.name, 80)} runs the test files your change adds or changes, and the host did not list them, so it could not be made.`); continue; }
+          if (t.count === 0) { ran.push({ name: c.name, state: "failed" }); fail(`Check ${quoted(c.name, 80)} runs the test files your change adds or changes, and it adds or changes none (a file named *.test.* or *.spec.*): write tests for what the task asks and end again.`); continue; }
+          if (t.count > t.files.length) { ran.push({ name: c.name, state: "failed" }); fail(`Check ${quoted(c.name, 80)} runs the test files your change adds or changes, and it has ${t.count} of them, more than the ${t.files.length} one check runs.`); continue; }
+          const unbuilt = t.files.filter((f) => f.built === null);
+          if (unbuilt.length > 0) { ran.push({ name: c.name, state: "failed" }); fail(`Check ${quoted(c.name, 80)} runs the built test files of your change, and ${unbuilt.length} had no built file after the checks before it ran (a TypeScript test under src/ runs from dist/): ${unbuilt.slice(0, DONE_VERIFY_LIMITS.files).map((f) => quoted(f.path, 120)).join(", ")}${unbuilt.length > DONE_VERIFY_LIMITS.files ? ` and ${unbuilt.length - DONE_VERIFY_LIMITS.files} more` : ""}.`); continue; }
+        }
         if (r === undefined || (r.state !== "passed" && r.state !== "failed" && r.state !== "not-run")) { ran.push({ name: c.name, state: "not-run" }); cannot(`Check ${quoted(c.name, 80)} was not run by the host.`); continue; }
         ran.push({ name: c.name, state: r.state, ...(r.exitCode === undefined ? {} : { exitCode: r.exitCode }), ...(r.timedOut === true ? { timedOut: true } : {}), ...(typeof r.ms === "number" && Number.isFinite(r.ms) ? { ms: Math.max(0, Math.round(r.ms)) } : {}) });
         if (r.state === "passed") continue;
@@ -1232,6 +1242,10 @@ export class DispatcherService {
         const tail = out.length > DONE_VERIFY_LIMITS.output ? out.slice(out.length - DONE_VERIFY_LIMITS.output) : out;
         fail(`Check ${quoted(c.name, 80)} failed: ${how}. ${tail === "" ? "It wrote nothing." : `The end of its output (quoted): ${quoted(tail, DONE_VERIFY_LIMITS.output + 20)}.`}`);
       }
+      // Card W09 second slice: with clauses in the contract and a check of the changed tests, PLAN.md must map each clause to a test of the change. No clauses: the done check is as before.
+      const tests = contract.checks.some((c) => c.changedTests === true) ? changedTestsOf(report.changedTests) : undefined;
+      const plan = tests === undefined ? undefined : clausePlanProblem(contract.acceptanceCriteria ?? [], tests);
+      if (plan !== undefined) fail(plan);
     }
     const state: DoneVerification["state"] = failures.length === 0 ? "passed" : notChecked === failures.length ? "unknown" : "failed";
     const at = this.#runner.now();
@@ -1255,8 +1269,8 @@ export class DispatcherService {
   }
 
   /** The contract a done is checked against: the one stored now, except that a change made by the attempt's own agent after the attempt began does not count (the agent cannot loosen its own checks); `undefined`: none stored. */
-  async #doneContract(b: DispatchBody): Promise<{ version: number; requiredEvidence: readonly string[]; checks: readonly { name: string; run: readonly string[]; timeoutSeconds?: number }[]; expectedResult?: string; acceptanceCriteria?: readonly string[] } | undefined> {
-    type Stored = { version?: number; changedBy?: string; requiredEvidence?: readonly string[]; checks?: readonly { name: string; run: readonly string[]; timeoutSeconds?: number }[]; expectedResult?: string; acceptanceCriteria?: readonly string[] };
+  async #doneContract(b: DispatchBody): Promise<{ version: number; requiredEvidence: readonly string[]; checks: readonly { name: string; run: readonly string[]; timeoutSeconds?: number; changedTests?: boolean }[]; expectedResult?: string; acceptanceCriteria?: readonly string[] } | undefined> {
+    type Stored = { version?: number; changedBy?: string; requiredEvidence?: readonly string[]; checks?: readonly { name: string; run: readonly string[]; timeoutSeconds?: number; changedTests?: boolean }[]; expectedResult?: string; acceptanceCriteria?: readonly string[] };
     let c = (await this.#runner.get("task-contract", b.taskId))?.body as unknown as Stored | undefined;
     if (c === undefined) return undefined;
     const bare = (id: string | undefined): string => (id ?? "").replace(/^agent:/, "");
@@ -2989,7 +3003,7 @@ export class DispatcherService {
       if (c === undefined || (c.requiredEvidence.length === 0 && c.checks.length === 0)) return "";
       const evidence = c.requiredEvidence.length === 0 ? "" : ` Name each evidence item the task requires in work.end evidence as { item, path }, with the file of your checkout that holds it: ${c.requiredEvidence.slice(0, 10).map((e) => quoted(e, 120)).join(", ")}${c.requiredEvidence.length > 10 ? ` and ${c.requiredEvidence.length - 10} more` : ""}.`;
       const checks = c.checks.length === 0 ? "" : ` The host then runs these checks in your sandbox, and each must pass: ${c.checks.map((x) => quoted(x.name, 80)).join(", ")}.`;
-      return `\n\nWhen you end with work.end done, the controller checks your work before it is taken: your checkout must hold your change against the task's base (your PLAN.md does not count; you do not commit it; what the checkout holds is what is checked, and it is committed after review).${evidence}${checks} A done that does not pass is refused with the list of what failed.`;
+      return `\n\nWhen you end with work.end done, the controller checks your work before it is taken: your checkout must hold your change against the task's base (your PLAN.md does not count; you do not commit it; what the checkout holds is what is checked, and it is committed after review).${evidence}${checks}${clauseNote(c)} A done that does not pass is refused with the list of what failed.`;
     } catch { return ""; }
   }
 
@@ -3941,6 +3955,20 @@ type AdvanceOutcome = { kind: "started" } | { kind: "waiting"; capReason?: strin
 
 /** A limit of 0 states no limit; a limit that is set is used up when what was spent (and what may have been) reaches it. */
 const exhausted = (limit: number, used: number): boolean => limit > 0 && used >= limit;
+
+/**
+ * Card W09 second slice: what the done note adds for a contract with a check of the changed tests: which files that check runs and, with clauses, how PLAN.md maps each to a test. The clauses are the contract's words, quoted and
+ * cut (at most 50 of 100 characters each: the agent has them whole in the task's description). Empty without such a check.
+ */
+function clauseNote(c: { readonly checks: readonly { readonly name: string; readonly changedTests?: boolean }[]; readonly acceptanceCriteria?: readonly string[] }): string {
+  const check = c.checks.find((x) => x.changedTests === true);
+  if (check === undefined) return "";
+  const runs = ` The check ${quoted(check.name, 80)} runs the test files your change adds or changes (named *.test.* or *.spec.*; a TypeScript one from its built file, src/ becoming dist/), so a done needs tests of yours that pass.`;
+  const criteria = c.acceptanceCriteria ?? [];
+  if (criteria.length === 0) return runs;
+  const listed = criteria.slice(0, 50).map((x, i) => `C${i + 1} ${quoted(x, 100)}`).join("; ");
+  return `${runs} The contract has ${criteria.length} clause(s), in this order: ${listed}. Your PLAN.md must hold, for each, a ticked step that starts with its number and names a test file of your change and one of its tests by name, in quotes, as in that file: - [x] C1: ... path/to/x.test.ts "its test name".`;
+}
 
 /** The default time of a contract check, in seconds (`CONTRACT_LIMITS.checkSeconds`). */
 const CHECK_SECONDS = 600;

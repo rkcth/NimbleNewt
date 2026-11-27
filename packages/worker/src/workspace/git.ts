@@ -11,6 +11,7 @@ import { WorkspaceError } from "./errors.js";
 import { collisionKey, fold, splitRelative, touchesGit } from "./names.js";
 import { BLOCK_REASON, CONTRIBUTION_LIMITS, asksSignOff, instructionKind, instructionOrder, instructionText, isIgnoreRuleFile, isIntended, isNimbleNewtState, readIntended, shortReason, unfitName, type ContributionBlock, type InstructionKind } from "./contribution.js";
 import { NOFOLLOW, openedAt, resolveSafe, sameFile } from "./paths.js";
+import { CLAUSE_TEST_LIMITS, builtCandidate, isTestFile, testTitles } from "./clause-tests.js";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 
@@ -517,6 +518,59 @@ export class GitBridge {
       else evidence.push({ path, present: true });
     }
     return { uncommitted: uncommitted.slice(0, DONE_STATE_LIMITS.named), uncommittedCount: uncommitted.length, ahead: Number.isSafeInteger(ahead) ? ahead : 0, changed, evidence };
+  }
+
+  /**
+   * Card W09 second slice: the test files the agent's change adds or changes against the task's base, for a done check with `changedTests`, read only. The change is the checkout as it stands (committed or not, not ignored: a
+   * throwaway index filled from the base and then with the checkout, as `doneState`); a path counts when its name is a test file's (`isTestFile`) and it is added or modified (a deleted test is not run). At most
+   * `CLAUSE_TEST_LIMITS.files` are listed, in path order (`count` is all of them). For each: the test names it declares (from the change's own blob, at most `fileBytes` read; a link or a larger file gives none) and the
+   * file a check runs (`builtCandidate`), which must be a plain file of the checkout now (opened without following a link; `null` otherwise). And the text of PLAN.md at the top of the change (in any letter case, a plain
+   * file of at most `planBytes`), or why it could not be read.
+   */
+  async changedTests(options: { gitDir: string; checkout: string }): Promise<{ count: number; files: { path: string; built: string | null; titles: string[] }[]; plan: { text: string } | { why: string } }> {
+    await this.#neutralAttributes(options.gitDir);
+    const base = await this.#base(options.gitDir);
+    const index = join(options.gitDir, `nn-index-${randomBytes(6).toString("hex")}`);
+    let tree: string;
+    let paths: string[];
+    try {
+      await this.#run(["read-tree", base], { gitDir: options.gitDir, env: { GIT_INDEX_FILE: index } });
+      await this.#run(["add", "-A"], { gitDir: options.gitDir, workTree: options.checkout, env: { GIT_INDEX_FILE: index } });
+      paths = (await this.#run(["diff", "--cached", "--name-only", "-z", "--no-renames", "--diff-filter=AM", base], { gitDir: options.gitDir, env: { GIT_INDEX_FILE: index } })).stdout.split("\0").filter((p) => p !== "" && isTestFile(p));
+      tree = (await this.#run(["write-tree"], { gitDir: options.gitDir, env: { GIT_INDEX_FILE: index } })).stdout.trim();
+    } finally { await rm(index, { force: true }); }
+    if (!/^[0-9a-f]{40,64}$/.test(tree)) throw new WorkspaceError("invalid_path", "the checkout's tree could not be read");
+    paths.sort();
+    const entryOf = async (path: string): Promise<{ mode: string; type: string; object: string; size: number } | undefined> => {
+      const listed = (await this.#run(["--literal-pathspecs", "ls-tree", "-l", "-z", tree, "--", path], { gitDir: options.gitDir })).stdout.split("\0").filter(Boolean);
+      return listed.map((l) => { const tab = l.indexOf("\t"); const [mode, type, object, size] = l.slice(0, tab).split(/\s+/); return { mode: mode ?? "", type: type ?? "", object: object ?? "", size: Number.parseInt(size ?? "", 10), path: l.slice(tab + 1) }; }).find((e) => e.path === path);
+    };
+    const plainFile = (e: { mode: string; type: string } | undefined): boolean => e !== undefined && e.type === "blob" && (e.mode === "100644" || e.mode === "100755");
+    const files: { path: string; built: string | null; titles: string[] }[] = [];
+    for (const path of paths.slice(0, CLAUSE_TEST_LIMITS.files)) {
+      const entry = await entryOf(path);
+      let titles: string[] = [];
+      if (plainFile(entry) && entry!.size <= CLAUSE_TEST_LIMITS.fileBytes && OBJECT.test(entry!.object)) titles = testTitles((await this.#blobBuffer(options.gitDir, entry!.object)).toString("utf8"));
+      const candidate = builtCandidate(path);
+      let built: string | null = null;
+      if (candidate !== undefined) {
+        // The built file is looked up in the checkout itself (build output is usually ignored, so it is not in the change): a plain file reached without a link, or none.
+        const safe = await resolveSafe(options.checkout, candidate).catch(() => undefined);
+        if (safe !== undefined && safe.exists === "file") built = candidate;
+      }
+      files.push({ path, built, titles });
+    }
+    // PLAN.md at the top, in any letter case (as `doneState` leaves it out).
+    const top = (await this.#run(["ls-tree", "-l", "-z", tree], { gitDir: options.gitDir })).stdout.split("\0").filter(Boolean)
+      .map((l) => { const tab = l.indexOf("\t"); const [mode, type, object, size] = l.slice(0, tab).split(/\s+/); return { mode: mode ?? "", type: type ?? "", object: object ?? "", size: Number.parseInt(size ?? "", 10), path: l.slice(tab + 1) }; })
+      .filter((e) => e.path.toLowerCase() === PLAN_FILE.toLowerCase());
+    let plan: { text: string } | { why: string };
+    if (top.length === 0) plan = { why: `there is no ${PLAN_FILE} at the top of your checkout (or an ignore rule hides it)` };
+    else if (top.length > 1) plan = { why: `there is more than one ${PLAN_FILE} at the top of your checkout, in different letter cases` };
+    else if (!plainFile(top[0]) || !OBJECT.test(top[0]!.object)) plan = { why: `${PLAN_FILE} is not a plain file` };
+    else if (!(top[0]!.size <= CLAUSE_TEST_LIMITS.planBytes)) plan = { why: `${PLAN_FILE} is larger than ${CLAUSE_TEST_LIMITS.planBytes} bytes` };
+    else plan = { text: (await this.#blobBuffer(options.gitDir, top[0]!.object)).toString("utf8") };
+    return { count: paths.length, files, plan };
   }
 
   /**

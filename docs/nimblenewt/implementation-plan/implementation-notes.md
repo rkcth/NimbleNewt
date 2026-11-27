@@ -20995,3 +20995,55 @@ Merged origin/main e9a76804 first (clean, no conflicts).
 - A path whose name holds a credential is returned as written in `files` and `blocked` (only verdicts are redacted). It needs the controller boundary's scrubber when wired.
 - Case-fold duplicates inside a contribution are judged one by one, not refused.
 - The intended list matches exact spellings (Unicode form differences fail closed).
+
+## W09 second slice: the done check per contract clause (Claude agent, Opus 5.5, 2026-11-27 EST; branch `card-w09-s2`; card W09 NOT flipped; task-plan files unchanged; not pushed; no workflow dispatched; no model or network call made)
+
+**Why this slice.** The slice was fixed by an Opus analysis of the W09 runs. On the command-line bench there were 10 false dones, and 2 more on the worker. Each missed exactly one contract clause while the agent's own tests passed. Examples: quote-lines held-out test 3, "a long name is cut between whole characters and whole escapes", and grant-proposals test 1. No bench task declared `doneTests` (lib/worker-run.mjs `doneChecks`), so the done check only checked the build. This slice is offline and model-free, and it needs no live server. W09 stays planned: this is worker-quality work, so the blocker rule does not apply.
+
+**What was built.**
+- (a) **Bench: done tests per task.** Every task in `scripts/pi-eval/taskset.json` now declares `doneTests`: two existing controller tests from the same folders as the held-out files. None is held out, and none is changed by the solution (the task set's loader still refuses held-out names). The new `scripts/pi-eval/done-tests-at-base.mjs` prepares each checkout the way the bench does (`prepareCheckout`), builds it with the task's setup and runs the declared tests from the checkout's root, as the done check runs them in the sandbox. It was run model-free under the offline guard through the test slot: **18 of 18 pass**, all 9 tasks at both their base and their solution. So a correct done is never refused by these tests.
+  - The task set also opts in to the clause check: `defaults.clauseTests: true`, read by `lib/taskset.mjs` and refused unless it is a boolean.
+- (b) **Product: the done check runs the change's own tests (opt-in per contract).** A contract check may carry `changedTests: true`. Only one check per contract may; `false`, any other value or a second one is refused (`planning/contracts.ts parseChecks`). The flag sits inside a check item, not in a new `contract.set` argument, because the interpreter prompt lists each operation's argument names and is at 156,553 of its 156,560 characters. The prompt is unchanged (measured 156,553; prompt-room passes).
+  - At a done, the host does four things (`worker/host/local.ts runChangedTests`). It lists the test files the change adds or changes against the base, after the checks before this one have run (the build). Then it runs the check's command with the built files appended. Then it lists them again. A pass counts only if the same files were there before and after.
+  - The list comes from `GitBridge.changedTests`. It reads a throwaway index of the checkout, as `doneState` does. It counts `*.test.*` and `*.spec.*` files that are added or modified, not deleted. It lists at most 50 and counts all of them. It also reports the test names each file declares, read from the change's blob (at most 1 MiB; a link gives none). The built file follows the rule that a TypeScript test under the nearest `src/` runs from `dist/`, and that file must be a plain file reached without a link. Finally it reports PLAN.md's text (at most 64 KiB).
+  - The dispatcher judges what the host reported (`verifyDone`, `dispatch/clause-plan.ts changedTestsOf`). It fails the done in four cases: the change has no test file, it has more than 50, a test file was not built, or the run failed (the end of the output is quoted and bounded, as for any check).
+  - If the host did not list the files (an older host, or a remote one: `remote/host.ts` never carries the check over the wire, so it never runs there as a bare command), the check could not be made. That gives `unknown`, never a pass.
+  - A refused done goes back to the agent as the answer of its work.end, with the numbered failures. It counts toward the W03 go-ons as any refused done does, and it is never a finish.
+- (c) **PLAN.md maps each clause to a test.** When the contract also has `acceptanceCriteria`, PLAN.md needs one ticked step per criterion, in the contract's order. The step starts with the clause's number (`- [x] C3: ...`, optionally inside emphasis or brackets). It names a test file of the change, and one of that file's tests by name, in quotes. Escapes undone are accepted.
+  - All gaps are reported in one bounded line (`clausePlanProblem`, at most 880 characters). Each clause shown is quoted, and whole problems are dropped and counted before any cut. The gaps are: no step, not ticked, no test file of the change, or no test name.
+  - A contract with no criteria gets the old behaviour (only the tests are checked). An unreadable plan fails closed.
+  - The dispatcher's done note at the start names the check and how it picks files. It lists the clauses as C1 to Cn (up to 50, each quoted at 100 characters) and gives the step's form.
+- **Bench wiring.** This is the minimum, since another implementer is editing the measurement files.
+  - `lib/worker-run.mjs doneChecks` adds "the tests your change adds or changes" (`changedTests: true`) after the build and the package tests, but only for a task that opts in.
+  - The run passes the task's CONTRACT bullets (new `lib/contract-clauses.mjs`, each cut to the contract's 500 characters) as `acceptanceCriteria`.
+  - `worker-embedder.mjs runW09Task` stores them with the checks. `attemptSummary`, `stats.mjs` and the outcome rules are untouched.
+- (d) **One completion-rule line** (`COMPLETION_BOUNDARY_RULE`, the third group, pinned word for word): "For a rule that says never or whatever the input, write a test that sweeps every offset across its limit."
+  - The rules grew from 2,504 to 2,611 characters, and the system text from 2,537 to 2,644. `WORKER_FIXED_PART` now records 2,644. The system-text budget went from 2,600 to 2,648, so the floor is 22,248, exactly the most that still starts a task on 36,864.
+  - The owner is still told about 7,400 tokens and 36,864, so `FIXED_PART_WORDS` and the interpreter prompt did not change. `start-route-change` now expects the floor at 22,248, and the route-settings comment says so. The next addition must first make room.
+  - fixed-part-budget, c06b-cache-stability, h12e-pi-cache, w06-completion-rules and prompt-cache pass. The prefix changes once for every agent (one re-read of the cached prefix), as any rule change does.
+
+**ASSUMPTION lines.**
+- ASSUMPTION: the opt-in lives on a check (`changedTests`) and not in a new contract field, so the interpreter prompt and its chat wording need no change. The owner sets it through the existing `contract.set` `checks`, which free-form chat already reaches. No new owner control was needed.
+- ASSUMPTION: at a landing (card P09) a `changedTests` check runs as written, with no files appended, and landing checks run on a fresh export without a build. This is recorded on the field. Making landings expand it is not part of this slice.
+- ASSUMPTION: "a test that exists in the diff" means a test file the change adds or modifies plus one test name that file declares (`test`, `it`, `describe` or `suite`, as written). The file must be named in the step and the name quoted. A deleted test does not count.
+- ASSUMPTION: in the bench, the clauses are the bullets of the task text's CONTRACT section, cut to 500 characters. The agent has them whole in its task description.
+
+**Proof.**
+- New tests:
+  - controller `dispatch/clause-plan.test.ts` (pure judging; hostile text quoted and redacted; every count of failing clauses from 1 to 50 stays within bound; large hostile plans stay fast; the report's shape and bounds).
+  - `dispatch/clause-done.test.ts` (four backends: the start note, each gap refused with its own line and the go-ons, a host that does not list the files gives unknown, no criteria gives the old behaviour, contract validation).
+  - worker `workspace/clause-tests.test.ts` (test-file names, built paths, test names in three quote styles, surrogate-safe cuts at every offset, a megabyte of hostile text, and on a real git checkout: added, changed and deleted files, ignored dist, a link, a large file, letter cases and bounds of PLAN.md, the 50-file bound).
+  - `host/clause-done-check.test.ts` (order build, list, run, list, look; not run when there is nothing, too much or something unbuilt; a pass not taken when the files differ or cannot be listed again; a host without the list).
+  - remote `dispatch-carry` (the check is not carried).
+  - pi-adapter `completion-rules` (the pin).
+  - `scripts/w09-clause-bench.test.mjs` (CONTRACT parsing at every length across the bound; the shipped set opts in; and end to end through the real worker in bubblewrap with a scripted endpoint: a done with no test of its own is refused, then a PLAN.md that leaves C2 unmapped is refused, each with its reason as the work.end answer, then the full mapping passes; verifications failed, failed, passed; a verified finish).
+- Deliberate breakages: see the counts in the report (each restored by sha256).
+
+**Limits and what remains.**
+- The clause check is file- and name-level. It shows the agent wrote and ticked a test per clause, but it cannot show that the test really sweeps the clause's edge. The new rule line asks for that, and only the held-out tests measure it.
+- The effect on false dones is a W09 real-model question: Radiance runs with this check are not part of this slice.
+- The built-file rule is the TypeScript `src/` to `dist/` layout. Other layouts list no built file and the done fails closed.
+- The done tests and the changed tests run from the checkout's root (cwd /work) without the offline guard. The 18 base and solution runs show the declared ones pass that way outside the sandbox. The sandbox has no network.
+- Remote hosts cannot pass a `changedTests` check: the wire does not carry the list.
+- Landings do not expand the check.
+- The done note can list up to 50 clauses of 100 characters each (about 6,000 characters in the first message).

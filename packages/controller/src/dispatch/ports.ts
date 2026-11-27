@@ -185,7 +185,8 @@ export interface WorkProgress {
  * after another, each cut off at its time and output limit; the agent has no part in it.
  */
 export interface DoneCheckRequest {
-  readonly checks: readonly { readonly name: string; readonly run: readonly string[]; readonly timeoutMs: number }[];
+  /** `changedTests` (card W09 second slice): the host appends the test files the change adds or changes to `run` (see `ContractCheck.changedTests`) and reports them in `DoneCheckReport.changedTests`. */
+  readonly checks: readonly { readonly name: string; readonly run: readonly string[]; readonly timeoutMs: number; readonly changedTests?: boolean }[];
   /** Paths (relative to the checkout, `/`-separated) that must be files in the checkout's last commit. */
   readonly evidence: readonly string[];
   /** Each check's standard output and error are cut at this many bytes. */
@@ -239,6 +240,19 @@ export interface DoneCheckReport {
   /** Whether each evidence path is a plain, non-empty file of the checkout as it stands (not ignored; what a submission would carry). */
   readonly evidence?: readonly { readonly path: string; readonly present: boolean; readonly why?: string }[];
   readonly checks: readonly DoneCheckRun[];
+  /** Card W09 second slice: what the host found for the check with `changedTests` (absent when the request has none, or the host does not look: the controller then cannot judge that check). */
+  readonly changedTests?: ChangedTestsReport;
+}
+
+/**
+ * The test files an agent's change adds or changes against the task's base, as the host saw them after the check ran (card W09 second slice). `count` is all of them; at most `files` are listed (bounded by the host). `built` is the file the
+ * check ran (the path itself for a JavaScript test, the built file for a TypeScript one), null when none was found. `titles` are the test names the file declares (`test(...)`, `it(...)`, `describe(...)`, `suite(...)`), as written,
+ * bounded. `plan` is the text of PLAN.md at the top of the checkout (bounded), or why it could not be read.
+ */
+export interface ChangedTestsReport {
+  readonly count: number;
+  readonly files: readonly { readonly path: string; readonly built: string | null; readonly titles: readonly string[] }[];
+  readonly plan: { readonly text: string } | { readonly why: string };
 }
 
 /** What a submit is checked against (card H12n): the checkout's base, the landing branch's head, the files the agent changed against the base and the files the landing branch changed since. */

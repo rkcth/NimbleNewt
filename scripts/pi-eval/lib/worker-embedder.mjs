@@ -156,7 +156,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * Gives one task to an agent on the running installation and waits until its first attempt has finished (W03's readmits and W11's wakes happen inside that attempt) or `timeoutMs` passes. Returns what the controller
  * recorded: the attempt (state, outcome, verifications, report, nudges, early stops), where the agent's checkout is, and whether the wall limit was reached (the attempt is then left to the caller, which closes the controller).
  *
- * @param {{ repository: string, title: string, description: string, checks?: { name: string, run: string[], timeoutSeconds: number }[], requiredEvidence?: string[], timeoutMs: number, pollMs?: number, tag?: string }} t
+ * @param {{ repository: string, title: string, description: string, checks?: { name: string, run: string[], timeoutSeconds: number, changedTests?: true }[], requiredEvidence?: string[], acceptanceCriteria?: string[], timeoutMs: number, pollMs?: number, tag?: string }} t
  */
 export async function runW09Task(inst, t) {
   const c = inst.controller;
@@ -171,7 +171,9 @@ export async function runW09Task(inst, t) {
   const taskId = (await s.projects.createTask({ commandId: `${tag}-t`, actor: owner.id, projectId, title: t.title, description: t.description })).id;
   const checks = t.checks ?? [];
   const evidence = t.requiredEvidence ?? [];
-  if (checks.length > 0 || evidence.length > 0) await s.contracts.setContract(owner, { commandId: `${tag}-contract`, taskId, expectedVersion: 0, requiredEvidence: evidence, checks });
+  // W09 second slice: the task's CONTRACT bullets as the contract's criteria (only with checks: the clause check is part of the done check).
+  const criteria = checks.length > 0 && Array.isArray(t.acceptanceCriteria) ? t.acceptanceCriteria : [];
+  if (checks.length > 0 || evidence.length > 0) await s.contracts.setContract(owner, { commandId: `${tag}-contract`, taskId, expectedVersion: 0, requiredEvidence: evidence, checks, ...(criteria.length === 0 ? {} : { acceptanceCriteria: criteria }) });
   await s.projects.transitionTask({ commandId: `${tag}-ready`, actor: owner.id, taskId, expectedRevision: (await s.projects.getTask(taskId)).revision, to: "ready" });
   const startedAt = Date.now();
   await s.assignments.assignTask({ commandId: `${tag}-assign`, actor: owner.id, taskId, owner: { kind: "agent", id: agentId } });

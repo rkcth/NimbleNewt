@@ -43,6 +43,12 @@ export interface ContractCheck {
   readonly run: readonly string[];
   /** How long it may run, in seconds (default `CONTRACT_LIMITS.checkSeconds`). */
   readonly timeoutSeconds?: number;
+  /**
+   * Card W09 second slice, opt-in: at a done, the host appends to `run` the test files the agent's change adds or changes against the task's base (named `*.test.*` or `*.spec.*`; a TypeScript one by its built file, `src/` becoming
+   * `dist/`), after the checks before it ran; a change with no such file, or one not built, does not pass. With `acceptanceCriteria`, the agent's PLAN.md must also hold one ticked step per criterion (`- [x] C<n>: ...`) naming a
+   * test file of the change and one of its tests by name. At most one check of a contract has it. A landing runs the check as written, with no files appended.
+   */
+  readonly changedTests?: true;
 }
 
 export interface ContractBody extends ContractFields {
@@ -92,11 +98,12 @@ export function parseChecks(v: unknown, field = "checks"): ContractCheck[] {
   if (!Array.isArray(v)) return invalid(field, "must be a list");
   if (v.length > CONTRACT_LIMITS.checks) return invalid(field, `must have at most ${CONTRACT_LIMITS.checks} entries`);
   const names = new Set<string>();
+  let withTests = false;
   return v.map((c, i) => {
     const at = `${field}[${i}]`;
     if (c === null || typeof c !== "object" || Array.isArray(c)) return invalid(at, "must be an object with name, run and optionally timeoutSeconds");
     const o = c as Record<string, unknown>;
-    for (const k of Object.keys(o)) if (k !== "name" && k !== "run" && k !== "timeoutSeconds") invalid(`${at}.${k}`, "is not a check field (name, run, timeoutSeconds)");
+    for (const k of Object.keys(o)) if (k !== "name" && k !== "run" && k !== "timeoutSeconds" && k !== "changedTests") invalid(`${at}.${k}`, "is not a check field (name, run, timeoutSeconds, changedTests)");
     const name = text(o["name"], `${at}.name`, { min: 1, max: CONTRACT_LIMITS.checkName });
     if (names.has(name)) invalid(`${at}.name`, "is already the name of another check");
     names.add(name);
@@ -105,7 +112,11 @@ export function parseChecks(v: unknown, field = "checks"): ContractCheck[] {
     const args = (run as unknown[]).map((a, j) => text(a, `${at}.run[${j}]`, { min: j === 0 ? 1 : 0, max: CONTRACT_LIMITS.checkArg }));
     const t = o["timeoutSeconds"];
     if (t !== undefined && (typeof t !== "number" || !Number.isSafeInteger(t) || t < 1 || t > CONTRACT_LIMITS.checkMaxSeconds)) invalid(`${at}.timeoutSeconds`, `must be a whole number from 1 to ${CONTRACT_LIMITS.checkMaxSeconds}`);
-    return { name, run: args, ...(t === undefined ? {} : { timeoutSeconds: t as number }) };
+    // Card W09 second slice: `changedTests` is true or left out (false is refused, not taken as "off", so a typo cannot look like a choice), and one check of a contract at most has it.
+    const ct = o["changedTests"];
+    if (ct !== undefined && ct !== true) invalid(`${at}.changedTests`, "must be true or left out");
+    if (ct === true) { if (withTests) invalid(`${at}.changedTests`, "is already set on another check: one check at most runs the changed test files"); withTests = true; }
+    return { name, run: args, ...(t === undefined ? {} : { timeoutSeconds: t as number }), ...(ct === true ? { changedTests: true as const } : {}) };
   });
 }
 

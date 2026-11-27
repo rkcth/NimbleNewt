@@ -41,6 +41,11 @@ export const COMPLETION_INTRO = "How to finish your work (these rules hold for e
 export const COMPLETION_PLAN_RULE = `Keep a ${PLAN_FILE} at the top of your checkout, written before you change anything: one Markdown checkbox line (- [ ] ...) per step, in order. Keep each step small: one change and its tests. Tick a step (- [x] ...) as soon as it is done and checked, and keep the file up to date as you go, so you and anyone after you can see what is left.`;
 /** No commit; what the done check looks at (W05; the plan file is not counted as a change, W06 second review). The check runs only for a task whose contract names evidence or checks, and such a task's first prompt says so (the dispatcher's done note), so the rule is conditional. */
 export const COMPLETION_CHECK_RULE = `You do not commit: what your checkout holds when you end is your work, and it is committed after review. When the task names required evidence or checks (you are told so at the start), a done is checked before it is taken: your checkout must hold a change against the task's base other than ${PLAN_FILE} (your plan is a working note, not the work); every evidence item the task requires must be named in the work.end evidence with the file of your checkout that holds it, a plain file that is not empty; and the checks the task names are run by the host in your sandbox and must pass. A done that does not pass is refused with the list of what failed: fix what it lists and end again.`;
+/**
+ * W09 second slice: the tests a rule with no exception needs. Of the false dones measured on the W09 bench, each missed one contract clause of this kind while the agent's own tests passed: its test tried one example, not the edge. One line,
+ * as short as the fixed-part budget allows (context/fixed-part.ts: the window the owner is told stays 36,864 tokens).
+ */
+export const COMPLETION_BOUNDARY_RULE: string = "For a rule that says never or whatever the input, write a test that sweeps every offset across its limit.";
 /** How the work ends: work.end, the honest endings, never prose alone (W02 to W04). */
 export const COMPLETION_END_RULE = `End your work with ${WORK_END_TOOL} as your last call. Use result done only when every step of ${PLAN_FILE} is done and checked. If you cannot go on, end with result blocked or partial and say why in the report; never report done for work that is not done. Never end with prose alone: a reply without a tool call does not end the work, and you are asked to go on.`;
 /** Notes, the report and the second agent's questions (card W10): every ending carries a report (`work.end` refuses one without it); a done that passes W05 may be questioned by a second agent, answered with `work.answer`; an unsupported report counts toward the go-ons as a refused done does. */
@@ -53,7 +58,7 @@ export const JOB_WAKE_RULE_TEXT = "When this job ends (completed, failed, cancel
 /** Long jobs: the one turn that may end without work.end. */
 export const COMPLETION_JOB_RULE = `A job you start with ${bridgeToolName("job.start")} is the one time you may end a turn without ${WORK_END_TOOL} (your work is not ended: the attempt waits for the job). ${JOB_WAKE_RULE_TEXT}`;
 /** The groups in order. A later card appends its group here. */
-export const COMPLETION_RULE_GROUPS: readonly string[] = Object.freeze([COMPLETION_INTRO, COMPLETION_PLAN_RULE, COMPLETION_CHECK_RULE, COMPLETION_END_RULE, COMPLETION_REPORT_RULE, COMPLETION_JOB_RULE]);
+export const COMPLETION_RULE_GROUPS: readonly string[] = Object.freeze([COMPLETION_INTRO, COMPLETION_PLAN_RULE, COMPLETION_BOUNDARY_RULE, COMPLETION_CHECK_RULE, COMPLETION_END_RULE, COMPLETION_REPORT_RULE, COMPLETION_JOB_RULE]);
 /** The section's text: the groups, one paragraph each. */
 export const COMPLETION_RULES = COMPLETION_RULE_GROUPS.join("\n\n");
 /** The section's key (Pi renders it as `<nn_completion>...</nn_completion>`). */

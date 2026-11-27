@@ -21,6 +21,7 @@ import { withSlot } from "./slot.mjs";
 import { aggregate, gatesFor, renderReport } from "./stats.mjs";
 import { COMPLETION_RULES_PLACEHOLDER } from "./taskset.mjs";
 import { attemptSummary, openW09Installation, radianceOnlyFetch, runW09Task, RADIANCE_KIND } from "./worker-embedder.mjs";
+import { contractClauses } from "./contract-clauses.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const promptOf = (name) => join(here, "..", "prompts", name);
@@ -69,8 +70,10 @@ export function buildCheck(task, timeoutSeconds = 1800) {
 export function doneChecks(task, timeoutSeconds = 1800) {
   const checks = buildCheck(task, timeoutSeconds);
   const tests = Array.isArray(task.doneTests) ? task.doneTests : [];
-  if (tests.length === 0) return checks;
-  return [...checks, { name: "the task's package tests", run: [SANDBOX_NODE, "--test", ...tests.map(String)], timeoutSeconds }];
+  const own = tests.length === 0 ? checks : [...checks, { name: "the task's package tests", run: [SANDBOX_NODE, "--test", ...tests.map(String)], timeoutSeconds }];
+  // W09 second slice, for a task of a set that opts in (`clauseTests`, lib/taskset.mjs): after the build, the test files the agent's change adds or changes, run from their built files (the product's `changedTests` check); with
+  // the task's CONTRACT bullets as the contract's criteria (lib/contract-clauses.mjs) the done also needs PLAN.md to map each bullet to one of those tests. Only with a build: a TypeScript test runs from its built file.
+  return checks.length === 0 || task.clauseTests !== true ? own : [...own, { name: "the tests your change adds or changes", run: [SANDBOX_NODE, "--test"], timeoutSeconds, changedTests: true }];
 }
 
 /**
@@ -196,7 +199,8 @@ export async function runWorkerOne(ctx, task, variantName, repeat, { beforeAgent
   let agentTools = null;
   try {
     const template = await readFile(variant.prompt, "utf8");
-    const description = renderWorkerPrompt(template, { task, taskText: await readFile(task.promptPath, "utf8") });
+    const taskText = await readFile(task.promptPath, "utf8");
+    const description = renderWorkerPrompt(template, { task, taskText });
     await writeFile(join(artifacts, "prompt.md"), `${description}\n`);
     record.prompt = { sha256: createHash("sha256").update(description).digest("hex").slice(0, 16), chars: description.length };
     log(`preparing ${dir} at ${task.base.slice(0, 8)}`);
@@ -213,7 +217,7 @@ export async function runWorkerOne(ctx, task, variantName, repeat, { beforeAgent
     });
     log(`agent started on the worker (limit ${ctx.timeoutMinutes ?? task.timeoutMinutes} min, variant ${variantName}: ${variant.about})`);
     record.startedAt = new Date().toISOString();
-    const ran = await runW09Task(inst, { repository: dir, title: workerTitle(task), description, checks: doneChecks(task), timeoutMs: (ctx.timeoutMinutes ?? task.timeoutMinutes) * 60_000, tag: runId.slice(-24), ...(ctx.pollMs === undefined ? {} : { pollMs: ctx.pollMs }) });
+    const ran = await runW09Task(inst, { repository: dir, title: workerTitle(task), description, checks: doneChecks(task), ...(task.clauseTests === true ? { acceptanceCriteria: contractClauses(taskText) } : {}), timeoutMs: (ctx.timeoutMinutes ?? task.timeoutMinutes) * 60_000, tag: runId.slice(-24), ...(ctx.pollMs === undefined ? {} : { pollMs: ctx.pollMs }) });
     record.endedAt = new Date().toISOString();
     record.wallMs = ran.wallMs;
     record.timedOut = ran.timedOut;
