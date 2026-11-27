@@ -70,6 +70,45 @@ export function balancePlaces(productive: number, b: Balance): BalancePlaces {
   return { reserved, ceiling, protectedP: productive - ceiling };
 }
 
+/**
+ * An emergency borrow of the improvement reserve (card B01, second slice): the owner's explicit direction that production work (of one project when `project` is set) may take up to `places` of the
+ * places the floor keeps for improvement work, from `from` until `until`, with the owner's reason and the date by which the owner reviews it. Stored in the admission record (bounded), so it survives
+ * a restart and expires by the clock. `endedAt` is set when the owner ended it early. It never touches the ceiling, never stops anything running and never changes who owns any work.
+ */
+export interface Borrow {
+  readonly id: string;
+  readonly reason: string;
+  readonly places: number;
+  readonly project?: string;
+  readonly from: string;
+  readonly until: string;
+  readonly reviewBy: string;
+  readonly by: string;
+  readonly endedAt?: string;
+  /** How many production attempts it let in that would otherwise have been held for waiting improvement work (for the owner's review). */
+  readonly taken?: number;
+}
+/** The borrow in force for one decision, resolved from the stored `borrows` by the clock; never stored as such. */
+export interface ActiveBorrow { readonly id: string; readonly places: number; readonly project?: string; readonly until: string }
+/** When a borrow stopped counting: the owner's early end, else its expiry. */
+export const borrowEnd = (b: Pick<Borrow, "until" | "endedAt">): string => (b.endedAt !== undefined && b.endedAt < b.until ? b.endedAt : b.until);
+/** The borrow in force at `now`: the newest one that has begun and not ended. */
+export function borrowAt(borrows: readonly Borrow[], now: string): Borrow | undefined {
+  const last = borrows[borrows.length - 1];
+  return last !== undefined && last.from <= now && now < borrowEnd(last) ? last : undefined;
+}
+/**
+ * The earliest time the floor may be lent again after the newest borrow: it must stand again for at least as long as it was lent, so repeated urgency can never keep the floor away for more than half
+ * of any stretch of time. Undefined when there was no borrow.
+ */
+export function borrowRestUntil(borrows: readonly Borrow[]): string | undefined {
+  const last = borrows[borrows.length - 1];
+  if (last === undefined) return undefined;
+  const end = Date.parse(borrowEnd(last));
+  return new Date(end + Math.max(0, end - Date.parse(last.from))).toISOString();
+}
+export const borrowReason = (b: ActiveBorrow): string => `borrowed from the improvement (PC) reserve under your emergency direction ${b.id} until ${b.until}; the place comes back when this attempt ends`;
+
 export const LENT_REASON = "lent from the improvement (PC) reserve: no waiting improvement work could use the place; it comes back when this attempt ends";
 export const TURN_REASON = "took the single place kept for improvement (PC) work in turn, after waiting the patience number of times; improvement work gets it back when this attempt ends";
 
@@ -100,6 +139,8 @@ export interface Entry {
   readonly workClass?: WorkClass;
   /** Set when production work was admitted into a place reserved for improvement work because none could use it (card B01): why, in words. The place comes back when this attempt ends. */
   readonly lent?: string;
+  /** The emergency borrow (`Borrow.id`) that let this production work in: without it the work would have been held for waiting improvement work at the decision that admitted it. */
+  readonly borrowed?: string;
   readonly seq: number;
   /** How many times a later or lower-priority request was served ahead of this one. */
   readonly skipped: number;
@@ -117,11 +158,17 @@ export interface AdmissionState {
   readonly caps?: Caps;
   /** The owner's P/PC allocation as read for this decision (card B01). Never stored in this record, like `caps`. */
   readonly balance?: Balance;
+  /** The owner's emergency borrows of the improvement reserve, oldest first (at most `BORROWS_KEPT`; absent until the first one). Stored here so a decision and a borrow meet in one guarded step. */
+  readonly borrows?: readonly Borrow[];
+  /** The borrow in force for this decision (from `borrows` and the clock). Never stored, like `caps`. */
+  readonly borrow?: ActiveBorrow;
   /** The most recent requests that were taken out of the queue because they could no longer run (their host was lowered or disabled), with why. Bounded. */
   readonly withdrawn: readonly { readonly id: string; readonly reason: string; readonly at: string }[];
 }
 
 export const WITHDRAWN_KEPT = 50;
+/** How many emergency borrows the admission record keeps (the newest decides the rest rule; the others are for the owner's review). */
+export const BORROWS_KEPT = 20;
 export const EMPTY_STATE: AdmissionState = { limits: DEFAULT_LIMITS, capacity: {}, running: [], queue: [], nextSeq: 1, withdrawn: [] };
 
 export const laneOf = (c: RequestClass): Lane => (c === "productive" ? "productive" : "control");
@@ -157,6 +204,22 @@ function reserveOf(state: AdmissionState, places: BalancePlaces): { unmet: numbe
   return { unmet: Math.max(0, places.reserved - productive.filter((r) => workClassOf(r) === "PC").length), free: state.limits.productive - productive.length };
 }
 
+/** Whether the borrow in force lets this production request into the reserve: it is production and the borrow names no project or names the request's own. */
+const borrowCovers = (state: AdmissionState, entry: Entry): ActiveBorrow | undefined => {
+  const b = state.borrow;
+  return b !== undefined && laneOf(entry.class) === "productive" && workClassOf(entry) === "P" && (b.project === undefined || b.project === entry.project) ? b : undefined;
+};
+
+/**
+ * What the reserve still owes improvement work as this production request sees it: the unmet reserve, less the places the owner's emergency borrow lends when it covers the request. A place a borrowed
+ * attempt takes is no longer free, so the reserve held back (`free <= owed`) shrinks with it and the borrow never lends more than it names.
+ */
+function owedTo(state: AdmissionState, places: BalancePlaces, entry: Entry): { owed: number; unmet: number; free: number } {
+  const { unmet, free } = reserveOf(state, places);
+  const b = borrowCovers(state, entry);
+  return { owed: b === undefined ? unmet : Math.max(0, unmet - Math.min(b.places, places.reserved)), unmet, free };
+}
+
 /**
  * Everything that stands between a request and a place right now, in a fixed order. `lane`: its lane is full. `host`: its host has no room (count, CPUs or memory) at the moment. `never`: its host has no
  * declared capacity. `project`, `agent`, `fanin`: one of the owner's optional caps is full. Inquiries and reviews are not counted against a host's CPUs and memory (they are small, and must stay possible
@@ -186,10 +249,11 @@ export function blockers(state: AdmissionState, entry: Entry): Exclude<Blocker, 
     } else {
       // Production may not take a place the reserve still owes to improvement work that is waiting and could run. When no improvement work could use it, the place is lent (see `promote`).
       // With a single place production has no protected share, so a production request passed over the patience number of times is served anyway: the two kinds take turns.
-      const { unmet, free } = reserveOf(state, places);
+      // The owner's emergency borrow, when it covers this request, lends some of the reserve to it (see `owedTo`).
+      const { owed, free } = owedTo(state, places, entry);
       // Only a free place can be kept: when none is free the lane is what holds production, and its reason says so.
       const yields = places.protectedP === 0 && entry.skipped >= state.limits.patience;
-      if (unmet > 0 && free > 0 && free <= unmet && !yields && improvementCouldUse(state)) out.push("reserved");
+      if (owed > 0 && free > 0 && free <= owed && !yields && improvementCouldUse(state)) out.push("reserved");
     }
   }
   return out;
@@ -238,7 +302,11 @@ export function balanceWaitReason(state: AdmissionState, entry: Entry): string |
     const note = places.ceiling < raw ? ", less one place always kept for production" : places.ceiling > raw ? ", rounded up to one place so a ceiling above 0% lets improvement work run" : "";
     return `waiting for capacity: ${places.ceiling} improvement (PC) attempt${places.ceiling === 1 ? " is" : "s are"} already running, the most the owner's P/PC allocation allows (workClass.pcCeiling ${b.ceiling}% of ${state.limits.productive} places${note})`;
   }
-  if (held.includes("reserved")) return `waiting for capacity: the free place is kept for improvement (PC) work that is waiting (workClass.pcFloor ${b.floor}% keeps ${places.reserved} of ${state.limits.productive} places for it)`;
+  if (held.includes("reserved")) {
+    const borrow = state.borrow;
+    const note = borrow === undefined ? "" : borrowCovers(state, entry) === undefined ? `; your emergency borrow ${borrow.id} lends places only to project ${borrow.project}` : `; the ${borrow.places} place(s) your emergency borrow ${borrow.id} lends are taken`;
+    return `waiting for capacity: the free place is kept for improvement (PC) work that is waiting (workClass.pcFloor ${b.floor}% keeps ${places.reserved} of ${state.limits.productive} places for it${note})`;
+  }
   return null;
 }
 
@@ -297,8 +365,16 @@ export function promote(state: AdmissionState): { state: AdmissionState; admitte
 /** Marks production work that takes a place the reserve owes to improvement work (none could use it): the place is lent, with the reason, and comes back when the attempt ends. */
 function lentIfReserved(state: AdmissionState, entry: Entry): Entry {
   if (state.balance === undefined || laneOf(entry.class) !== "productive" || workClassOf(entry) !== "P") return entry;
-  const { unmet, free } = reserveOf(state, balancePlaces(state.limits.productive, state.balance));
-  return unmet > 0 && free <= unmet ? { ...entry, lent: improvementCouldUse(state) ? TURN_REASON : LENT_REASON } : entry;
+  const places = balancePlaces(state.limits.productive, state.balance);
+  const { owed, unmet, free } = owedTo(state, places, entry);
+  if (!(unmet > 0 && free <= unmet)) return entry;
+  const could = improvementCouldUse(state);
+  // Taken only because the owner's borrow lent it while improvement work could have used it: marked with the borrow, so the owner's review sees what the borrow did.
+  const borrow = borrowCovers(state, entry);
+  // The mark means "let in by the borrow": without it this request would have been held for the waiting improvement work at this decision. Which running attempt sits in which place is not
+  // tracked (places are counts), so the borrow's bound is the admission rule itself: production never runs in more reserved places than the borrow lends (`owedTo`).
+  if (borrow !== undefined && could && free > owed && !(places.protectedP === 0 && entry.skipped >= state.limits.patience)) return { ...entry, lent: borrowReason(borrow), borrowed: borrow.id };
+  return { ...entry, lent: could ? TURN_REASON : LENT_REASON };
 }
 
 /** A request and everything it started that is still waiting, to be dropped when it goes (a running child is left to finish or be stopped on its own). */

@@ -158,6 +158,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "capacity.limits.change": { verb: "Change the capacity caps (per project, per agent, fan-in)", mode: "propose" },
   // The host and global quotas and the limits on spawning child tasks (card H10) are resource decisions too: shown first in every profile.
   "capacity.quotas.change": { verb: "Change the host and global quotas: attempts running at once in total (productive) and on one host (perHost), places kept for stopping, review and questions (control), the waiting queue, or a host's CPUs and memory (hosts)", mode: "propose" },
+  // An emergency borrow of the improvement reserve (card B01) lends places the owner kept for improvement work: shown first in every profile; ending it too (one mode per operation).
+  "capacity.borrow": { verb: "Lend improvement places to urgent production, or end it", mode: "propose" },
   "swarm.limits.change": { verb: "Change the limits on child tasks: how many levels deep (depth), how many unfinished children one task may have at once (liveChildren), how many children in all report back to one task (totalChildren, the fan-in)", mode: "propose" },
   // How long an attempt may run and how many attempts are admitted are resource decisions: shown first in every profile (provisional). Both limits are off unless the owner turns them on.
   // Whether a task moving to another model route has its context checked first, and what is counted for a route nobody has measured (card C07f): both on unless the owner turns them off.
@@ -986,6 +988,11 @@ export const STREAM_SWITCH_EXEMPT: ReadonlySet<string> = new Set(["enable", "dis
  * The defect commands (card Q04) name a defect or a deliverable by the ID the `defects` status view showed the owner, and the outcome and severity from a fixed list the service checks: the owner says
  * "ship the guide as it is" or "that is a big problem", the interpreter chooses the ID and the value, and the service refuses an unknown or unreadable one. The finding and the reason are still the owner's own words.
  */
+/**
+ * An emergency borrow of the improvement reserve (card B01) ends and is reviewed at times the interpreter writes out from the owner's words ("until six tonight", "review it Monday morning") with the
+ * time zone; the borrow is always shown to the owner first with both times written out, and the service refuses a time that is not a full date and time. The reason is still the owner's own words.
+ */
+export const BORROW_EXEMPT: ReadonlySet<string> = new Set(["until", "reviewBy"]);
 export const DEFECT_EXEMPT: ReadonlySet<string> = new Set(["id", "deliverableId", "outcome", "severity"]);
 /**
  * The documentation commands (card Q03) name records the docs and overview views showed the owner (the obligation, the agent keeping a document, the tasks it describes, the document and code submissions)

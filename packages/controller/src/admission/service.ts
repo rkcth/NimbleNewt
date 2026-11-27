@@ -1,6 +1,6 @@
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
-import { onlyKnown, text } from "../domain/model.js";
+import { onlyKnown, projectId as checkProjectId, text } from "../domain/model.js";
 import { CommandRunner, type CommandMeta, type RunnerOptions } from "../domain/runner.js";
 import { CAPS_REF, capsOf } from "./caps.js";
 import { ConfigurationService } from "../configuration/configuration.js";
@@ -9,6 +9,7 @@ import { redactText } from "../security/redact.js";
 import type { NoActor, Principal, PrincipalBody } from "../security/principals.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import {
+  BORROWS_KEPT, borrowAt, borrowEnd, borrowRestUntil, type ActiveBorrow, type Borrow,
   DEFAULT_LIMITS, EMPTY_STATE, LIMIT_BOUNDS, WITHDRAWN_KEPT, balancePlaces, balanceWaitReason, blockers, checkLimits, workClassOf, descendants, laneOf, order, promote, waitReason, capWaitReason, type AdmissionState, type Balance, type BalancePlaces, type Capacity, type Entry, type Limits, type RequestClass, type WorkClass,
 } from "./policy.js";
 
@@ -36,8 +37,36 @@ export function balanceFromSettings(read: (keys: readonly string[]) => Promise<R
   };
 }
 
+/** The longest one emergency borrow of the improvement reserve may last, in hours (card B01; ASSUMPTION: three days, reversible). */
+export const BORROW_MAX_HOURS = 72;
+/** How long after a borrow's end its review date may lie, in days. */
+export const BORROW_REVIEW_DAYS = 30;
+const HOUR_MS = 3_600_000;
+const BORROW_ID = /^brw-[a-z2-7]{20}$/;
+/** A full ISO time (date, time and Z or an offset), as an emergency borrow's times must be given: a bare date would be read as a UTC day, which is not the owner's day. */
+const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/;
+const instant = (v: unknown, field: string): string => {
+  if (typeof v !== "string" || !INSTANT.test(v) || !Number.isFinite(Date.parse(v))) return invalid(field, "must be a date and time with its time zone, such as 2026-11-28T18:00:00-05:00");
+  return new Date(Date.parse(v)).toISOString();
+};
+
+/** One emergency borrow as the owner reviews it: what was directed and what it did (`taken`: production attempts it let in that would otherwise have been held for waiting improvement work). */
+export interface BorrowView {
+  readonly id: string; readonly reason: string; readonly places: number; readonly project?: string;
+  readonly from: string; readonly until: string; readonly reviewBy: string; readonly endedAt?: string;
+  readonly taken: number;
+  /** Of those, how many still run (places come back as attempts end; never more production in reserved places than the borrow lends). */
+  readonly running: number;
+}
+
 /** What the owner is told about the P/PC balance of admission now (card B01). */
 export interface BalanceView {
+  /** The emergency borrow in force now, with how many reserved places it lends now (never more than the floor keeps). */
+  readonly borrow?: BorrowView & { readonly lends: number };
+  /** The newest borrow that has ended, for its review, and when the floor may be lent again. */
+  readonly lastBorrow?: BorrowView & { readonly ended: string; readonly againFrom: string };
+  /** Set when the stored borrows cannot be read: nothing new is admitted until they are repaired. */
+  readonly borrowProblem?: string;
   /** The allocation in force, in percent; absent when the owner set none (nothing is reserved or capped by class). */
   readonly allocation?: Balance;
   readonly places: BalancePlaces & { readonly productive: number };
@@ -46,6 +75,8 @@ export interface BalanceView {
   /** Production attempts running in places lent from the improvement reserve, oldest first (at most `BALANCE_LENT_SHOWN`), with why. */
   readonly lent: readonly { readonly requestId: string; readonly at: string; readonly reason: string }[];
   readonly lentTotal: number;
+  /** Of `lentTotal`, those that took their place under an emergency borrow while improvement work could have used it. */
+  readonly borrowedTotal: number;
   /** Set when improvement work waits while fewer of its reserved places are in use than the allocation keeps: how many are short and why. */
   readonly unmet?: { readonly short: number; readonly cause: string };
   readonly revision: number;
@@ -58,6 +89,8 @@ const LABEL = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,119}$/;
 const HOST_ID = /^host:[a-z0-9][a-z0-9-]{0,39}$/;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const BALANCE_DAMAGED = "waiting for capacity: the owner's P/PC allocation setting cannot be read, nothing new starts until it is repaired";
+const BORROWS_DAMAGED_TEXT = "the emergency borrows stored in the admission record are damaged";
+const BORROWS_DAMAGED = `waiting for capacity: ${BORROWS_DAMAGED_TEXT}, nothing new starts until they are repaired`;
 
 /** The admission limits the owner sets as host and global quotas (card H10). The spawn limits of attempts (`depth`, `children`) and `patience` stay the start-up figures. */
 export const QUOTA_NAMES = ["productive", "perHost", "control", "queue"] as const;
@@ -160,7 +193,8 @@ export class AdmissionService {
           }
           const entry: Entry = { id, class: cls, ...(workClass === undefined ? {} : { workClass }), priority, ...(host === undefined ? {} : { host }), cpus: cpus as number, memoryMb: memoryMb as number, ...(parent === undefined ? {} : { parent }), ...(project === undefined ? {} : { project }), ...(agent === undefined ? {} : { agent }), ...(reportsTo === undefined ? {} : { reportsTo }), depth, seq: state.nextSeq, skipped: 0, at: this.#runner.now() };
           const queued: AdmissionState = { ...state, queue: [...state.queue, entry], nextSeq: state.nextSeq + 1 };
-          const after = promote({ ...queued, caps, ...(balance === undefined ? {} : { balance }) }).state;
+          // A damaged borrow record stops new requests like a damaged caps record (it throws `integrity`).
+          const after = this.#admit(queued, caps, balance);
           // The bound is on what is left waiting: a request that is admitted at once never sat in the queue.
           if (after.queue.length > state.limits.queue) throw new DomainError("unavailable", `the queue is full (${state.limits.queue} waiting); try again later`);
           return this.#built(revision, after, { request: id, class: cls });
@@ -296,6 +330,73 @@ export class AdmissionService {
   }
 
   /**
+   * The owner's emergency borrow of the improvement reserve (card B01, second slice), owner only. Starting one needs the owner's explicit direction: `reason` (1 to 300 characters), `places` (how
+   * many of the places the floor keeps; at most as many as it keeps now), `until` (a time after now, at most `BORROW_MAX_HOURS` away), `reviewBy` (on or after `until`, at most `BORROW_REVIEW_DAYS`
+   * after it) and, to lend only to one project's production work, `projectId`. Nothing else changes: the ceiling stays, nothing running is stopped, ownership never moves, and the borrow counts from
+   * this decision (waiting production work it covers is let in at once). `end: true` ends the borrow in force now; the places it lent come back as their attempts end.
+   *
+   * Repeated urgency cannot remove the floor: one borrow at a time, never extended, and after it ends the floor stands again for at least as long as it was lent before another can start. Every
+   * refusal says why and names the owner's way out (lower `workClass.pcFloor` itself, a setting the owner sees first). Stored in the admission record, so it survives a restart and expires by the clock.
+   */
+  async borrow(by: Principal, command: NoActor & { reason?: unknown; places?: unknown; projectId?: unknown; until?: unknown; reviewBy?: unknown; end?: unknown }): Promise<{ borrowId: string; ended: boolean; until: string; reviewBy: string; againFrom?: string; revision: number; replayed: boolean }> {
+    if (by.kind !== "owner" || by.taskScope !== undefined) throw new DomainError("forbidden", `${by.id} may not borrow the improvement reserve`);
+    onlyKnown(command, ["commandId", "reason", "places", "projectId", "until", "reviewBy", "end"]);
+    const ending = command.end === true;
+    if (command.end !== undefined && command.end !== true) invalid("end", "must be true to end the borrow in force, or left out to start one");
+    let payload: JsonObject;
+    if (ending) {
+      for (const k of ["reason", "places", "projectId", "until", "reviewBy"] as const) if (command[k] !== undefined) invalid(k, "is not used when ending a borrow (end true takes nothing else)");
+      payload = { end: true };
+    } else {
+      const reason = text(command.reason, "reason", { min: 1, max: 300 });
+      const places = Number.isSafeInteger(command.places) && (command.places as number) >= 1 && (command.places as number) <= LIMIT_BOUNDS.productive[1] ? command.places as number : invalid("places", `must be a whole number from 1 to ${LIMIT_BOUNDS.productive[1]}`);
+      const project = command.projectId === undefined ? undefined : checkProjectId(command.projectId);
+      const until = instant(command.until, "until");
+      const reviewBy = instant(command.reviewBy, "reviewBy");
+      if (reviewBy < until || Date.parse(reviewBy) - Date.parse(until) > BORROW_REVIEW_DAYS * 24 * HOUR_MS) invalid("reviewBy", `must be on or after until and at most ${BORROW_REVIEW_DAYS} days after it`);
+      payload = { reason: redactText(reason), places, ...(project === undefined ? {} : { project }), until, reviewBy };
+    }
+    const scoped = scopedCommandId(by.id, command.commandId);
+    const newId = derivedId("brw", scoped);
+    const result = await this.#retrying(() => this.#runner.command("admission.borrow", { commandId: scoped, actor: by.id }, async () => ({
+      payload,
+      build: async () => {
+        const loaded = await this.#load();
+        const state = await this.#prepare(loaded.state);
+        const now = this.#runner.now();
+        const borrows = this.#borrows(state);
+        const current = borrowAt(borrows, now);
+        if (ending) {
+          if (current === undefined) throw new DomainError("invalid_command", "no emergency borrow of the improvement reserve is in force now, so there is nothing to end", { field: "end" });
+          const next: AdmissionState = { ...state, borrows: borrows.map((b) => (b.id === current.id ? { ...b, endedAt: now } : b)) };
+          return this.#built(loaded.revision, await this.#promote(next), { borrow: current.id, ended: true });
+        }
+        const p = payload as { reason: string; places: number; project?: string; until: string; reviewBy: string };
+        const way = "to give improvement work less for longer, lower workClass.pcFloor itself (a setting you see first)";
+        if (current !== undefined) throw new DomainError("invalid_command", `emergency borrow ${current.id} is in force until ${borrowEnd(current)}; a borrow is never extended or stacked, and once it ends the floor stands again as long as it was lent; ${way}`, { field: "until" });
+        const rest = borrowRestUntil(borrows);
+        if (rest !== undefined && now < rest) { const last = borrows[borrows.length - 1]!; throw new DomainError("invalid_command", `the floor was lent from ${last.from} to ${borrowEnd(last)} and stands again for as long, until ${rest}, so repeated urgency cannot remove it; ${way}`, { field: "until" }); }
+        if (!(p.until > now)) invalid("until", `must be after now (${now})`);
+        if (Date.parse(p.until) - Date.parse(now) > BORROW_MAX_HOURS * HOUR_MS) invalid("until", `a borrow lasts at most ${BORROW_MAX_HOURS} hours (until ${new Date(Date.parse(now) + BORROW_MAX_HOURS * HOUR_MS).toISOString()} at the latest); ${way}`);
+        if (p.project !== undefined && (await this.#runner.get("project", p.project)) === undefined) invalid("projectId", `${p.project} is not a project`);
+        const allocation = await this.#balance();
+        const reserved = allocation === undefined ? 0 : balancePlaces(state.limits.productive, allocation).reserved;
+        if (reserved === 0) invalid("places", "there is nothing to borrow: the improvement floor (workClass.pcFloor) keeps no place now, so production is not held back by it");
+        if (p.places > reserved) invalid("places", `the floor keeps ${reserved} place(s) for improvement work; borrow at most that many, or lower workClass.pcFloor itself (a setting you see first)`);
+        const borrow: Borrow = { id: newId, reason: p.reason, places: p.places, ...(p.project === undefined ? {} : { project: p.project }), from: now, until: p.until, reviewBy: p.reviewBy, by: by.id };
+        const next: AdmissionState = { ...state, borrows: [...borrows, borrow].slice(-BORROWS_KEPT) };
+        return this.#built(loaded.revision, await this.#promote(next), { borrow: newId, places: p.places, until: p.until });
+      },
+    })));
+    const after = this.#borrows((await this.#load()).state);
+    // The borrow this command started, or (ending) the one it ended: on a repeat the same one, from the record.
+    const mine = ending ? [...after].reverse().find((b) => b.endedAt !== undefined) : after.find((b) => b.id === newId);
+    if (mine === undefined) throw new DomainError("integrity", "the emergency borrow this command recorded is no longer in the admission record");
+    const rest = after[after.length - 1]?.id === mine.id ? borrowRestUntil(after) : undefined;
+    return { borrowId: mine.id, ended: ending, until: borrowEnd(mine), reviewBy: mine.reviewBy, ...(rest === undefined ? {} : { againFrom: rest }), revision: result.revision, replayed: result.replayed };
+  }
+
+  /**
    * Takes out of the queue the requests that can no longer run (their host has been disabled or has no capacity that fits them) and admits what now fits. Every other change does this
    * first on its own; call it after disabling a host so the waiting requests for it are withdrawn at once and the reason is on record.
    */
@@ -423,11 +524,12 @@ export class AdmissionService {
         if (balance !== undefined) {
           let caps: AdmissionState["caps"];
           try { caps = await this.#caps(); } catch { caps = undefined; }
-          const full = { ...state, ...(caps === undefined ? {} : { caps }), balance };
+          const borrow = this.#activeBorrow(state);
+          const full = { ...state, ...(caps === undefined ? {} : { caps }), balance, ...(borrow === undefined ? {} : { borrow }) };
           balanceReason = balanceWaitReason(full, waiting);
           if (reason === null) reason = balanceReason;
         }
-      } catch (error) { if (!(error instanceof DomainError && error.code === "integrity")) throw error; balanceReason = BALANCE_DAMAGED; reason ??= balanceReason; }
+      } catch (error) { if (!(error instanceof DomainError && error.code === "integrity")) throw error; balanceReason = error.message === BORROWS_DAMAGED_TEXT ? BORROWS_DAMAGED : BALANCE_DAMAGED; reason ??= balanceReason; }
     }
     return { state: "waiting", entry: waiting, position: ahead.findIndex((e) => e.id === requestId) + 1, ...(reason === null ? {} : { reason }), ...(capReason === null ? {} : { capReason }), ...(balanceReason === null ? {} : { balanceReason }) };
   }
@@ -447,18 +549,27 @@ export class AdmissionService {
     const count = (list: readonly Entry[]) => ({ P: list.filter((e) => workClassOf(e) === "P").length, PC: list.filter((e) => workClassOf(e) === "PC").length });
     const running = count(runningP), waiting = count(waitingP);
     const lentAll = runningP.filter((e) => e.lent !== undefined).sort((a, b) => a.seq - b.seq);
+    // The emergency borrows: the one in force and the newest that ended, each with what it did. Damage is shown, never read as "no borrow".
+    let borrows: readonly Borrow[] = [], borrowProblem: string | undefined;
+    try { borrows = this.#borrows(state); } catch (error) { if (!(error instanceof DomainError && error.code === "integrity")) throw error; borrowProblem = "the emergency borrows stored in the admission record cannot be read, so nothing new is admitted until they are repaired"; }
+    const now = this.#runner.now();
+    const viewOf = (b: Borrow): BorrowView => ({ id: b.id, reason: b.reason, places: b.places, ...(b.project === undefined ? {} : { project: b.project }), from: b.from, until: b.until, reviewBy: b.reviewBy, ...(b.endedAt === undefined ? {} : { endedAt: b.endedAt }), taken: b.taken ?? 0, running: runningP.filter((e) => e.borrowed === b.id).length });
+    const inForce = borrowAt(borrows, now);
+    const ended = [...borrows].reverse().find((b) => b.from <= now && borrowEnd(b) <= now);
+    const activeBorrow: ActiveBorrow | undefined = inForce === undefined ? undefined : { id: inForce.id, places: inForce.places, ...(inForce.project === undefined ? {} : { project: inForce.project }), until: borrowEnd(inForce) };
     let unmet: BalanceView["unmet"];
     const short = places.reserved - running.PC;
     if (allocation !== undefined && short > 0 && waiting.PC > 0) {
       let caps: AdmissionState["caps"];
       try { caps = await this.#caps(); } catch { caps = undefined; }
       const plain: AdmissionState = { ...state, ...(caps === undefined ? {} : { caps }) };
-      const full: AdmissionState = { ...plain, balance: allocation };
+      const full: AdmissionState = { ...plain, balance: allocation, ...(activeBorrow === undefined ? {} : { borrow: activeBorrow }) };
       const free = productive - runningP.length;
+      const borrowedNow = lentAll.filter((e) => e.borrowed !== undefined).length;
       const first = order(full, "productive").find((e) => workClassOf(e) === "PC")!;
       const held = blockers(full, first).filter((b) => b !== "lane");
       const cause = free === 0
-        ? `every productive place is taken (${running.P} production, ${running.PC} improvement)${lentAll.length === 0 ? "" : `; ${lentAll.length} production attempt${lentAll.length === 1 ? " was" : "s were"} lent a reserved place while no improvement work could use it, and the place${lentAll.length === 1 ? " comes" : "s come"} back as ${lentAll.length === 1 ? "it ends" : "they end"}`}; nothing running is stopped to make room`
+        ? `every productive place is taken (${running.P} production, ${running.PC} improvement)${lentAll.length === 0 ? "" : `; ${lentAll.length} production attempt${lentAll.length === 1 ? " was" : "s were"} lent a reserved place ${borrowedNow === 0 ? "while no improvement work could use it" : borrowedNow === lentAll.length ? "under your emergency borrow" : `(${borrowedNow} under your emergency borrow, the rest while no improvement work could use it)`}, and the place${lentAll.length === 1 ? " comes" : "s come"} back as ${lentAll.length === 1 ? "it ends" : "they end"}`}; nothing running is stopped to make room`
         : held.length > 0 ? (waitReason(plain, first) ?? "the waiting improvement work cannot run yet")
           : "the waiting improvement work is admitted at the next decision";
       unmet = { short, cause };
@@ -466,8 +577,11 @@ export class AdmissionService {
     return {
       ...(allocation === undefined ? {} : { allocation }),
       places: { productive, ...places }, running, waiting,
-      lent: lentAll.slice(0, BALANCE_LENT_SHOWN).map((e) => ({ requestId: e.id, at: e.at, reason: e.lent! })), lentTotal: lentAll.length,
-      ...(unmet === undefined ? {} : { unmet }), revision,
+      lent: lentAll.slice(0, BALANCE_LENT_SHOWN).map((e) => ({ requestId: e.id, at: e.at, reason: e.lent! })), lentTotal: lentAll.length, borrowedTotal: lentAll.filter((e) => e.borrowed !== undefined).length,
+      ...(unmet === undefined ? {} : { unmet }),
+      ...(inForce === undefined ? {} : { borrow: { ...viewOf(inForce), lends: Math.min(inForce.places, places.reserved) } }),
+      ...(ended === undefined ? {} : { lastBorrow: { ...viewOf(ended), ended: borrowEnd(ended), againFrom: ended.id === borrows[borrows.length - 1]?.id ? borrowRestUntil(borrows)! : borrowEnd(ended) } }),
+      ...(borrowProblem === undefined ? {} : { borrowProblem }), revision,
     };
   }
 
@@ -500,16 +614,53 @@ export class AdmissionService {
     }
   }
 
-  /** Admits what fits under the caps and the P/PC allocation now. A damaged caps record or allocation admits nothing new (work waits; stop and release still work) until it is repaired. */
+  /** Admits what fits under the caps and the P/PC allocation now. A damaged caps record, allocation or borrow record admits nothing new (work waits; stop and release still work) until it is repaired. */
   async #promote(state: AdmissionState): Promise<AdmissionState> {
     let caps: NonNullable<AdmissionState["caps"]>;
     let balance: Balance | undefined;
-    try { caps = await this.#caps(); balance = await this.#balance(); } catch (error) { if (error instanceof DomainError && error.code === "integrity") return state; throw error; }
-    return promote({ ...state, caps, ...(balance === undefined ? {} : { balance }) }).state;
+    try { caps = await this.#caps(); balance = await this.#balance(); return this.#admit(state, caps, balance); } catch (error) { if (error instanceof DomainError && error.code === "integrity") return state; throw error; }
+  }
+
+  /** One admission decision with the emergency borrow in force now (by the clock), counting on the borrow what it let in. Throws `integrity` when the stored borrows are damaged. */
+  #admit(state: AdmissionState, caps: NonNullable<AdmissionState["caps"]>, balance: Balance | undefined): AdmissionState {
+    const active = this.#activeBorrow(state);
+    const r = promote({ ...state, caps, ...(balance === undefined ? {} : { balance }), ...(active === undefined ? {} : { borrow: active }) });
+    const taken = r.admitted.filter((e) => e.borrowed !== undefined).length;
+    if (active === undefined || taken === 0) return r.state;
+    return { ...r.state, borrows: (state.borrows ?? []).map((b) => (b.id === active.id ? { ...b, taken: (b.taken ?? 0) + taken } : b)) };
+  }
+
+  /** The stored borrows, checked: a list that is not what `borrow` writes is damage (`integrity`), never read as "no borrow". */
+  #borrows(state: AdmissionState): readonly Borrow[] {
+    const list = state.borrows as unknown;
+    if (list === undefined) return [];
+    const damaged = (): never => { throw new DomainError("integrity", BORROWS_DAMAGED_TEXT); };
+    if (!Array.isArray(list) || list.length > BORROWS_KEPT) return damaged();
+    const time = (v: unknown): boolean => typeof v === "string" && Number.isFinite(Date.parse(v)) && new Date(Date.parse(v)).toISOString() === v;
+    let previous = "";
+    for (const b of list as unknown[]) {
+      const r = b as Record<string, unknown> | null;
+      if (r === null || typeof r !== "object" || Array.isArray(r)) return damaged();
+      const ok = typeof r["id"] === "string" && BORROW_ID.test(r["id"]) && typeof r["reason"] === "string" && r["reason"].length >= 1 && r["reason"].length <= 300
+        && Number.isSafeInteger(r["places"]) && (r["places"] as number) >= 1 && (r["places"] as number) <= LIMIT_BOUNDS.productive[1]
+        && (r["project"] === undefined || (typeof r["project"] === "string" && LABEL.test(r["project"]))) && typeof r["by"] === "string"
+        && time(r["from"]) && time(r["until"]) && time(r["reviewBy"]) && (r["from"] as string) < (r["until"] as string) && (r["reviewBy"] as string) >= (r["until"] as string)
+        && (r["endedAt"] === undefined || time(r["endedAt"])) && (r["taken"] === undefined || (Number.isSafeInteger(r["taken"]) && (r["taken"] as number) >= 0))
+        && (r["from"] as string) >= previous;
+      if (!ok) return damaged();
+      previous = r["from"] as string;
+    }
+    return list as Borrow[];
+  }
+
+  /** The emergency borrow in force now, by the runner's clock. Throws `integrity` when the stored borrows are damaged. */
+  #activeBorrow(state: AdmissionState): ActiveBorrow | undefined {
+    const b = borrowAt(this.#borrows(state), this.#runner.now());
+    return b === undefined ? undefined : { id: b.id, places: b.places, ...(b.project === undefined ? {} : { project: b.project }), until: borrowEnd(b) };
   }
 
   #built(revision: number, stateWithCaps: AdmissionState, detail: JsonObject) {
-    const { caps: _caps, balance: _balance, ...state } = stateWithCaps; void _caps; void _balance;
+    const { caps: _caps, balance: _balance, borrow: _borrow, ...state } = stateWithCaps; void _caps; void _balance; void _borrow;
     const change: Change = revision === 0
       ? { type: "create", ref: STATE, body: state as unknown as JsonObject }
       : { type: "update", ref: STATE, expectedRevision: revision, body: state as unknown as JsonObject };
