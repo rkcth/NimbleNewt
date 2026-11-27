@@ -62,3 +62,11 @@ test("a key-like text written into the task's description is redacted in the pro
   assert.ok(!p.includes(key), "the planted key is not in the prompt");
   assert.match(p, /Task description \(what the agent was asked to do\): "CONTRACT: use the token /);
 });
+
+// Second review of the W09 fixes: the description is put in place as text, never read as a replacement pattern, so "$&", "$'", "$`" or "$1" in it reach the prompt as written and cannot copy other parts of the prompt into it.
+test("replacement-pattern characters in the description are kept as written", () => {
+  const description = "Edge cases: $& and $' and $` and $1 and $$ stay literal.";
+  const p = promptOf(base({ report: "REPORT-TEXT" }, { description }));
+  assert.ok(p.includes(`"${description}"`), p.slice(0, 400));
+  assert.equal(p.split("REPORT-TEXT").length, 2, "the report appears once: nothing was copied by a pattern");
+});

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { REPLY_ROOM_FILE, ReplyRoom, cutWithoutText, loadReplyRoom, saveReplyRoom } from "./reply-room.js";
-import { withReplyFloor } from "./relay-fetch.js";
+import { relayFetch, withReplyFloor } from "./relay-fetch.js";
 
 // W09 fixes, item 3: a reply cut at the reply limit with no visible text is retryable with a larger limit.
 
@@ -63,4 +63,18 @@ test("the relay raises a request's reply limit in the field it uses, never lower
   assert.equal(withReplyFloor(text, 8192), text);
   const list = Buffer.from("[1,2]");
   assert.equal(withReplyFloor(list, 8192), list);
+});
+
+// Second review of the W09 fixes: the relay raises only a model request (a POST); another method's body, and every body after the raise is turned off, leave as sent.
+test("the relay raises the reply limit of a POST only, and not after the raise is turned off", async () => {
+  const sent: { method: string; body?: string }[] = [];
+  const relay = relayFetch("http://relay.local", (m) => { if (m.t === "fetch") sent.push({ method: m.method, ...(m.body === undefined ? {} : { body: Buffer.from(m.body, "base64").toString("utf8") }) }); });
+  const ask = (method: string): void => { void relay.fetch("http://relay.local/v1/chat/completions", { method, body: JSON.stringify({ max_tokens: 4096 }) }).catch(() => undefined); };
+  relay.raiseReplyLimit(8192);
+  ask("POST"); ask("PUT");
+  relay.raiseReplyLimit(undefined);
+  ask("POST");
+  await new Promise((ok) => setImmediate(ok));
+  relay.closeAll("test over");
+  assert.deepEqual(sent.map((x) => [x.method, (JSON.parse(x.body!) as { max_tokens: number }).max_tokens]), [["POST", 8192], ["PUT", 4096], ["POST", 4096]]);
 });

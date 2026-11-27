@@ -188,6 +188,12 @@ test("W09 fixes: every run ends with a named cause; an unclassified run says why
   assert.match(c(att({ status: "stopped-early", reportResult: null, endKind: "length", replyCut: { cuts: 3, limit: 16384, ceiling: 25000 } }), fail).reason, /3 reply\(ies\) cut with no visible text; the reply limit was 16384 tokens of a ceiling of 25000/);
   assert.equal(causesLine([{ cause: "verified" }, { cause: "false-done" }, { cause: "verified" }, {}]), "causes: verified 2, false-done 1");
   assert.equal(causesLine([{}]), null);
+  // Second review: the second agent's part of a cause is a plain lower-case name, bounded, whatever the record holds.
+  for (const odd of ["Reply Cut/../x", "a".repeat(200), "x\ny"]) {
+    const r = c(att({ questioning: "not-run", questioningCause: odd }));
+    assert.match(r.cause, /^second-agent-[a-z0-9-]{1,40}$/, r.cause);
+    assert.equal(r.outcome, "unclassified");
+  }
 });
 
 test("W09 fixes: the done's check runs the task's declared package tests after the build; the task set refuses a declared test that names a held-out or acceptance test, a pattern, or a path outside", () => {
@@ -209,6 +215,7 @@ test("W09 fixes: the done's check runs the task's declared package tests after t
       ["packages/controller/src/chat/chat.test.ts"], // a held-out test, source
       ["packages/controller/dist/chat/w01-acceptance-quote-lines.test.js"], // the bench's acceptance test
       ["packages/controller/dist/chat/*.test.js"], ["../outside.test.js"], ["/abs/x.test.js"], [""], [3], "x",
+      Array.from({ length: 51 }, (_, i) => `packages/controller/dist/chat/model-interpreter-${i}.test.js`), // more than 50 (second review)
     ]) assert.throws(() => loadTaskset(write(bad)), /doneTests/, JSON.stringify(bad));
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

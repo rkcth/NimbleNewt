@@ -182,14 +182,17 @@ export class ChatSpendService {
 
   /** Adds one call's tokens to today's count; a repeat of the same key adds nothing. */
   async record(tokens: number, key: string): Promise<void> {
-    if (!Number.isSafeInteger(tokens) || tokens < 0) return;
+    // Not a count (not a number, NaN, negative): nothing is added, so no figure can lower the day's count. A count past the safe range (a server reporting huge figures) is kept at the largest safe integer, so it reaches the cap
+    // instead of being dropped, and the day's total never leaves the exact range.
+    if (typeof tokens !== "number" || Number.isNaN(tokens) || tokens < 0) return;
+    tokens = Math.min(Number.MAX_SAFE_INTEGER, Math.floor(tokens));
     const { day, ref } = this.#dayId();
     await this.#retrying(() => this.#runner.command("chat.spend", { commandId: `chat-spend-${key}`.slice(0, 120), actor: "controller" }, async () => ({
       payload: { day, tokens },
       build: async () => {
         const found = await this.#runner.get(ref.kind, ref.id);
         const before = found === undefined ? { day, tokens: 0, calls: 0 } : (found.body as unknown as ChatSpendBody);
-        const body: ChatSpendBody = { day, tokens: before.tokens + tokens, calls: before.calls + 1 };
+        const body: ChatSpendBody = { day, tokens: Math.min(Number.MAX_SAFE_INTEGER, before.tokens + tokens), calls: before.calls + 1 };
         return { ref, creates: found === undefined, changes: [found === undefined ? { type: "create", ref, body: body as unknown as JsonObject } : { type: "update", ref, expectedRevision: found.revision, body: body as unknown as JsonObject }], detail: { day, tokens } };
       },
     })));

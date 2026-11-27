@@ -48,7 +48,7 @@ export class HttpModelCall implements ModelCall {
     const endpoint = this.#o.endpoint(route);
     if (endpoint === undefined) throw new Error(`route ${route.slice(0, 60)} has no endpoint`);
     // The tokens the server counted for this call's replies so far (a reply cut before any text and asked again is still paid for).
-    let input = 0, output = 0, counted = true;
+    let input = 0, output = 0, counted = false;
     const fail = (status: number | undefined, message: string, named?: string): never => {
       const text = redactText(message).slice(0, 300);
       const kind = named ?? classifyProviderFailure({ message: text, ...(status === undefined ? {} : { status }) });
@@ -86,7 +86,8 @@ export class HttpModelCall implements ModelCall {
       try { parsed = JSON.parse(text) as typeof parsed; } catch { return fail(undefined, "the reply was not JSON"); }
       const count = (v: unknown): number | undefined => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : undefined);
       const inputTokens = count(parsed?.usage?.prompt_tokens), outputTokens = count(parsed?.usage?.completion_tokens);
-      if (inputTokens === undefined || outputTokens === undefined) counted = false; else { input += inputTokens; output += outputTokens; }
+      // A reply whose count is missing or not a whole number adds nothing (it can never lower the count); a count is kept to a safe integer however large the server says it is, so the cap's arithmetic stays exact and is reached.
+      if (inputTokens !== undefined && outputTokens !== undefined) { counted = true; input = Math.min(Number.MAX_SAFE_INTEGER, input + inputTokens); output = Math.min(Number.MAX_SAFE_INTEGER, output + outputTokens); }
       const choice = parsed?.choices?.[0];
       const content = choice?.message?.content;
       if (typeof content !== "string" || content === "") {

@@ -113,3 +113,22 @@ test("a call that fails as reply-cut carries the tokens its cut replies used, an
   await assert.rejects(new GuardedModelCall(client({ replyTokens: 8192, ceilingTokens: 8192, timeoutMs: 60_000 }, [cut]), { spend: { allow: async () => ({ allowed: true }), record: async () => { throw new Error("store down"); } } as never, onSpendFailure: () => { told++; } }).completeDetailed("radiance/qwen", { system: "s", user: "u" }), /^Error: reply-cut: /);
   assert.equal(told, 1);
 });
+
+// Second review of the W09 fixes: what a server says about usage is read as a count only when it is one; it never lowers what is counted, a huge figure is kept within the safe range, and a reply with no count does not drop
+// what the other reply of the same call counted.
+test("usage across the two replies of a call: never negative, never past the safe range, and a missing count does not drop the other's", async () => {
+  const { failedUsage } = await import("./http-model.js");
+  const limits = { replyTokens: 8192, ceilingTokens: 32_768, timeoutMs: 300_000, kind: "radiance" };
+  const huge = { prompt_tokens: Number.MAX_SAFE_INTEGER, completion_tokens: Number.MAX_SAFE_INTEGER };
+  let thrown: unknown;
+  await client(limits, [() => reply("", "length", huge), () => reply("", "length", huge)]).complete("radiance/q", { system: "s", user: "u" }).catch((e: unknown) => { thrown = e; });
+  assert.deepEqual(failedUsage(thrown), { inputTokens: Number.MAX_SAFE_INTEGER, outputTokens: Number.MAX_SAFE_INTEGER });
+  for (const bad of [{ prompt_tokens: -100, completion_tokens: -100 }, { prompt_tokens: Number.NaN, completion_tokens: 1 }, { prompt_tokens: "9", completion_tokens: "9" }, { prompt_tokens: 1e300, completion_tokens: 1 }, null]) {
+    const r = await client(limits, [() => reply("", "length", bad), () => reply("ok", "stop", { prompt_tokens: 10, completion_tokens: 5 })]).completeDetailed("radiance/q", { system: "s", user: "u" });
+    assert.deepEqual(r.usage, { inputTokens: 10, outputTokens: 5 }, `the counted reply is kept; ${JSON.stringify(bad)} adds nothing and takes nothing away`);
+  }
+  const r = await client(limits, [() => reply("", "length", { prompt_tokens: 100, completion_tokens: 8192 }), () => reply("ok", "stop", {})]).completeDetailed("radiance/q", { system: "s", user: "u" });
+  assert.deepEqual(r.usage, { inputTokens: 100, outputTokens: 8192 }, "the cut reply's count stands when the answer has none");
+  // A thrown non-error, or an error with a forged usage of the wrong shape, reads as no usage.
+  for (const forged of [null, undefined, "x", { usage: { inputTokens: -1, outputTokens: 5 } }, { usage: { inputTokens: "1", outputTokens: 5 } }, { usage: { inputTokens: 1.5, outputTokens: 5 } }]) assert.equal(failedUsage(forged), undefined);
+});
