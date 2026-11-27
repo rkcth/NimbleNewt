@@ -8,4 +8,5 @@ export { agentsUnder, dispatchStopPorts, hostLocalWork, swarmDescendants, swarmD
 export { HANDOFF_LIMITS, HANDOFF_SECTIONS, HandoffService, REQUIRED_SECTIONS, type TaskHandoffBody, type HandoffArchive, type HandoffCut, type HandoffPhase, type HandoffSection, type HandoffSources, type ResponsibilityHandover, type LeaseHandover } from "./handoff.js";
 export { CUT_MARKER, SHORTENED, cutSection, digestSection, givenWhole, neutralise, safeSlice, summarised, wellFormed } from "./handoff-cut.js";
 export { controllerHandoffSources } from "./handoff-sources.js";
+export { NAMED_LEASES, UNREADABLE, holdLines, oneLine, recipientSees, type FrozenWorkspaceOp, type HoldFacts, type OpenWorkspaceOp, type SenderLease } from "./handoff-holds.js";
 export { describeReassigned, responsibilityHandover } from "./handoff-responsibilities.js";
