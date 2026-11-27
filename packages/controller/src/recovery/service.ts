@@ -1,3 +1,4 @@
+import { isAbsolute } from "node:path";
 import type { ControllerStorage } from "../storage/index.js";
 import { RecoveryManifestBad, readRecoveryManifestHeader, type RecoveryManifest } from "./manifest.js";
 import { snapshotSource, type Watermark } from "./source.js";
@@ -57,6 +58,11 @@ export interface RecoveryWatermarkStatus {
 
 const REASON_MAX = 300;
 const reasonOf = (error: unknown): string => (error instanceof Error ? error.message : "unknown").replace(/\s+/g, " ").slice(0, REASON_MAX);
+/** A file-system or driver error names the path or the address it failed on: only its code is kept. */
+const failureOf = (error: unknown): string => {
+  const code = (error as { code?: unknown } | undefined)?.code;
+  return typeof code === "string" && /^[A-Za-z0-9_]{1,40}$/.test(code) ? `the manifest folder or the store could not be used (${code})` : reasonOf(error);
+};
 
 export class RecoveryWatermarkService {
   readonly #o: RecoveryWatermarkOptions;
@@ -70,7 +76,7 @@ export class RecoveryWatermarkService {
     const every = options.everyMs ?? RECOVERY_MANIFEST_EVERY_MS_DEFAULT;
     if (!Number.isSafeInteger(every) || every < RECOVERY_MANIFEST_EVERY_MS_MIN || every > RECOVERY_MANIFEST_EVERY_MS_MAX) throw new RangeError("recovery.everyMs: whole milliseconds from 60000 (one minute) to 86400000 (one day)");
     if (!Number.isSafeInteger(options.epoch) || options.epoch < 1) throw new RangeError("the recovery manifest writer needs this controller's epoch (at least 1)");
-    if (typeof options.directory !== "string" || options.directory.length === 0) throw new RangeError("recovery.manifestDirectory: required text");
+    if (typeof options.directory !== "string" || options.directory.length === 0 || !isAbsolute(options.directory)) throw new RangeError("recovery.manifestDirectory: an absolute path is required");
     this.#o = options;
     this.#everyMs = every;
   }
@@ -104,7 +110,7 @@ export class RecoveryWatermarkService {
           this.#last = { at: at.toISOString(), outcome: "refused", refusal: error.reason, reason: reasonOf(error), ...(error.withdrawn ? { withdrawn: true } : {}) };
           return this.#fenced ? "fenced" : "refused";
         }
-        this.#last = { at: at.toISOString(), outcome: "failed", reason: reasonOf(error) };
+        this.#last = { at: at.toISOString(), outcome: "failed", reason: failureOf(error) };
         return "failed";
       } finally { this.#lastAtMs = at.getTime(); }
     })();

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -12,6 +12,7 @@ import { recoveryWatermarkLines } from "../status/status.js";
 import {
   RECOVERY_MANIFEST_FILE, RecoveryManifestBad, RecoveryWatermarkService, RecoveryWriteRefused, readRecoveryManifest, readRecoveryManifestHeader, writeFencedRecoveryManifest, type RecoveryWatermarkStatus,
 } from "./index.js";
+import { keepNewerDisplaced } from "./writer.js";
 
 // Card K04, recovery watermarks: the manifest is written only by the controller that holds the epoch and never goes back; the service writes it on its schedule and stops for good once it finds
 // it is no longer the primary; the owner reads the latest watermark and what it does not cover yet. On all four storage backends where a store is involved.
@@ -62,6 +63,7 @@ for (const backend of backends) {
       assert.equal(written.watermark.epoch, epoch);
       assert.equal(readRecoveryManifest(m).blobRefs().length, 1, "the fenced writer writes a whole manifest a promotion can read");
       const before = manifestText(m);
+      for (const f of ["manifest.json", "aggregates.jsonl", "blobs.jsonl"]) assert.equal(statSync(join(m, f)).mode & 0o777, 0o600, `${f} is the owner's alone`);
 
       // a second controller takes the epoch: the first is now an old primary
       await world.storage.acquireEpoch({ holder: "c2", at: T, expectedEpoch: epoch });
@@ -175,6 +177,23 @@ for (const backend of backends) {
     } finally { await world.close(); gone(dir); }
   });
 
+  test(`${backend.name}: the last look at the folder comes after the store's last answer: a newer manifest put in place while that answer was awaited is kept, even when this controller's own copy still says it holds the epoch`, async () => {
+    const world = await backend.open();
+    const dir = tmp();
+    try {
+      await world.storage.acquireEpoch({ holder: "c1", at: T });
+      const epoch = await world.storage.currentEpoch();
+      const m = join(dir, "m");
+      await writeFencedRecoveryManifest({ storage: world.storage, epoch, directory: m });
+      let planted = "";
+      // A newer primary on its own copy of the database writes while this one waits for its store's answer before the swap; this store never sees the newer epoch.
+      const ownCopy = withEpochHook(world.storage, async (call, real) => { if (call === 2) planted = plantManifest(m, { epoch: epoch + 1, auditSeq: 0, deliverySeq: 0 }); return real(); });
+      await assert.rejects(writeFencedRecoveryManifest({ storage: ownCopy, epoch, directory: m }), refused("manifest_newer", /newer than this controller's/));
+      assert.equal(manifestText(m), planted, "the newer manifest is not replaced");
+      assert.ok(!readdirSync(dir).some((f) => f.includes(".partial-")), "no staging folder is left");
+    } finally { await world.close(); gone(dir); }
+  });
+
   test(`${backend.name}: the service writes on its schedule, reports the latest watermark and what it does not cover yet, and once fenced never writes again`, async () => {
     const world = await backend.open();
     const dir = tmp();
@@ -262,6 +281,85 @@ test("the service is not fenced by an unreadable manifest: it says why, and writ
     for (const everyMs of [59_999, 86_400_001, 1.5, Number.NaN]) assert.throws(() => new RecoveryWatermarkService({ storage: world.storage, epoch, directory: m, everyMs }), RangeError, String(everyMs));
     assert.throws(() => new RecoveryWatermarkService({ storage: world.storage, epoch: 0, directory: m }), RangeError);
     assert.throws(() => new RecoveryWatermarkService({ storage: world.storage, epoch, directory: "" }), RangeError);
+  } finally { await world.close(); gone(dir); }
+});
+
+test("a manifest another writer put in place between the last look and the swap is put back when it is ahead or unreadable, and stays replaced when it is older", () => {
+  const dir = tmp();
+  try {
+    const setUp = (name: string, displacedText: string | undefined): { d: string; x: string; ours: ReturnType<typeof readRecoveryManifestHeader> & object } => {
+      const d = join(dir, name); const x = join(dir, `${name}-displaced`);
+      plantManifest(d, { epoch: 3, auditSeq: 10, deliverySeq: 1 }, { notes: ["ours"] });
+      writeFileSync(join(d, "aggregates.jsonl"), "ours\n");
+      mkdirSync(x);
+      if (displacedText !== undefined) { writeFileSync(join(x, RECOVERY_MANIFEST_FILE), displacedText); writeFileSync(join(x, "aggregates.jsonl"), "theirs\n"); }
+      return { d, x, ours: readRecoveryManifestHeader(d)! };
+    };
+    const looked = plantManifest(join(dir, "looked"), { epoch: 3, auditSeq: 5, deliverySeq: 1 });
+    const newer = plantManifest(join(dir, "newer"), { epoch: 4, auditSeq: 0, deliverySeq: 0 });
+    const sameAhead = plantManifest(join(dir, "same-ahead"), { epoch: 3, auditSeq: 11, deliverySeq: 1 });
+    const older = plantManifest(join(dir, "older"), { epoch: 2, auditSeq: 99, deliverySeq: 9 });
+
+    for (const [name, text] of [["newer", newer], ["same-ahead", sameAhead]] as const) {
+      const { d, x, ours } = setUp(name + "-case", text);
+      assert.throws(() => keepNewerDisplaced(d, x, looked, 3, ours), (e: unknown) => refused("manifest_newer", /it was put back/)(e) && (e as RecoveryWriteRefused).withdrawn === true, name);
+      assert.equal(manifestText(d), text, name);
+      assert.equal(readFileSync(join(d, "aggregates.jsonl"), "utf8"), "theirs\n", "its files come back with it");
+    }
+    {
+      const { d, x, ours } = setUp("garbage", "{ not json");
+      assert.throws(() => keepNewerDisplaced(d, x, looked, 3, ours), refused("manifest_unreadable", /put back/));
+      assert.equal(manifestText(d), "{ not json", "an unreadable manifest is never replaced");
+    }
+    {
+      const huge = " ".repeat(64 * 1024 + 1);
+      const { d, x, ours } = setUp("huge", huge);
+      assert.throws(() => keepNewerDisplaced(d, x, looked, 3, ours), refused("manifest_unreadable", /put back/));
+      assert.equal(manifestText(d), huge, "one too large to read is put back too");
+    }
+    for (const [name, text] of [["looked", looked], ["older", older], ["absent", undefined]] as const) {
+      const { d, x, ours } = setUp(name + "-ok", text);
+      const before = manifestText(d);
+      keepNewerDisplaced(d, x, looked, 3, ours);
+      assert.equal(manifestText(d), before, name);
+    }
+    {
+      // the folder changed once more (a third writer): nothing is moved
+      const { d, x, ours } = setUp("third", newer);
+      const third = plantManifest(d, { epoch: 5, auditSeq: 0, deliverySeq: 0 });
+      assert.throws(() => keepNewerDisplaced(d, x, looked, 3, ours), (e: unknown) => refused("manifest_newer", /left alone/)(e) && (e as RecoveryWriteRefused).withdrawn === false);
+      assert.equal(manifestText(d), third);
+    }
+  } finally { gone(dir); }
+});
+
+test("the writer refuses a folder that is a symbolic link, manifest files that are not plain files, and a relative folder; a failure names no path", async () => {
+  const world = await backends[0]!.open();
+  const dir = tmp();
+  try {
+    await world.storage.acquireEpoch({ holder: "c1", at: T });
+    const epoch = await world.storage.currentEpoch();
+    const real = join(dir, "real"); mkdirSync(real);
+    const link = join(dir, "link"); symlinkSync(real, link);
+    await assert.rejects(writeFencedRecoveryManifest({ storage: world.storage, epoch, directory: link }), (e: unknown) => !(e instanceof RecoveryWriteRefused) && /symbolic link/.test((e as Error).message));
+    assert.deepEqual(readdirSync(real), [], "nothing is written through the link");
+    for (const f of ["manifest.json", "aggregates.jsonl", "blobs.jsonl"]) {
+      const m = join(dir, `with-${f}`); mkdirSync(m);
+      const target = join(dir, `target-${f}`); writeFileSync(target, "kept");
+      symlinkSync(target, join(m, f));
+      await assert.rejects(writeFencedRecoveryManifest({ storage: world.storage, epoch, directory: m }), refused("manifest_unreadable", /not a plain file/), f);
+      assert.equal(readFileSync(target, "utf8"), "kept", f);
+      assert.equal(existsSync(join(m, f)), true, f);
+    }
+    await assert.rejects(writeFencedRecoveryManifest({ storage: world.storage, epoch, directory: "relative/m" }), RangeError);
+    assert.throws(() => new RecoveryWatermarkService({ storage: world.storage, epoch, directory: "relative/m" }), RangeError);
+    // a file-system error names its path: only its code is kept for the owner's status
+    const blocker = join(dir, "where-the-owner-keeps-it"); writeFileSync(blocker, "a file, not a folder");
+    const service = new RecoveryWatermarkService({ storage: world.storage, epoch, directory: join(blocker, "m") });
+    assert.equal(await service.runDue(), "failed");
+    const reason = (await service.status()).last?.reason ?? "";
+    assert.match(reason, /\(ENOTDIR\)/);
+    assert.ok(!reason.includes("where-the-owner-keeps-it"), reason);
   } finally { await world.close(); gone(dir); }
 });
 

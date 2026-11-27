@@ -53,7 +53,7 @@ function blobsOf(body: string | undefined): BlobRef[] {
  * manifest as it was. The swap removes the old `manifest.json` first and puts the new one in last: a crash during the swap leaves no manifest (refused), never a mix. Records of kind `artifact` name
  * the blobs; the reserved `tombstone` records are left out (a removed record is not state a recovery must find).
  */
-export async function writeRecoveryManifest(source: RecoverySource, directory: string, options: { readonly now?: () => Date; /** Called with the new manifest once its files are flushed in the staging folder and before anything in `directory` is touched; throwing leaves the earlier manifest as it was. */ readonly beforeSwap?: (manifest: RecoveryManifest) => Promise<void> } = {}): Promise<RecoveryManifest> {
+export async function writeRecoveryManifest(source: RecoverySource, directory: string, options: { readonly now?: () => Date; /** Called with the new manifest once its files are flushed in the staging folder and before anything in `directory` is touched; throwing leaves the earlier manifest as it was. */ readonly beforeSwap?: (manifest: RecoveryManifest) => Promise<void>; /** Called once the new files are in place, before the staging folder is removed, with the folder holding the files they displaced (absent ones are not there): the fenced writer puts a newer manifest that landed in between back from it. */ readonly afterSwap?: (manifest: RecoveryManifest, displaced: string) => Promise<void> } = {}): Promise<RecoveryManifest> {
   mkdirSync(directory, { recursive: true });
   const staging = `${resolve(directory)}.partial-${process.pid}`;
   rmSync(staging, { recursive: true, force: true });
@@ -82,8 +82,14 @@ export async function writeRecoveryManifest(source: RecoverySource, directory: s
     // the manifest file is written last: a folder without it is not a manifest
     writeFlushed(join(staging, RECOVERY_MANIFEST_FILE), `${JSON.stringify(manifest, null, 2)}\n`);
     await options.beforeSwap?.(manifest);
-    for (const file of [RECOVERY_MANIFEST_FILE, RECOVERY_AGGREGATES_FILE, RECOVERY_BLOBS_FILE]) rmSync(join(directory, file), { force: true });
+    // The files in place are moved aside (not deleted) so the caller can still put them back; the old manifest.json goes first and the new one comes last, as before.
+    const displaced = join(staging, "displaced");
+    mkdirSync(displaced);
+    for (const file of [RECOVERY_MANIFEST_FILE, RECOVERY_AGGREGATES_FILE, RECOVERY_BLOBS_FILE]) {
+      try { renameSync(join(directory, file), join(displaced, file)); } catch (error) { if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error; }
+    }
     for (const file of [RECOVERY_AGGREGATES_FILE, RECOVERY_BLOBS_FILE, RECOVERY_MANIFEST_FILE]) renameSync(join(staging, file), join(directory, file));
+    await options.afterSwap?.(manifest, displaced);
     return manifest;
   } finally {
     rmSync(staging, { recursive: true, force: true });
