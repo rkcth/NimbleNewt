@@ -12,6 +12,7 @@ import { CONTROLLER_AUTHORITY, PROMOTION_FENCE_PREFIX, parseAuthority, parseFenc
  *   too) and the live promotion record. When the live store has no record, the restored one has none either, even if the backup had one: the store the controller runs on decides, so a restore
  *   never adds or removes a promotion. The restored epoch is then the larger of the two.
  * - The backup is newer by epoch (a fresh installation restoring an older installation's backup, or a live store that was itself an older copy): the backup's epoch, holder and record are kept.
+ *   When the running store holds a promotion (a record, or a promotion's fence), the backup must hold the same promotion or a later one; otherwise the restore is refused.
  *
  * Refused (nothing is written into the running store; the caller discards the partly restored copy) when the record of the side that decides cannot be read, or names a promotion later than
  * that side's epoch; when the live record cannot be read at all (whichever side decides); and when a holder or epoch is not in the form a store writes. The fenced epoch of a promotion record is
@@ -72,6 +73,15 @@ export function carryControllerAuthority(live: AuthoritySide, backup: AuthorityS
   const record = from === "live" ? liveRecord : authorityOfRow(backup.authority);
   if (record === "unreadable") throw new AuthorityCarryRefused("the backup's record of a controller promotion cannot be read, and the backup is newer than the running database, so who may use the restored store is not known");
   if (record !== undefined && record.fenceEpoch > side.epoch) throw new AuthorityCarryRefused(`the ${from === "live" ? "running database's" : "backup's"} record of a controller promotion names epoch ${record.fenceEpoch}, later than its store's epoch ${side.epoch}`);
+  // A newer backup never drops a promotion the running store holds (first review of the second slice): without this, a backup made at a later epoch on another copy of the store (an old controller
+  // that went on running on its own copy and restarted there) and holding no record, or an earlier one, would let the controller that promotion fenced start on the restored store again.
+  if (from === "backup") {
+    const liveFence = parseFenceHolder(live.holder);
+    const held = liveRecord !== undefined ? { promotionId: liveRecord.promotionId, fenceEpoch: liveRecord.fenceEpoch } : liveFence !== undefined ? { promotionId: liveFence.promotionId, fenceEpoch: live.epoch } : undefined;
+    if (held !== undefined && (record === undefined || record.fenceEpoch < held.fenceEpoch || (record.fenceEpoch === held.fenceEpoch && record.promotionId !== held.promotionId))) {
+      throw new AuthorityCarryRefused(`the backup was made at a later epoch than the running database (${side.epoch}, the running database is at ${live.epoch}) but does not hold the controller promotion ${held.promotionId} the running database holds, or a later one, so restoring it could let the controller that promotion replaced start again`);
+    }
+  }
   // A fence carried without its own record (a promotion stopped before it wrote one) keeps every start out until the promotion is run again, as it does on the running store.
   return { from, epoch: side.epoch, holder: side.holder, authority: from === "live" ? (live.authority ?? null) : (backup.authority ?? null), ...(record === undefined ? {} : { record }) };
 }

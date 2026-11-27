@@ -633,7 +633,7 @@ export class StagedRestore {
   async #liveAuthority(): Promise<AuthoritySide> {
     const snap = await this.#o.storage.snapshot();
     let side: AuthoritySide;
-    try { side = await authoritySideOf(snap); } finally { await snap.close(); }
+    try { side = await authoritySideOf(snap); } catch (error) { throw error instanceof AuthorityCarryRefused ? new DomainError("invalid_transition", error.message) : error; } finally { await snap.close(); }
     this.#stillPrimary(side.epoch);
     return side;
   }
@@ -687,7 +687,7 @@ export class StagedRestore {
       since = await externalSince(probe, m.createdAt);
       if (live !== m.schemaVersion) throw new DomainError("invalid_command", `the backup has schema version ${m.schemaVersion} and this installation has ${live}; restore it with the version of NimbleNewt that made it, then upgrade`);
       side = await authoritySideOf(probe);
-    } finally { await probe.close(); }
+    } catch (error) { throw error instanceof AuthorityCarryRefused ? new DomainError("invalid_transition", error.message) : error; } finally { await probe.close(); }
     const encrypted = m.encryption !== undefined;
     // Only the scope "everything" seals the table files: in a "secrets only" backup they are plain and can be checked and counted without a key.
     const sealedFiles = filesSealed(m);

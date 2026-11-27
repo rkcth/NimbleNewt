@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -41,9 +41,32 @@ test("the newer side by epoch decides epoch, holder and record together; a tie g
   // the backup newer than the running store (a fresh installation restoring another's backup): the backup's three
   const b = carryControllerAuthority({ epoch: 1, holder: "controller" }, { epoch: 8, holder: "ctl-b", authority: record() });
   assert.equal(b.from, "backup"); assert.equal(b.epoch, 8); assert.equal(b.holder, "ctl-b"); assert.equal(b.record?.successor, "ctl-b");
-  assert.deepEqual(carryControllerAuthority({ epoch: 1, holder: "controller", authority: record({ fenceEpoch: 1, fencedEpoch: 0 }) }, { epoch: 8, holder: "x" }), { from: "backup", epoch: 8, holder: "x", authority: null });
+  assert.deepEqual(carryControllerAuthority({ epoch: 1, holder: "controller" }, { epoch: 8, holder: "x" }), { from: "backup", epoch: 8, holder: "x", authority: null });
   // a fence carried as it is (a promotion that stopped before its record): it keeps every start out, as on the running store
   assert.equal(carryControllerAuthority({ epoch: 6, holder: "promotion-fence:p9:5:ctl-a" }, { epoch: 2, holder: "ctl-a" }).holder, "promotion-fence:p9:5:ctl-a");
+});
+
+test("a backup newer by epoch never drops a promotion the running store holds: it must hold the same promotion or a later one (K05 second slice, first review)", () => {
+  const live: AuthoritySide = { epoch: 5, holder: "ctl-b", authority: record() }; // p1, fenceEpoch 4, successor ctl-b, fenced ctl-a
+  // an old controller's own copy, restarted there past the live epoch: no record, or an earlier promotion's
+  assert.throws(() => carryControllerAuthority(live, { epoch: 8, holder: "ctl-a" }), refusedCarry(/does not hold the controller promotion p1 .*replaced start again/));
+  assert.throws(() => carryControllerAuthority(live, { epoch: 8, holder: "ctl-a", authority: record({ promotionId: "p0", successor: "ctl-a", fencedEpoch: 1, fencedHolder: "ctl-z", fenceEpoch: 2 }) }), refusedCarry(/does not hold the controller promotion p1/));
+  // another promotion at the same fence epoch (two copies promoted apart): refused
+  assert.throws(() => carryControllerAuthority(live, { epoch: 8, holder: "ctl-q", authority: record({ promotionId: "pq", successor: "ctl-q" }) }), refusedCarry(/does not hold the controller promotion p1/));
+  // the same promotion, or a later one, at a later epoch: the backup's three
+  const same = carryControllerAuthority(live, { epoch: 8, holder: "ctl-b", authority: record() });
+  assert.equal(same.from, "backup"); assert.equal(same.epoch, 8); assert.equal(same.record?.promotionId, "p1");
+  const later = carryControllerAuthority(live, { epoch: 9, holder: "ctl-c", authority: record({ promotionId: "p2", successor: "ctl-c", fencedEpoch: 6, fencedHolder: "ctl-b", fenceEpoch: 7 }) });
+  assert.equal(later.from, "backup"); assert.equal(later.record?.promotionId, "p2");
+  // a running store held by a promotion's fence without its record: the backup must hold that promotion at that fence epoch, or a later one
+  const fenced: AuthoritySide = { epoch: 6, holder: "promotion-fence:p9:5:ctl-a" };
+  assert.throws(() => carryControllerAuthority(fenced, { epoch: 8, holder: "ctl-a" }), refusedCarry(/does not hold the controller promotion p9/));
+  assert.throws(() => carryControllerAuthority(fenced, { epoch: 8, holder: "ctl-b", authority: record({ promotionId: "p9", fencedEpoch: 5, fenceEpoch: 5 }) }), refusedCarry(/does not hold the controller promotion p9/));
+  assert.equal(carryControllerAuthority(fenced, { epoch: 8, holder: "ctl-b", authority: record({ promotionId: "p9", fencedEpoch: 5, fenceEpoch: 6 }) }).from, "backup");
+  // no promotion on the running store: a newer backup is taken as it is, with or without a record
+  assert.equal(carryControllerAuthority({ epoch: 2, holder: "controller" }, { epoch: 8, holder: "x" }).authority, null);
+  // a tie still goes to the running store, whatever the backup holds
+  assert.equal(carryControllerAuthority(live, { epoch: 5, holder: "ctl-a" }).authority, live.authority);
 });
 
 test("records and states that do not read are refused, never carried or dropped silently (K05 second slice)", () => {
@@ -153,6 +176,16 @@ for (const backend of backends) {
         await start(r3, "ctl-c");
       }
 
+      // the old controller went on on its own copy and restarted there past the live epoch: its newer backup holds no promotion, and restoring it is refused with the target unused
+      const copy = await fresh();
+      let eOld = 0;
+      while (eOld <= eC) eOld = await start(copy, "ctl-a");
+      await put(copy, eOld, "old-copy");
+      const newer = await new BackupService(copy, { root: join(dir, "b3"), version: "t", now }).backUpNow("manual");
+      const target = await fresh();
+      await assert.rejects(restoreWith(target, s, newer.path), refusedCarry(/later epoch than the running database .*does not hold the controller promotion p2/));
+      assert.equal(await target.currentEpoch(), 0, "the refused restore writes no state row");
+
       // the live record damaged: the restore is refused and the empty target stays unused (epoch 0)
       const broken = await fresh();
       const side = await liveSide(s);
@@ -225,5 +258,51 @@ test("a staged restore records in its marker the epoch the carried authority was
     await assert.rejects(sr2.preview(tm.manifest.name), unreadable);
     assert.equal(existsSync(join(d2, PENDING_FILE)), false);
     assert.equal(sr2.pending, undefined);
+  } finally { gone(dir); }
+});
+
+test("a staged restore of a newer backup that lacks the running store's promotion stages nothing; a walk past its bound refuses the preview and the apply in plain words (K05 second slice, first review)", async () => {
+  const dir = tmp();
+  try {
+    const s = new MemoryStorage();
+    const blobs = await FileBlobStore.open({ directory: join(dir, "blobs") });
+    const m = join(dir, "m");
+    const eA = await start(s, "ctl-a");
+    await put(s, eA, "before");
+    await writeFencedRecoveryManifest({ storage: s, epoch: eA, directory: m, now });
+    await promoteController({ storage: s, manifestDirectory: m, blobs, successor: "ctl-b", promotionId: "p1", now });
+    const eB = await start(s, "ctl-b");
+    // the old controller's own copy, restarted past the live epoch, backs up into the same folder
+    const copy = new MemoryStorage();
+    let eOld = 0;
+    while (eOld <= eB) eOld = await start(copy, "ctl-a");
+    await put(copy, eOld, "old-copy");
+    const root = join(dir, "b");
+    const made = await new BackupService(copy, { root, version: "t", now }).backUpNow("manual");
+    const data = join(dir, "data"); mkdirSync(data);
+    const sr = new StagedRestore({ backups: new BackupService(s, { root, version: "t", now }), root, barrier: new MaintenanceBarrier(), sqlitePath: join(data, "x.sqlite"), dataDirectory: data, storage: s, epoch: eB, now });
+    const plan = await sr.preview(made.manifest.name);
+    const refused = (e: unknown): boolean => e instanceof DomainError && e.code === "invalid_transition" && /does not hold the controller promotion p1/.test(e.message);
+    await assert.rejects(sr.apply(made.manifest.name, plan.token), refused);
+    assert.deepEqual(readdirSync(data), [], "no staged database and no marker are left");
+    assert.equal(sr.pending, undefined);
+    assert.ok(await assertStartAllowed(s, "ctl-b", eB) === undefined);
+    await assert.rejects(assertStartAllowed(s, "ctl-a", eB), /may not use this store/);
+
+    // more than 1,000 rows of the record's kind: the preview and the apply are refused as a domain error, not an internal one
+    const t = new MemoryStorage();
+    const eT = await start(t, "ctl-a");
+    const tb = new BackupService(t, { root: join(dir, "tb"), version: "t", now });
+    const tm = await tb.backUpNow("manual");
+    const d2 = join(dir, "d2"); mkdirSync(d2);
+    const sr2 = new StagedRestore({ backups: tb, root: join(dir, "tb"), barrier: new MaintenanceBarrier(), sqlitePath: join(d2, "y.sqlite"), dataDirectory: d2, storage: t, epoch: eT, now });
+    const p2 = await sr2.preview(tm.manifest.name);
+    for (let i = 0; i < 1001; i += 77) {
+      await t.applyOperation({ operationId: `many-${i}`, epoch: eT, actor: "t", correlationId: `many-${i}`, at: T, changes: Array.from({ length: Math.min(77, 1001 - i) }, (_, k) => ({ type: "create" as const, ref: { kind: "controller-authority", id: `a${String(i + k).padStart(4, "0")}` }, body: { v: 1 } })), audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] });
+    }
+    const bound = (e: unknown): boolean => e instanceof DomainError && e.code === "invalid_transition" && /more than 1000 records of the controller authority kind/.test(e.message);
+    await assert.rejects(sr2.apply(tm.manifest.name, p2.token), bound);
+    await assert.rejects(sr2.preview(tm.manifest.name), bound);
+    assert.deepEqual(readdirSync(d2), []);
   } finally { gone(dir); }
 });
