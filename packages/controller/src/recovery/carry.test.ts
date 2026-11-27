@@ -70,6 +70,9 @@ test("a backup newer by epoch never drops a promotion the running store holds: i
   assert.throws(() => carryControllerAuthority(both, { epoch: 8, holder: "ctl-b", authority: record({ promotionId: "pz", fenceEpoch: 6 }) }), refusedCarry(/does not hold the controller promotion p9/));
   assert.equal(carryControllerAuthority(both, { epoch: 8, holder: "ctl-c", authority: record({ promotionId: "p9", successor: "ctl-c", fencedEpoch: 5, fencedHolder: "ctl-b", fenceEpoch: 6 }) }).record?.successor, "ctl-c");
   assert.equal(carryControllerAuthority(both, { epoch: 3, holder: "ctl-a" }).holder, "promotion-fence:p9:5:ctl-b", "an older backup takes the fence and the record as they are");
+  // re-check: the record counts beside a fence too (a record and a fence of different promotions at the same epoch is not a state a promotion writes; it is refused unless both are covered)
+  const odd: AuthoritySide = { epoch: 6, holder: "promotion-fence:p9:5:ctl-b", authority: record({ promotionId: "pz", fencedEpoch: 5, fenceEpoch: 6 }) };
+  assert.throws(() => carryControllerAuthority(odd, { epoch: 8, holder: "ctl-c", authority: record({ promotionId: "p9", successor: "ctl-c", fencedEpoch: 5, fencedHolder: "ctl-b", fenceEpoch: 6 }) }), refusedCarry(/does not hold the controller promotion pz/));
   // no promotion on the running store: a newer backup is taken as it is, with or without a record
   assert.equal(carryControllerAuthority({ epoch: 2, holder: "controller" }, { epoch: 8, holder: "x" }).authority, null);
   // a tie still goes to the running store, whatever the backup holds
@@ -283,6 +286,12 @@ test("a staged restore records in its marker the epoch the carried authority was
       assert.deepEqual(await readControllerAuthority(staged), await readControllerAuthority(s));
     } finally { await staged.close(); }
     await sr.cancel();
+    // re-check: a backup made at the running epoch (a tie) is not described as deciding; the running record is kept
+    const same = await new BackupService(s, { root: join(dir, "b"), version: "t", now: () => new Date(Date.parse(T) + 60_000) }).backUpNow("manual");
+    assert.equal(same.manifest.epoch, eB);
+    const tie = await sr.preview(same.manifest.name);
+    assert.ok(tie.warnings.some((w) => /are kept from the running database/.test(w)), tie.warnings.join("\n"));
+    assert.equal(tie.warnings.some((w) => /later epoch/.test(w)), false, tie.warnings.join("\n"));
 
     // a live record damaged after the preview: the apply is refused in plain words, nothing staged or recorded; a new preview is refused the same way
     const t = new MemoryStorage();
