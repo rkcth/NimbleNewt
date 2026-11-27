@@ -430,11 +430,17 @@ test("sign-out check, -Hold: node starts with no pipe (the detached runner could
   assert.ok(h.includes("$psi.UseShellExecute = $false") && !/Redirect/.test(h), "no redirected handle");
   assert.ok(h.includes("if (-not $hp.WaitForExit(5 * 60000)) { try { $hp.Kill() } catch { }; throw"), "a time limit");
   assert.ok(h.includes("[System.IO.File]::WriteAllText($holdLogon, $logonHash, $utf8)") && !/\$t\b/.test(h), "only the hash is written");
-  assert.match(h, /Write-Host 'NOW: sign out of Windows[^\n]*\n\s+Write-Host '  powershell\.exe -NoProfile -ExecutionPolicy Bypass -File \.\\run-g05\.ps1 -AfterSignIn'/);
+  assert.match(h, /Write-Host "NOW, before \$\(\$until\): sign out of Windows[^\n]*\n\s+Write-Host '  powershell\.exe -NoProfile -ExecutionPolicy Bypass -File \.\\run-g05\.ps1 -AfterSignIn'/);
   assert.ok(/ends by itself at \$until at the latest/.test(h) && /A restart instead of the sign-out works the same/.test(h));
   assert.match(h.trimEnd(), /\n\s+exit 0\n\}$/, "it exits after the hold");
   assert.ok(!/Invoke-Captured|CreateFromDirectory|Remove-Item|Set-|New-Service/.test(h), "no info, no cases, no zip, no change to the machine");
-  assert.ok(/if \(\$holdCode -eq 2 -or \$null -eq \$st\) \{[^}]*REFUSED[^}]*exit 2/.test(h) && /FAILED: the task was started but was not seen running[^\n]*\n[^\n]*-AfterSignIn \(no sign-out needed\)[^\n]*\n\s+exit 1/.test(h));
+  assert.ok(/if \(\$holdCode -eq 2 -or \$null -eq \$st -or \[string\] \(Get-Field \$st 'runId'\) -eq \$prevRun\) \{[^}]*REFUSED[^}]*exit 2/.test(h) && /FAILED: the task was started but was not seen running[^\n]*\n[^\n]*-AfterSignIn \(no sign-out needed\)[^\n]*\n\s+exit 1/.test(h));
+  // A refused second -Hold (or a node that stops before it writes a state) keeps the recorded hold's logon hash: it is replaced or removed only once a NEW state (another run id) is there.
+  assert.ok(h.includes("$prevRun = [string] (Get-Field (Read-JsonFile $holdState) 'runId')") && h.indexOf("$prevRun = ") < h.indexOf("[System.Diagnostics.Process]::Start($psi)"));
+  const refusedAt = h.indexOf("-eq $prevRun) {");
+  for (const touch of ["[System.IO.File]::WriteAllText($holdLogon", "[System.IO.File]::Delete($holdLogon)", "[System.IO.File]::Delete($holdChecked)"]) {
+    assert.ok(h.includes(touch) && h.indexOf(touch) > refusedAt, `only after a new state: ${touch}`);
+  }
   const lh = code.slice(at("function Get-LogonHash {"), at("function Read-JsonFile"));
   assert.ok(lh.includes("Get-WhoamiText @('/logonid')") && lh.includes("-notmatch '^S-1-5-5-\\d+-\\d+$'") && lh.includes("ComputeHash($utf8.GetBytes($t.Trim()))"));
   // The CLI's side: the hold's idle task is time-limited by the launcher, and the runner is started detached with the plan's environment only.
@@ -454,6 +460,10 @@ test("sign-out check, -AfterSignIn: refused without a hold; the logon compared b
   const passOn = a.indexOf("if ([System.IO.File]::Exists($holdResult)) { $afterSignOutArgs = @('--after-sign-out', $holdResult) }");
   assert.ok(passOn > 0 && passOn < a.indexOf("if ($afterCode -ne 0 -or $null -eq $as)"), "passed whenever the file exists, before (not inside) the branch that reads it");
   assert.ok(a.includes("Add-Problem 'the sign-out check does not hold"));
+  // The exit code the script stops on is the one the CLI gives while a held process still runs (3), and only then.
+  const cliA = readFileSync(join(root, "scripts", "containment-evidence.mjs"), "utf8");
+  assert.ok(cliA.includes("process.exit(result.running ? 3 : 0);") && a.includes("if ($afterCode -eq 3) {"), "a still-running task stops -AfterSignIn before the cases");
+  assert.ok(a.includes("Write-Host '  To try again: run -Hold, sign out and back in within 30 minutes, then run -AfterSignIn.'") && a.includes("[DateTime]::UtcNow -gt $untilAt"), "a check that does not hold says how to try again");
   assert.ok(a.includes("-match '^nn-g05hold-[A-Za-z0-9]+$' -and (Get-EntryKind $root) -eq 'dir'") && a.includes("[System.IO.Directory]::Delete($root, $true)"));
   assert.ok(code.includes("if ($afterSignOutArgs.Count -gt 0) { $evidenceArgs += $afterSignOutArgs }"));
   assert.ok(code.includes("foreach ($name in @('info.stdout.txt', 'info.stderr.txt', 'evidence.stdout.txt', 'evidence.stderr.txt', 'hold.log.txt', 'after-sign-in.stdout.txt', 'after-sign-in.stderr.txt')) {"), "every new output is redacted into results and checked before the zip");

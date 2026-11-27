@@ -31,11 +31,11 @@ With the runner idle: Actions tab, **Own hardware**, **Run workflow**, branch `m
 **The Windows sign-out check (card A03b), by hand, not through the workflow.** This shows what a sign-out or restart does to a running confined task. The workflow cannot do it, because signing out also stops the runner. Download the artifact `windows-g05-owner-bundle` and extract it to a folder of its own in Downloads, as for the ten cases. In a normal (not elevated) PowerShell window in that folder:
 
 1. `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run-g05.ps1 -Hold` (starts one confined idle task; it ends by itself after 30 minutes at the latest).
-2. Sign out of Windows and sign back in (or restart instead).
+2. Within 30 minutes, sign out of Windows and sign back in (or restart instead).
 3. `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run-g05.ps1 -AfterSignIn` (checks the task is gone, sweeps what it left, checks again, then runs the ten cases).
 4. Send `nn-g05-results.zip` from the Desktop.
 
-While a hold is recorded, a plain `run-g05.ps1` refuses and says to run `-AfterSignIn`. If `-AfterSignIn` says the task is still running, you have not signed out since step 1: sign out and in, then repeat step 3.
+While a hold is recorded, a plain `run-g05.ps1` refuses and says to run `-AfterSignIn`. If `-AfterSignIn` says the task is still running, you have not signed out since step 1: sign out and in, then repeat step 3. If it says the check does not hold, start again at step 1.
 
 **Leftovers of the removed Windows Sandbox tests.** Runs before 2026-11-26 may have left folders `%ProgramData%\nn-wsb-real-XXXXXX` and `%ProgramData%\nn-wsb-host-XXXXXX`, records in `%LOCALAPPDATA%\NimbleNewt\wsb-records`, and `nn-g05-wsb` under the runner's temporary folder (which the runner empties at the start of each job). Nothing removes them automatically any more. To remove them by hand: list them with `dir /q %ProgramData%\nn-wsb-*` (the `/q` column shows each folder's owner); leave alone any folder whose owner is not the runner's account (a runner started elevated made its folders owned by `BUILTIN\Administrators`); for one that is the runner's, for each `control*\jobs\<job>\acl.json` in it run `icacls "<parent>" /restore "<file>"` for each entry it lists, last entry first, and then delete the folder and its record.
 

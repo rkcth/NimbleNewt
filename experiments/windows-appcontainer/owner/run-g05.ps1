@@ -11,7 +11,7 @@
 # The sign-out check (card A03b: what a sign-out or restart does to a running confined task), in the same folder, ONE short step by you in the middle:
 #   a. powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run-g05.ps1 -Hold
 #      (starts one confined idle task that does nothing; it ends by itself after 30 minutes at the latest)
-#   b. Sign out of Windows (Start, your name, Sign out) and sign back in. A restart instead works the same.
+#   b. Within 30 minutes, sign out of Windows (Start, your name, Sign out) and sign back in. A restart instead works the same.
 #   c. powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run-g05.ps1 -AfterSignIn
 #      (checks that the task is gone, sweeps what it left, checks again, then runs the ten cases as above)
 #   d. Send nn-g05-results.zip as in step 3.
@@ -338,8 +338,8 @@ if (-not $Hold -and -not $AfterSignIn -and [System.IO.File]::Exists($holdState))
 if ($Hold) {
   Write-Host 'sign-out check, step 1 of 2: starting one confined idle task (it does nothing and ends by itself after 30 minutes at the latest) ...'
   if ([System.IO.File]::Exists($holdLog)) { [System.IO.File]::Delete($holdLog) }
-  if ([System.IO.File]::Exists($holdLogon)) { [System.IO.File]::Delete($holdLogon) }
-  if ([System.IO.File]::Exists($holdChecked)) { [System.IO.File]::Delete($holdChecked) }
+  # The hold already recorded here, if any: a new hold that is refused (or a node that stops before it writes a state) leaves that hold and its logon hash as they are, for its -AfterSignIn.
+  $prevRun = [string] (Get-Field (Read-JsonFile $holdState) 'runId')
   # NOT through Invoke-Captured: the task's runner is started detached and outlives node, and a pipe node got from this script could be inherited by it (this script would then wait for its end).
   # node writes its own log file instead (control\hold\hold.log.txt), and its console output, if any, is only this window's.
   $holdCode = $null
@@ -354,13 +354,18 @@ if ($Hold) {
     $holdCode = $hp.ExitCode
   } catch { Write-Host "FAILED: the hold could not be started: $($_.Exception.Message). Nothing is held."; exit 1 }
   $st = Read-JsonFile $holdState
-  if ($holdCode -eq 2 -or $null -eq $st) {
+  if ($holdCode -eq 2 -or $null -eq $st -or [string] (Get-Field $st 'runId') -eq $prevRun) {
     Write-Host "REFUSED: the hold was not started (exit $holdCode; the reason is in control\hold\hold.log.txt). If it says an earlier hold is still running, sign out and in, then run -AfterSignIn."
     exit 2
   }
+  # A new hold is recorded: its logon hash replaces the earlier one (none when whoami fails, never an older hold's), and an earlier check's leftover state goes.
+  if ([System.IO.File]::Exists($holdChecked)) { [System.IO.File]::Delete($holdChecked) }
   $logonHash = Get-LogonHash
   if ($null -ne $logonHash) { [System.IO.File]::WriteAllText($holdLogon, $logonHash, $utf8) }
-  else { Write-Host '  whoami /logonid could not be read: the check will say the sign-out was not recorded (the gate refuses that).' }
+  else {
+    if ([System.IO.File]::Exists($holdLogon)) { [System.IO.File]::Delete($holdLogon) }
+    Write-Host '  whoami /logonid could not be read: the check will say the sign-out was not recorded (the gate refuses that).'
+  }
   $until = Format-LocalTime (Get-Field $st 'until')
   if ($holdCode -ne 0 -or (Get-Field $st 'childSeen') -ne $true) {
     Write-Host "FAILED: the task was started but was not seen running in its container (details: control\hold\hold.log.txt). It ends by itself by $until at the latest."
@@ -369,7 +374,7 @@ if ($Hold) {
   }
   Write-Host "HELD: the confined idle task is running. It ends by itself at $until at the latest, so nothing is left running if you stop here."
   Write-Host ''
-  Write-Host 'NOW: sign out of Windows (Start, your name, Sign out), sign back in, open PowerShell in this folder again and run:'
+  Write-Host "NOW, before $($until): sign out of Windows (Start, your name, Sign out), sign back in, open PowerShell in this folder again and run:"
   Write-Host '  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run-g05.ps1 -AfterSignIn'
   Write-Host '(A restart instead of the sign-out works the same. You may close this window.)'
   exit 0
@@ -409,7 +414,14 @@ if ($AfterSignIn) {
     Write-Host "  sign-out check: $($facts -join ', ')"
     $holds = ((Get-Field $as 'held') -eq $true) -and ((Get-Field $as 'newLogon') -eq $true) -and ((Get-Field $as 'taskRunningAfter') -eq $false) -and ((Get-Field $as 'sweepProblems') -eq 0) -and ((Get-Field $as 'leftoverAfterSweep') -eq 0) -and ((Get-Field $as 'grantsAfter') -eq 'clean') -and ((Get-Field $as 'interruptedRecorded') -eq $true)
     if ($holds) { Write-Host '  the sign-out check holds: the task was stopped, nothing of it was left after the sweep, and it is recorded as interrupted' }
-    else { Add-Problem 'the sign-out check does not hold (the fields above; the report says which, and the release gate refuses it)' }
+    else {
+      Add-Problem 'the sign-out check does not hold (the fields above; the report says which, and the release gate refuses it)'
+      # The held task's time limit had passed: it may have ended by itself before the sign-out (its record then says timed out, not interrupted).
+      $untilAt = $null
+      try { $untilAt = [DateTime]::Parse([string] (Get-Field $stBefore 'until'), [System.Globalization.CultureInfo]::InvariantCulture).ToUniversalTime() } catch { $untilAt = $null }
+      if ($null -ne $untilAt -and [DateTime]::UtcNow -gt $untilAt) { Write-Host '  the hold''s 30 minutes had passed before this check, so the task may have ended by itself before the sign-out.' }
+      Write-Host '  To try again: run -Hold, sign out and back in within 30 minutes, then run -AfterSignIn.'
+    }
     # The held task's own folders (a new nn-g05hold-* folder under TEMP), now that nothing of it runs and the sweep is done: removed without following a link.
     $root = [string] (Get-Field (Read-JsonFile $holdChecked) 'root')
     if ($root -and [System.IO.Path]::GetFileName($root) -match '^nn-g05hold-[A-Za-z0-9]+$' -and (Get-EntryKind $root) -eq 'dir') {
