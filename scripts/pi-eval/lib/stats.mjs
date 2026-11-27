@@ -82,7 +82,10 @@ export function gatesFor(variant, groups) {
     lines.push(`false done ${wrong}/${n} = ${pct(wrong / n)} [95% ${pct(w.low)}-${pct(w.high)}] gate <= ${pct(GATES.falseDoneMax)}: ${ok ? "ok" : "FAIL"}`);
   }
   if (unclassified > GATES.unclassifiedMax) failures.push(`${unclassified} unclassified non-finish(es)`);
-  lines.push(`unclassified non-finishes ${unclassified} gate = 0: ${unclassified === 0 ? "ok" : "FAIL"}`);
+  // W09 bench measurement: the share and its Wilson interval beside the count (informational; the gate is the count, unchanged). The count can name a run of no size twice (its outcome and its size), so the share is capped at all runs.
+  const share = Math.min(unclassified, n);
+  const uw = n > 0 ? wilson(share, n) : null;
+  lines.push(`unclassified non-finishes ${unclassified} gate = 0: ${unclassified === 0 ? "ok" : "FAIL"}${uw === null ? "" : ` (${share}/${n} = ${pct(share / n)} [95% ${pct(uw.low)}-${pct(uw.high)}], interval informational)`}`);
   const off = mine.reduce((a, g) => a + (g.continuationOff ?? 0), 0);
   if (off > 0) {
     failures.push(`${off} run(s) without the continuation as configured`);

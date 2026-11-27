@@ -1,7 +1,7 @@
 // Tests for the bench's aggregation, Wilson intervals and release gates.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { aggregate, continuationOff, gatesFor, renderReport, wilson } from "./lib/stats.mjs";
+import { aggregate, continuationOff, gatesFor, pct, renderReport, wilson } from "./lib/stats.mjs";
 
 const close = (a, b, eps = 1e-4) => assert.ok(Math.abs(a - b) < eps, `${a} vs ${b}`);
 
@@ -181,4 +181,19 @@ test("W04: a continuation run without the continuation as configured is left out
   const withB = renderReport([...good, ...runs("B", "S", { "verified-finish": 3 })]);
   assert.match(withB.text, /\| B +\| S +\| 1 +\| 3 /);
   assert.match(withB.text, /\| C +\| S +\| 1 +\| 10 /);
+});
+
+test("W09 bench measurement: the unclassified gate line shows the share and its Wilson 95% interval beside the count, labelled informational; the gate stays the count", () => {
+  const rec = (i, size, outcome) => ({ runId: `u${i}`, taskId: `t-${size}`, size, variant: "D", outcome, wallMs: 1 });
+  const some = [rec(1, "S", "verified-finish"), rec(2, "S", "unclassified"), rec(3, "M", "verified-finish"), rec(4, "L", "verified-finish")];
+  const g = gatesFor("D", aggregate(some));
+  const line = g.lines.find((l) => l.startsWith("unclassified"));
+  const w = wilson(1, 4);
+  assert.equal(line, `unclassified non-finishes 1 gate = 0: FAIL (1/4 = 25.0% [95% ${pct(w.low)}-${pct(w.high)}], interval informational)`);
+  assert.ok(g.failures.includes("1 unclassified non-finish(es)"));
+  // A run of no named size is unclassified; the share never passes all runs.
+  const odd = gatesFor("D", aggregate([{ runId: "q", taskId: "t", size: "X", variant: "D", outcome: "unclassified" }]));
+  assert.match(odd.lines.find((l) => l.startsWith("unclassified")), /^unclassified non-finishes 2 gate = 0: FAIL \(1\/1 = 100\.0% \[95% /);
+  // No runs: no share.
+  assert.deepEqual(gatesFor("D", []).lines.filter((l) => l.startsWith("unclassified")), ["unclassified non-finishes 0 gate = 0: ok"]);
 });
