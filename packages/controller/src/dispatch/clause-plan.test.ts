@@ -39,6 +39,16 @@ test("an apostrophe in the step or in the name does not hide a name quoted in an
   assert.match(clausePlanProblem(["one"], report(`- [x] C1: can't, src/a.test.ts "doesn't cut" a pair'`, f))!, /names "src\/a\.test\.ts" but none of its tests by name in quotes/);
 });
 
+test("each quote style reads up to quotesPerStep quotes of its own: a name after other quotes of its style is read, up to the cap, and quotes of another style do not use up its cap", () => {
+  const f: ChangedTestsReport["files"] = [{ path: "src/a.test.ts", built: "dist/a.test.js", titles: ["cuts whole"] }];
+  const cap = CLAUSE_PLAN_LIMITS.quotesPerStep;
+  const others = (n: number, q: string): string => Array.from({ length: n }, (_, i) => `${q}o${i}${q}`).join(" ");
+  assert.equal(clausePlanProblem(["one"], report(`- [x] C1: "the input" is handled, src/a.test.ts "cuts whole"`, f)), undefined, "the second double-quoted text");
+  assert.equal(clausePlanProblem(["one"], report(`- [x] C1: ${others(cap - 1, '"')} src/a.test.ts "cuts whole"`, f)), undefined, "the last one the cap reads");
+  assert.match(clausePlanProblem(["one"], report(`- [x] C1: ${others(cap, '"')} src/a.test.ts "cuts whole"`, f))!, /none of its tests by name in quotes/, "one past the cap is not read");
+  assert.equal(clausePlanProblem(["one"], report(`- [x] C1: ${others(cap, '"')} src/a.test.ts \`cuts whole\``, f)), undefined, "double quotes do not use up the back quotes' cap");
+});
+
 test("each kind of gap is named for its clause, in the contract's order, with the clause quoted and what would satisfy it", () => {
   const plan = [
     "- [ ] C1: packages/controller/src/chat/commands.test.ts \"a label is quoted\"",
