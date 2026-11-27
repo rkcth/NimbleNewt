@@ -28,7 +28,7 @@ import { EventService, EventSourceSettingsService, type EventSource } from "../e
 import { BudgetService, holderNotice, type NotifyAggregate } from "../budgets/index.js";
 import { CriticalPathService } from "../critical/index.js";
 import { NOTIFICATION_LIMITS, NotificationService, UrgentWatch, workSource, type ChannelAdapter } from "../notifications/index.js";
-import { EscalationLadderService, RecoveryLadderService, StallService, type RecoveryEffects, type StallOptions } from "../health/index.js";
+import { EscalationLadderService, RecoveryLadderService, StallService, type ConcernEvent, type RecoveryEffects, type StallOptions } from "../health/index.js";
 import { DomainError } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
 import { ASSIGNMENT_EVENTS, AssignmentService } from "../domain/assignments.js";
@@ -812,6 +812,19 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       const entry = (await routing.get())?.routes[route];
       return entry?.readTokensPerSecond === undefined ? undefined : { readTokensPerSecond: entry.readTokensPerSecond };
     };
+    // Card B02: what the controller sees go wrong or get put right (a denied request, a failed review, a stall confirmed as a failure and its later recovery) is kept as an observation, deduplicated by the record it comes from and limited per project and hour; a failure to record one never touches the event.
+    const observations = ObservationService.withEpoch(storage, epoch);
+    const observing = { id: "service:observations", kind: "service", name: "observations", grants: [] } as unknown as Principal;
+    const observe = async (command: Parameters<ObservationService["record"]>[1]): Promise<void> => { try { await observations.record(observing, command); } catch (error) { options.onInternalError?.(error); } };
+    // Card B02, second slice: a stall concern confirmed as a failure, and its recovery, each observed once per episode of the concern (the event names the stage and the episode).
+    const observeConcern = async (e: ConcernEvent): Promise<void> => {
+      const what = e.kind.replace("_", " ");
+      const steps = e.steps.length === 0 ? "" : ` after ${e.steps.length} recovery step(s) (${e.steps.join(", ")})`;
+      const event = `${e.stage}.${e.episode}`;
+      await observe(e.stage === "confirmed"
+        ? { commandId: `obs-stall:${e.concernId}:${event}`, kind: "failure", summary: `${e.by ?? "someone"} confirmed that task ${e.taskId} is stalled (${what}).`, detail: e.reason, sources: [{ kind: "stall-concern", id: e.concernId, event }] }
+        : { commandId: `obs-stall:${e.concernId}:${event}`, kind: "recovery", summary: `Task ${e.taskId} recovered from a ${what} stall${steps}.`, detail: e.reason, sources: [{ kind: "stall-concern", id: e.concernId, event }] });
+    };
     // How long an undecided concern waits at each level of the supervisor ladder: the owner's setting, else the installation's `stall.escalateAfterMs`, else 24 hours (owner decision 2026-10-30, supervisor ladder).
     const escalationLadder = EscalationLadderService.withEpoch(storage, epoch);
     // The recovery action ladder (card V02c): its effects are bound below, once the services they use are built.
@@ -819,7 +832,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     let recoveryRun: RecoveryEffects | undefined;
     // The automatic recovery steps (card V02c) run in the dispatcher's tick (loop `recovery.auto-step`) and judge "no answer in time" by the stall service's clock, which is the dispatcher's unless one is given for stall detection.
     const stallClock = options.stall?.clock ?? options.dispatch?.clock;
-    const stall = StallService.withEpoch(storage, epoch, assignments, waits, { ...(options.stall ?? {}), ...(stallClock === undefined ? {} : { clock: stallClock }), recoveryPolicy: () => recoveryLadder.policy(), recoveryEffects: { run: (action, ctx) => (recoveryRun ?? (() => { throw new DomainError("unavailable", "recovery steps are not available yet"); })()).run(action, ctx), unavailable: (action, ctx) => (recoveryRun?.unavailable?.(action, ctx) ?? Promise.resolve(undefined)) }, ladderHours: () => escalationLadder.hours(), ladderDamaged: async (n) => { await notifications.emitFromController({ commandId: n.id, kind: "maintenance", level: "needs-you", ref: { kind: "principal", id: "dispatcher" }, detail: n.detail }); }, declaredSpeed, isPaused: (taskId) => pauses.isPaused(taskId) });
+    const stall = StallService.withEpoch(storage, epoch, assignments, waits, { ...(options.stall ?? {}), ...(stallClock === undefined ? {} : { clock: stallClock }), onConcern: observeConcern, recoveryPolicy: () => recoveryLadder.policy(), recoveryEffects: { run: (action, ctx) => (recoveryRun ?? (() => { throw new DomainError("unavailable", "recovery steps are not available yet"); })()).run(action, ctx), unavailable: (action, ctx) => (recoveryRun?.unavailable?.(action, ctx) ?? Promise.resolve(undefined)) }, ladderHours: () => escalationLadder.hours(), ladderDamaged: async (n) => { await notifications.emitFromController({ commandId: n.id, kind: "maintenance", level: "needs-you", ref: { kind: "principal", id: "dispatcher" }, detail: n.detail }); }, declaredSpeed, isPaused: (taskId) => pauses.isPaused(taskId) });
     // Durable job records (card T07): a permitted background job's result goes to the pause service; no MCP connection check is bound until an MCP client exists, so no MCP operation is admitted.
     // The time a job or a review took is charged to its task by the dispatcher's budget service once that is built; a charge that fails is reported, and the job or review stands (card R05f).
     const charged = async (usage: { commandId: string; activity: "review" | "background-job"; taskId: string; agentId?: string; computeMs: number }): Promise<void> => { try { await dispatch?.chargeUse(usage); } catch (error) { options.onInternalError?.(error); } };
@@ -827,14 +840,10 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const mcpForJobs = McpService.withEpoch(storage, epoch);
     const jobs = JobService.withEpoch(storage, epoch, { pauses }, { host: DISPATCHER_PRINCIPAL, connections: { usable: (serverId) => mcpForJobs.usable(serverId) }, onCancel: (jobId, force) => { void jobRuns?.stop(jobId, force).catch((error: unknown) => options.onInternalError?.(error)); }, background: (principal, request) => pauses.recordFinishedJob(principal, request), longRunningGate: createMeetingGate({ attendance: () => (dispatch === undefined ? undefined : { service: dispatch.attendance, by: dispatch.principal }), ownerOf: async (taskId) => { const owner = (await assignments.getAssignment(taskId))?.owner; return owner?.kind === "agent" ? `agent:${owner.id}` : undefined; } }), longRunningLocks: async () => (dispatch === undefined ? [] : dispatch.attendance.meetingLocks()), onUsage: (u) => charged({ commandId: u.commandId, activity: "background-job", taskId: u.taskId, computeMs: u.computeMs }), wakes: true });
     // The reviewer's host is the one its running attempt is on, or the host a moved attempt is pinned to (known once the dispatcher is built); without one, or when the lookup fails, the host is not judged.
-    // Card B02: what the controller sees go wrong (a denied request, a failed review) is kept as an observation, deduplicated by the record it comes from and limited per project and hour; a failure to record one never touches the event.
-    const observations = ObservationService.withEpoch(storage, epoch);
     // Card B03: versioned lessons, their links and evidence; the outcomes are told to the proposers by the dispatcher's loop (dispatch-compose), which has the notices.
     const lessons = LessonService.withEpoch(storage, epoch);
     // Card B04: bounded baseline experiments (pinned criteria, runs in disposable environments, saved results); nothing here spends or launches anything.
     const experiments = ExperimentService.withEpoch(storage, epoch);
-    const observing = { id: "service:observations", kind: "service", name: "observations", grants: [] } as unknown as Principal;
-    const observe = async (command: Parameters<ObservationService["record"]>[1]): Promise<void> => { try { await observations.record(observing, command); } catch (error) { options.onInternalError?.(error); } };
     const reviews = ReviewService.withEpoch(storage, epoch, {
       onDecided: async (e) => { if (e.verdict === "deny") await observe({ commandId: `obs-deny:${e.requestId}`, kind: "correction", summary: `${e.decidedBy} denied a request to use ${e.tool} on task ${e.taskId}.`, detail: e.reason, sources: [{ kind: "review", id: e.requestId }] }); await activity.record({ id: "service:reviews", kind: "service", name: "reviews", grants: [] } as Principal, { commandId: `rev-act:${e.requestId}:${e.verdict}`, taskId: e.taskId, kind: "approval", summary: `${e.decidedBy} ${e.verdict === "allow" ? "approved" : "denied"} ${e.tool}: ${e.reason}`, manifest: { refs: [{ kind: "review", id: e.requestId }] }, outcome: "confirmed" } as never); },
       onUsage: (u) => charged({ commandId: u.commandId, activity: "review", taskId: u.taskId, agentId: u.agentId, computeMs: u.computeMs }), availability: pauses.workAvailability /* a meeting wake does not make a stopped agent a reviewer (card M04h) */, reviewerHost: async (principalId) => { try { return await dispatch?.hostOfAgent(principalId); } catch { return undefined; } } });
@@ -1806,6 +1815,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     // Maintenance windows for release updates (card K07): the dispatcher's `release.windows` sweep prepares and activates a window's release while no agent attempt runs, and tells the owner each outcome once.
     const releaseWindows = activation === undefined || options.releases === undefined ? undefined : ReleaseWindowService.withEpoch(storage, epoch, {
       activation, root: options.releases.root,
+      // The bound (K07): a window whose release this process does not run when the window closes has its switch undone, so it never starts at a later, unrelated time. Not started from a release: null.
+      runningRelease: options.releases.runningRelease ?? null,
       liveAttempts: async () => (dispatch === undefined ? 0 : (await dispatch.dispatcher.liveAttempts(dispatch.principal)).filter((x) => x.state === "running").length),
       // Quiesce and checkpoint (card K07): running attempts are suspended with the dispatcher's own Suspend and new work is held by the installation pause; the checkpoint is a verified backup.
       // `dispatch` is built later: until then there is nothing running to suspend.
