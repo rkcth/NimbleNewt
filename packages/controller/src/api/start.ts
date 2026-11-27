@@ -8,7 +8,7 @@ import { PiStateTransfers, RemotePiRestore, RemotePiState, RemoteThinkingStores,
 import { PlacementSettingsService } from "../remote/placement-settings.js";
 import { QuietHostSettingsService } from "../remote/quiet-host-settings.js";
 import { ReconnectSettingsService } from "../remote/reconnect-settings.js";
-import { FLOOR_RETIRED_SETTINGS, FLOOR_SETTINGS, MeetingFloorService, floorSettingsFrom, InvitationInbox, MeetingWakeHost, MEETING_LIMITS, MEETING_SETTINGS, MeetingService, meetingWakeSink, safeLongRunningOf, SAFE_LONG_RUNNING_SETTING, checkMeetingWakeTimeout, type HostWakeRequest } from "../meetings/index.js";
+import { FLOOR_RETIRED_SETTINGS, FLOOR_SETTINGS, floorFollowUps, floorSourceRevision, MeetingFloorService, floorSettingsFrom, InvitationInbox, MeetingWakeHost, MEETING_LIMITS, MEETING_SETTINGS, MeetingService, meetingWakeSink, safeLongRunningOf, SAFE_LONG_RUNNING_SETTING, checkMeetingWakeTimeout, type HostWakeRequest } from "../meetings/index.js";
 import { RetirementService } from "../retirement/index.js";
 import { DeletionLedger, LEDGER_FILE, QuotaMeter, RETENTION_DEFAULTS, ReserveFile, RetentionService, RetentionSettingsService, combineThinkingStores, guardStorage, localThinkingStores, type RetentionValues } from "../retention/index.js";
 import { JOURNAL_FILE, PENDING_FILE, keepDataLocks, type DataLockKeeper, type LockEnv } from "../backup/index.js";
@@ -1591,7 +1591,9 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       procedure: () => procedureLive,
       settleOwner: async (n) => { for (const k of n.kinds) await notifications.settleFromController({ commandId: `meeting-${k}-settled-${n.recordId}-${Date.now().toString(36)}`, kind: "maintenance", ref: { kind: `meeting-${k}`.slice(0, 40), id: n.recordId }, projectId: n.projectId }); },
       notifyOwner: async (n) => { await notifications.emitFromController({ commandId: `meeting-${n.kind}-${n.recordId}${n.key === undefined ? "" : `-${n.key}`}`.slice(0, 120), kind: "maintenance", level: "needs-you", ref: { kind: `meeting-${n.kind}`.slice(0, 40), id: n.recordId }, projectId: n.projectId, detail: n.text.slice(0, 200) }); },
-      followUps: { create: async (i) => { const t = await projects.createTask({ commandId: i.commandId, actor: meetingController.id, projectId: i.projectId, title: i.title.slice(0, 150), description: `${i.description}${i.owner === undefined ? "" : ` Owner: ${i.owner}.`}`.slice(0, 2000) } as never); return { id: t.id }; } },
+      // A follow-up the meeting left open is given to the agent that owns it (best effort: the task stays open and names its owner when that cannot be done); a cited source is checked only in the meeting's own project.
+      followUps: floorFollowUps({ createTask: async (c) => projects.createTask(c as never), assignTask: async (c) => assignments.assignTask(c), actor: meetingController.id }),
+      sourceRevision: floorSourceRevision(storage),
       ...(options.meetingFloor?.checkpointOf === undefined ? {} : { checkpointOf: options.meetingFloor.checkpointOf }),
       ...(options.meetingFloor?.persona === undefined ? {} : { persona: options.meetingFloor.persona }),
       ...(options.meetingFloor?.deskNotes === undefined ? {} : { deskNotes: options.meetingFloor.deskNotes }),

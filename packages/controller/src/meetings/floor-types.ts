@@ -137,6 +137,8 @@ export interface OwnerAnswerRecord {
   readonly completed: readonly string[];
   readonly proposed: readonly string[];
   readonly stale: readonly string[];
+  /** Sources the answer cited with a revision that could not be checked (a private kind, another project's record, a record that does not exist, a failed read): never marked current. Absent on older entries. */
+  readonly unchecked?: readonly string[];
   readonly checkpoint?: string;
   readonly held?: true;
 }
@@ -197,7 +199,11 @@ export interface FloorBody {
   readonly held: readonly HeldAnswer[];
   readonly ownerAnswers: readonly OwnerAnswerRecord[];
   readonly investigations: readonly { readonly text: string; readonly by: string; readonly entryId?: string; readonly taskId?: string }[];
-  readonly followUps: readonly { readonly key: string; readonly taskId: string; readonly title: string; readonly owner?: string }[];
+  /** `assigned`: the task was given to its owner (absent on entries made before that was kept, false when the assignment could not be made: the task stays open and names its owner). */
+  readonly followUps: readonly { readonly key: string; readonly taskId: string; readonly title: string; readonly owner?: string; readonly assigned?: boolean }[];
+  /** When the floor itself turned what the ended meeting left open into follow-up tasks (once, after the meeting ended); `followUpTries` counts the scheduled turn's attempts until then, at most `FLOOR_LIMITS.followUpTries`. */
+  readonly followUpsAt?: string | undefined;
+  readonly followUpTries?: number | undefined;
   readonly notices: readonly Notice[];
   readonly priorities: readonly { readonly itemId: string; readonly urgency?: string; readonly at: string }[];
   readonly waitingTool?: { readonly tool: string; readonly agent: string; readonly since: string } | undefined;
