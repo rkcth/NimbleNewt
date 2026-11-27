@@ -20376,6 +20376,44 @@ Plain words first. The first real W09 reading (section "W09 real run on Radiance
 - Deliberate breakages (10, on the compiled files, each restored and checked by sha256): 10 caught after the two tests above (8 before). NaN accepted; negative accepted; huge dropped; day total unbounded; `counted` starting true; per-call sum unbounded; either count enough; the description put in as a replacement pattern; `replyCutOf` export dropped; `Math.floor` dropped.
 - Verified on Node 22 and Node 24.21.0 (offline guard, `NIMBLENEWT_REQUIRE_SANDBOX=1`, one at a time): chat 1,751 (then 1,751 with the two added assertions, which are inside existing tests), dispatch 1,618, work-end 258, remote 1,092, integration w09f 1, reply-room 5, `w09-worker-bench` 20, `plan.test.mjs` 6; all passed. `tsc --build --force`, `api:docs:write` (no change), `check:deps`, `licenses:check`, `roadmap:check` ok. The measurement code (`stats`, `classify`, `radiance-gate`, `taskset`, acceptance files) is untouched by these commits; the description is substituted by a replacement function (`interrogator.ts`), unchanged by the second review.
 
+## W09 real run on Radiance, second reading after the W09 fixes (Claude agent, 2026-11-27 04:49 to 05:38 EST; branch `card-w09-rerun`; card NOT flipped; task-plan files unchanged; not pushed)
+
+The W09 worker bench run again on the real Radiance server after the W09 fixes merged to main, with the first reading's settings so the outcomes can be compared directly: three runs of variant D (the shipped worker) on the small task quote-lines. **Result: the W09 gates are still NOT met** (2 of 3 verified finishes, 1 false done). This is a recorded result, not a pass. No gate, grader, bench or product code was changed. The results are as the bench wrote them.
+
+**Setup.** Bench commit `e92e65f4` (origin/main, clean tree), `npm ci --ignore-scripts` and `tsc --build --force` (clean) on Node 22.23.0 in `/srv/ai/code-worktrees/card-w09-rerun`. As in the first reading, the real run started from the /srv/ai worktree without trouble. The /srv/ai sandbox problem only affects the offline-guard tests, not `worker-run.mjs`. Server `http://127.0.0.1:8002/v1` (Radiance, stats version 2.2.0). The key was read by the bench (`radianceConfig`) and never printed. Before starting, the bench's own `readRadiance` showed the server idle (in_flight, running and waiting 0) and `qwen3.8-flash-next-iq4r` first in `GET /v1/models`, the task set's pinned model. Nothing was loaded, unloaded or switched. Route `radiance/qwen3.8-flash-next-iq4r`, kind `radiance`, window 200,000, no route budget (no `--max-tokens` or `--reasoning-tokens`), as in the first reading. One run at a time and one model request at a time (`radianceOnlyFetch`). Grading went through `/tmp/nn-slot.sh`.
+
+**Command:** `node scripts/pi-eval/worker-run.mjs --tasks quote-lines --variants D --repeats 3 --context-tokens 200000 --test-slot /tmp/nn-slot.sh`, one batch `w09-batch-20261127T094958`. The first reading's three runs came from three batches with `--repeats 1` (one of them with `--keep`). The settings are otherwise the same. Results are in `/srv/code/worktrees-pi/eval-results/worker/` (`worker-results.jsonl`, `w09-batch-20261127T094958-report.md`, `runs/quote-lines-WD-r{1,2,3}-*`), with the release blocker at `release-blockers/w09-w09-batch-20261127T094958.{json,md}`. Results are not in the repository, as the README says.
+
+**Per run** (all quote-lines, size S, variant D, limit 60 min):
+
+| run | attempt | agent time | outcome (cause) | done, checks, questioning | requests agent / second / refused | replyCut (cuts, limit, ceiling) | nudges, early stops, readmits | checkout calls | acceptance (hidden) | shipped suites |
+|---|---|---|---|---|---|---|---|---|---|---|
+| r1 (04:50 EST) | `att-uf3bny6wqn7ejx6ijppn` | 9.7 min | **verified-finish** (`verified`) | done, the build check passed twice, questioning `supported` after 3 questions | 101 / 2 / 0 | none | 0, 0, 0 | 65 run, 26 edit, 3 write, 3 read (+1 failed) | 15 of 15 | 154 of 154 |
+| r2 (05:01 EST) | `att-luellb2wvi4zow5wg3yx` | 19.8 min | **verified-finish** (`verified`) | done, the build check passed, questioning `supported` after 0 questions | 88 / 1 / 0 | 1, 8,192, 25,000 | 1, 0, 0 | 49 run, 28 edit, 4 write, 3 read (+1 failed) | 15 of 15 | 154 of 154 |
+| r3 (05:23 EST) | `att-mcmo52ncxzouzpgcvy4u` | 12.9 min | **wrong** (`false-done`) | done, the build check passed twice, questioning `supported` after 3 questions | 76 / 2 / 0 | 2, 16,384, 25,000 | 2, 0, 0 | 50 run, 28 edit, 3 write, 1 read (+1 failed) | 14 of 15: `not ok 3 - a long name is cut between whole characters and whole escapes, at its own bound and at the line's` | 153 of 154 |
+
+No run recorded `questioningCause` or `questioningWhy` (all three questionings ran and ended `supported`).
+
+**Gates of the shipped variant (D), over the three runs** (W01's gates, `stats.mjs` unchanged, from the batch's own report): S verified finish 2 of 3 = 66.7 % [95 % 20.8 % to 93.9 %] against at least 90 %: FAIL. M and L were not measured: FAIL. False done 1 of 3 = 33.3 % [6.1 % to 79.2 %] against at most 5 %: FAIL. Unclassified non-finishes 0: ok. Causes: `verified 2, false-done 1`. `RESULT: FAIL (D fail)`, and a release blocker was written. Three runs of one task are a reading, not a rate.
+
+**Compared with the first reading** (same task, variant, route, window and budget):
+- Verified finishes went from 0 of 3 to 2 of 3. False dones stayed at 1 of 3, and the unclassified count went from 1 to 0.
+- No run ended `length`. Runs r2 and r3 each had thinking-only cuts. The worker raised its reply limit from 4,096 to 8,192 (r2) and to 16,384 (r3), below the 25,000 ceiling, and both runs went on to a done. In the first reading, run 2 ended `length` at 4,096.
+- The second agent ran in all three runs: 1 or 2 requests each, never `not-run`. In the first reading, run 1 was `not-run`.
+- The false done fails the same acceptance test as the first reading's run 3 (cutting a long name between whole characters and escapes). **A wrong done was again found `supported`**: r3's second agent asked 3 questions, now with the task's description in its prompt, and still accepted the report. So showing the description to the second agent did not catch this edge case on this run.
+- The agents yielded much less: 0 to 2 nudges and no W03 early stops or readmits per run, against 6 to 9 nudges, 2 to 3 early stops and 2 readmits before. Agent time was 9.7, 19.8 and 12.9 min, against 16.8, 5.5 and 35.5 min before.
+- r2's second agent marked the report `supported` with 0 questions, after one request.
+
+**Shared server.** The gate waited 29 ms, 9 ms and 12 ms before the runs. The server's `total_requests` rose by 103, 89 and 78 across the three runs: 9,136 to 9,239, then 9,328, then 9,406. That equals the bench's own counts (agent plus second), so no other user's request reached the server during the batch. At most one request was ours at any time, within the two-request rule. The batch took 48 min wall time, and grading took about 1.7 to 1.8 min per run.
+
+**Not recorded by the bench, so not reported here:**
+- *The second agent's latency per call.* `radianceOnlyFetch` passes each call's `ms` to `onCall`, but `worker-run.mjs` only counts the calls.
+- *The tokens counted under the daily cap of the controller's calls.* The day's spend record lives in the installation's data folder, which is removed at the end of a run without `--keep` (the first reading's comparable runs also had no `--keep`). The record's `batchTokensSpent` is 0 for each run, the bench's own batch budget (`tokenBudget: Infinity`), not that cap.
+
+Recording both would be a bench change (keep `ms` for non-streamed calls, and copy the spend record before close). It was not made here, so this run stays comparable.
+
+**Not done.** Variants A to C, sizes M and L, `--reasoning-tokens` (whether Radiance honours `thinking_token_budget`), more repeats. The W09 card stays planned.
+
 ## Hand-off brief names the agent's newest code submission (Claude agent, Sonnet 5.5, 2026-11-27; branch `card-bridge-submissions`; no card flipped; task-plan files unchanged; not pushed; no workflow dispatched)
 
 **Problem** (found by the P02 deliverable test work): an agent working only through its tool bridge had no easy way to learn the ID of the code submission its own `work.end { submit: true }` opened. `work.end` freezes the attempt before the submission exists, and the next attempt's prompt named no submission ID, so the agent could not readily draft the code deliverable for it.
