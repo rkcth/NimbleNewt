@@ -12,6 +12,12 @@ import { normalizeRecipe, type NormalizedRecipe } from "./recipe.js";
 const run = promisify(execFile);
 const SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
 
+/**
+ * Card H12i: Seatbelt confines a program on the host's own loopback, so a proxy served there for a task's route would be open to every other process on the Mac. This release gives macOS agents no route; a routed task is refused in these
+ * words (the launcher uses them) and waits for a Linux host. A macOS route design is a later card.
+ */
+export const SEATBELT_REFUSED_ROUTE = "route: the macOS (Seatbelt) backend gives an agent no route out in this release (the sandbox shares this machine's loopback, so a proxy there would be open to other processes); a task that needs the web or a local server waits for a Linux host";
+
 export interface SeatbeltOptions {
   /** The program, as an absolute path. Default: `/usr/bin/sandbox-exec`. */
   readonly executable?: string;
@@ -104,6 +110,7 @@ export function seatbeltBackend(options: SeatbeltOptions = {}): SandboxBackend {
 
   return {
     name: "seatbelt",
+    routeRefusal: SEATBELT_REFUSED_ROUTE,
     plan,
     guestView: (recipe): GuestView => ({ workdir: recipe.workdir, home: recipe.home, scratch: recipe.scratch, tmp: tmpOf(recipe), inputs: recipe.readOnly.map((m) => ({ host: m.host, guest: m.host })) }),
     async descendants(pid: number): Promise<readonly { pid: number; started: string }[]> {

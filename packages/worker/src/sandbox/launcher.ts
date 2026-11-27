@@ -245,7 +245,8 @@ export class SandboxLauncher {
       backendName = this.#backend.name;
       const backend = this.#backend;
       if (request.stream !== undefined && backend.interactiveInput === false) throw new SandboxError("unavailable", `stream: the ${backend.name} backend cannot give a confined program the controller's pipes (a pipe made for a program inside the container hangs), so a program that talks over standard input and output is refused; use a request without \`stream\` (standard handles are files)`);
-      if (recipe.route !== undefined && backend.privateNetwork !== true) throw new SandboxError("invalid_recipe", `route: the ${backend.name} backend does not give the sandbox a network of its own, so a route (a proxy on the loopback) would be open to other processes on this machine; it is refused`);
+      // A backend that has its own words for the refusal (native Windows, macOS Seatbelt: a task that needs a route waits for a Linux host) is the one the task and the owner hear; the generic reason is for a backend that has none.
+      if (recipe.route !== undefined && backend.privateNetwork !== true) throw new SandboxError("invalid_recipe", typeof backend.routeRefusal === "string" && backend.routeRefusal.trim() !== "" ? backend.routeRefusal : `route: the ${backend.name} backend does not give the sandbox a network of its own, so a route (a proxy on the loopback) would be open to other processes on this machine; it is refused`);
       makePlan = () => backend.plan(recipe, command, runId, { interactive: request.stream !== undefined });
     }
 

@@ -8,7 +8,7 @@ import type { SandboxBackend } from "./backend.js";
 import { SandboxError } from "./errors.js";
 import { groupKillSafe, SandboxLauncher, type LaunchRecord, type RunResult } from "./launcher.js";
 import type { SandboxRecipe } from "./recipe.js";
-import { seatbeltBackend } from "./seatbelt.js";
+import { SEATBELT_REFUSED_ROUTE, seatbeltBackend } from "./seatbelt.js";
 import { windowsDefaultBackend } from "./windows-native.js";
 import { bubblewrapBackend } from "./linux.js";
 
@@ -310,10 +310,36 @@ describe("sandbox launcher (bubblewrap)", () => {
     const plain: SandboxBackend = { name: "shared-network", health: async () => ({ healthy: true, backend: "shared-network" }), plan: () => { throw new Error("must not be planned"); }, guestView: () => ({ workdir: "/w", home: "/h", scratch: "/s", tmp: "/t", inputs: [] }) };
     const seen: LaunchRecord[] = [];
     const l = await SandboxLauncher.create({ backend: plain, protectedPaths: [], audit: (r) => { seen.push(r); } });
-    await assert.rejects(l.launch({ recipe: recipe({ route: { proxyPort: 3128 } }), command: ["/bin/true"], timeoutMs: 1000, maxOutputBytes: 100 }), (e: unknown) => e instanceof SandboxError && e.code === "invalid_recipe" && /route/.test(e.message));
+    // A backend with no words of its own gets the launcher's generic reason.
+    await assert.rejects(l.launch({ recipe: recipe({ route: { proxyPort: 3128 } }), command: ["/bin/true"], timeoutMs: 1000, maxOutputBytes: 100 }), (e: unknown) => e instanceof SandboxError && e.code === "invalid_recipe" && e.message === "route: the shared-network backend does not give the sandbox a network of its own, so a route (a proxy on the loopback) would be open to other processes on this machine; it is refused");
+    // Wording that is empty or not text is not used: the generic reason again, and still a refusal.
+    for (const routeRefusal of ["", "   ", 7 as unknown as string]) {
+      const l2 = await SandboxLauncher.create({ backend: { ...plain, routeRefusal }, protectedPaths: [], audit: (r) => { seen.push(r); } });
+      await assert.rejects(l2.launch({ recipe: recipe({ route: { proxyPort: 3128 } }), command: ["/bin/true"], timeoutMs: 1000, maxOutputBytes: 100 }), (e: unknown) => e instanceof SandboxError && e.code === "invalid_recipe" && /other processes on this machine/.test(e.message));
+    }
+    // Wording never turns a refusal into an acceptance: a backend without a private network that has its own words is still refused, in those words.
+    const l3 = await SandboxLauncher.create({ backend: { ...plain, routeRefusal: "route: not here" }, protectedPaths: [], audit: (r) => { seen.push(r); } });
+    await assert.rejects(l3.launch({ recipe: recipe({ route: { proxyPort: 3128 } }), command: ["/bin/true"], timeoutMs: 1000, maxOutputBytes: 100 }), (e: unknown) => e instanceof SandboxError && e.code === "invalid_recipe" && e.message === "route: not here");
     assert.deepEqual(seen, []);
     assert.equal(bubblewrapBackend().privateNetwork, true);
+    assert.equal(bubblewrapBackend().routeRefusal, undefined);
     assert.notEqual(seatbeltBackend().privateNetwork, true, "macOS shares the host's loopback");
+  });
+
+  test("H12i: on macOS a routed task is refused in plain words on a real launch (Seatbelt shares the loopback; the task waits for a Linux host), with no plan and no record", async () => {
+    const seat = seatbeltBackend();
+    assert.equal(seat.routeRefusal, SEATBELT_REFUSED_ROUTE);
+    // The real Seatbelt backend with only its health replaced, so the launcher has capacity on this host; its plan must never be reached.
+    let planned = 0;
+    const stand: SandboxBackend = { ...seat, health: async () => ({ healthy: true, backend: "seatbelt" }), plan: (...args) => { planned++; return seat.plan(...args); } };
+    const seen: LaunchRecord[] = [];
+    const l = await SandboxLauncher.create({ backend: stand, protectedPaths: [], audit: (r) => { seen.push(r); } });
+    let refused: unknown;
+    await assert.rejects(l.launch({ recipe: recipe({ route: { proxyPort: 3128 } }), command: ["/bin/true"], timeoutMs: 1000, maxOutputBytes: 100 }), (e: unknown) => { refused = e; return e instanceof SandboxError && e.code === "invalid_recipe"; });
+    assert.equal((refused as Error).message, SEATBELT_REFUSED_ROUTE);
+    assert.equal(SEATBELT_REFUSED_ROUTE, "route: the macOS (Seatbelt) backend gives an agent no route out in this release (the sandbox shares this machine's loopback, so a proxy there would be open to other processes); a task that needs the web or a local server waits for a Linux host");
+    assert.equal(planned, 0);
+    assert.deepEqual(seen, []);
   });
 
   ifUsable("H12i: a sandbox with a route sees the proxy settings, the launch record names the route, and the sandbox still has no network of its own", async () => {

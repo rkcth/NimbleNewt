@@ -83,7 +83,7 @@ const bad = (message: string): never => { throw new SandboxError("invalid_recipe
 /** The variables the launcher sets itself, compared without regard to case (Windows names are case-insensitive). */
 const OWN_ENV = new Set(["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "TMPDIR", "PATH", "SYSTEMROOT", "WINDIR", "NPM_CONFIG_CACHE"]);
 
-export const REFUSED_ROUTE = "route: the native Windows backend gives an agent no route out in this release (a proxy on the loopback would need a loopback exemption, which is never added); a task that needs the web or a local server waits for a Linux or macOS host";
+export const REFUSED_ROUTE = "route: the native Windows backend gives an agent no route out in this release (a proxy on the loopback would need a loopback exemption, which is never added); a task that needs the web or a local server waits for a Linux host";
 
 /** A local absolute normalised path of a program or folder the supervisor reads (these may live in Program Files). */
 export function checkProgramFolder(label: string, path: unknown): string {
