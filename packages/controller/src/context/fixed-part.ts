@@ -38,8 +38,10 @@ import { admitFirstCall, type FirstCall } from "./dispatch.js";
  *    starts a task on it is 22,248). The next addition does steps 1 to 3.
  * Card W09's second slice added one completion rule (`COMPLETION_BOUNDARY_RULE`, 105 characters and its paragraph break): measured 2,644 + 19,589 (22,233, 7,411 tokens, still about 7,400). The system text's budget moved from 2,600 to
  *    2,648, so the floor is 22,248, exactly the most that starts a task on 36,864: the window told is unchanged and no room is left. The next addition does steps 1 to 3 or shortens other text.
+ * Card W09's third slice added the test rule (`COMPLETION_TEST_RULE`, 155 characters and its paragraph break) and paid for it by shortening the plan, check and end rules (170 characters): measured 2,631 + 19,589 (22,220, 7,407
+ *    tokens, still about 7,400). The budget stays 2,648 + 19,600 (the floor 22,248, the window told 36,864); 17 characters of system text are left under it. The next addition shortens other text first or does steps 1 to 3.
  */
-export const WORKER_FIXED_PART = { systemPromptChars: 2_644, toolSchemaChars: 19_589 } as const;
+export const WORKER_FIXED_PART = { systemPromptChars: 2_631, toolSchemaChars: 19_589 } as const;
 /** The most the real fixed part may grow to before the budget test fails: a little room over the measured figures, no more. It is also the floor counted for a route nobody has measured (`ROUTE_FLOOR_DEFAULTS`). */
 export const WORKER_FIXED_PART_BUDGET = { systemPromptChars: 2_648, toolSchemaChars: 19_600 } as const;
 export const WORKER_FIXED_PART_CHARS = WORKER_FIXED_PART.systemPromptChars + WORKER_FIXED_PART.toolSchemaChars;

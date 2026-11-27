@@ -1,3 +1,4 @@
+import { waitRefusal } from "./wait-guard.js";
 import { createHash } from "node:crypto";
 import { parseName, wireName } from "@nimblenewt/registry";
 import type { AgentMessageService } from "../messaging/index.js";
@@ -1168,6 +1169,9 @@ export class ToolExecutionService {
       if (typeof v !== "string" || (!empty && v.length === 0) || v.length > max || v.includes("\0")) return invalid(k, `${action} needs ${k}: text of ${empty ? 0 : 1} to ${max} characters without a NUL`);
       request[k] = v;
     }
+    // W09 third slice: a command that only waits (a long sleep, alone or before the next command) is refused before it is recorded or run, with a hint to run the named test instead (`wait-guard.ts`).
+    const waits = action === "run" ? waitRefusal(request["command"]!) : undefined;
+    if (waits !== undefined) return invalid("command", waits);
     const checkout = this.#deps.checkout;
     if (checkout === undefined) throw new DomainError("unavailable", "this controller cannot run the checkout tool");
     const changes = action !== "read";

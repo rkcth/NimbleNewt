@@ -70,3 +70,23 @@ test("replacement-pattern characters in the description are kept as written", ()
   assert.ok(p.includes(`"${description}"`), p.slice(0, 400));
   assert.equal(p.split("REPORT-TEXT").length, 2, "the report appears once: nothing was copied by a pattern");
 });
+
+// W09 third slice: the clauses are numbered C1 to Cn for the second agent, with a line naming those the report does not show tested; at the most clauses and their longest the round line is still never cut.
+test("W09 third slice: the criteria are numbered, the clauses not shown tested are named, and 50 clauses of 500 characters still leave the round line in the prompt", () => {
+  const p = promptOf(base({ report: 'C2: src/a.test.ts "empty" ok 3' }, { acceptanceCriteria: ["cuts whole", "empty gives empty", "bounded"] }));
+  assert.match(p, /Acceptance criteria: C1 "cuts whole", C2 "empty gives empty", C3 "bounded"\n/);
+  assert.match(p, /Clauses not shown tested \(a report line naming C<n>, a test name in double quotes and a passing result\) and not asked about: C1, C3\. Ask about each before you answer supported; the controller asks about any you leave\./);
+  assert.match(promptOf(base({ report: 'C1 "a" ok\nC2 "b" ok' }, { acceptanceCriteria: ["x", "y"] })), /Clauses: each of C1 to C2 is shown tested/);
+  assert.ok(!promptOf(base()).includes("Clauses"), "no clauses: nothing is said");
+  const rounds = [{ questions: ["q1".repeat(140), "q2".repeat(140), "q3".repeat(140)], answers: ["a".repeat(800), "b".repeat(800), "c".repeat(800)] }, { questions: ["r1".repeat(140), "r2".repeat(140), "r3".repeat(140)], answers: ["d".repeat(800), "e".repeat(800), "f".repeat(800)] }];
+  const notes = Array.from({ length: 30 }, (_, i) => ({ kind: "progress", text: `note ${i} `.repeat(40), at: "2026-11-27T00:00:00Z" })) as never;
+  for (const count of [1, 20, 21, 49, 50]) {
+    const criteria = Array.from({ length: count }, (_, i) => `${i} ${"\u202e".repeat(50)}${"w".repeat(450)}`);
+    const big = promptOf(base({ rounds, notes, report: "r".repeat(4000), round: 3 }, { description: "edge case: ".repeat(2000), acceptanceCriteria: criteria }));
+    assert.ok(big.length <= INTERROGATOR_LIMITS.prompt, `${count}: ${big.length}`);
+    assert.ok(!big.endsWith("(cut to fit)"), `${count}: nothing after the description was cut`);
+    assert.match(big, /This is the last round \(3\)/);
+    assert.match(big, new RegExp(`C${count} "`), `${count}: the last clause is numbered`);
+    assert.ok(!big.includes("\u202e"), "controls escaped");
+  }
+});

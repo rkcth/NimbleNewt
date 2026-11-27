@@ -44,6 +44,7 @@ import { DISPATCHER_PRINCIPAL, type TaskCredentialService } from "../security/ta
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
 import { ANCHOR_RECORD_KEEP, type AnchorRecord, DISPATCHER_ACTOR, DISPATCH_KIND, DISPATCH_LIMITS, DONE_VERIFY_LIMITS, STOPPED_EARLY_KIND, STOPPED_EARLY_READMITS, TASK_ATTEMPTS_KIND, TASK_ATTEMPTS_LIMIT, WORK_REPORT_KIND, WORK_REPORT_LIMITS, type AttemptReport, type DispatchBody, type LaunchLimitsRecord, type DoneVerification, type Interrogation, type InterrogationRound, type PlanCount, type TaskAttemptsBody, type WorkNote, type WorkNoteKind, type WorkReportTaskBody, type DispatchRevisions, type Frozen, type ToolIdentity, type ToolOperationBody, withSlotSpans } from "./model.js";
 import { ToolPath, type Loaded } from "./tools.js";
+import { withClauseRule } from "./clause-questions.js";
 import { askingMessage, earlierReportNote, isNoteKind, keptText, qaOf, unansweredMessage, unsupportedMessage, type InterrogationInput, type InterrogatorAnswer, type ReportInterrogatorPort, type ReportVerdict } from "./report.js";
 import { sealContract } from "../remote/contract.js";
 import { boundContextUpdates } from "./context-updates.js";
@@ -1409,7 +1410,10 @@ export class DispatcherService {
     if (this.#deps.interrogator === undefined) why = "no second agent is set up on this controller";
     else {
       try {
-        answer = await this.#deps.interrogator.ask(await this.#interrogationInput(b, text, request.verified, rounds, round, prior === undefined ? undefined : { ...(prior.reason === undefined ? {} : { reason: prior.reason }), questions: prior.rounds[prior.rounds.length - 1]?.questions ?? [] }));
+        const input = await this.#interrogationInput(b, text, request.verified, rounds, round, prior === undefined ? undefined : { ...(prior.reason === undefined ? {} : { reason: prior.reason }), questions: prior.rounds[prior.rounds.length - 1]?.questions ?? [] });
+        const given = await this.#deps.interrogator.ask(input);
+        // W09 third slice: with contract clauses, a supported is taken only once every clause is shown tested in the report or was asked about (the controller asks about the rest itself; `clause-questions.ts`).
+        answer = given === null || typeof given !== "object" ? given : withClauseRule(given, { criteria: input.task.acceptanceCriteria, report: input.report, rounds: input.rounds, round, maxRounds: input.maxRounds }) as InterrogatorAnswer;
       } catch (error) {
         this.#options.onError?.(error);
         why = `the second agent could not be asked: ${errorText(error).slice(0, 200)}`;

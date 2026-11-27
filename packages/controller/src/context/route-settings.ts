@@ -10,7 +10,7 @@ const REF = { kind: "ctx-route-settings", id: "main" } as const;
 
 /**
  * The floor of the fixed part of a route nobody has measured yet: the real worker's system text and bridge tool schemas, at their budget (`WORKER_FIXED_PART_BUDGET`, 2,800 + 19,400 characters since card T08's fourth slice, a little over the measured
- * 2,537 + 19,087; 2,600 + 19,600 since card W09b, over 2,537 + 19,589, the same 22,200 in all; 2,648 + 19,600 since card W09's second slice, over 2,644 + 19,589, 22,248 in all). Before card "Fixed-part sizing after T08" it was 8,000 + 6,000, which T08's toolbox tools outgrew: a route move admitted on it was refused at the first call. The integration test
+ * 2,537 + 19,087; 2,600 + 19,600 since card W09b, over 2,537 + 19,589, the same 22,200 in all; 2,648 + 19,600 since card W09's second slice, over 2,644 + 19,589, 22,248 in all, and over 2,631 + 19,589 since its third). Before card "Fixed-part sizing after T08" it was 8,000 + 6,000, which T08's toolbox tools outgrew: a route move admitted on it was refused at the first call. The integration test
  * `fixed-part-budget.test.ts` fails when the real figures exceed it.
  */
 export const ROUTE_FLOOR_DEFAULTS = WORKER_FIXED_PART_BUDGET;

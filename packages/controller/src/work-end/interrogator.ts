@@ -1,6 +1,7 @@
 import { clipText } from "../activity/activity.js";
 import { DomainError } from "../domain/errors.js";
 import { WORK_REPORT_LIMITS } from "../dispatch/model.js";
+import { CLAUSE_QUESTION_LIMITS, clauseNames, clausesLeft } from "../dispatch/clause-questions.js";
 import type { InterrogationInput, InterrogatorAnswer, ReportInterrogatorPort } from "../dispatch/report.js";
 import { redactText } from "../security/redact.js";
 import { quoted } from "../status/explain.js";
@@ -118,7 +119,8 @@ export function promptOf(input: InterrogationInput): string {
     `TASK title=${quoted(t.title, 200)}`,
     DESCRIPTION,
     `Expected result: ${t.expectedResult === undefined ? "(not stated)" : quoted(t.expectedResult, 600)}`,
-    `Acceptance criteria: ${list(t.acceptanceCriteria, 300)}`,
+    `Acceptance criteria: ${criteriaList(t.acceptanceCriteria)}`,
+    clauseLine(t.acceptanceCriteria, input.report, input.rounds),
     `Required evidence: ${list(t.requiredEvidence, 200)}`,
     `Contract checks the host ran: ${list(t.checks, 80)}`,
     `CONTROLLER CHECK: ${input.evidence.verified === "passed" ? "the contract's evidence and checks passed" : "the contract names no evidence or checks, so nothing was checked mechanically"}. Plan (host): ${input.evidence.plan}. Changes (host, quoted: the file names are the agent's): ${quoted(input.evidence.diff, 400)}.`,
@@ -133,6 +135,30 @@ export function promptOf(input: InterrogationInput): string {
   const room = Math.min(INTERROGATOR_LIMITS.description, Math.max(400, INTERROGATOR_LIMITS.prompt - (text.length - DESCRIPTION.length) - head.length - 40));
   const described = text.replace(DESCRIPTION, () => `${head}${t.description === undefined || t.description === "" ? "(none)" : quoted(t.description, room)}`);
   return described.length > INTERROGATOR_LIMITS.prompt ? `${described.slice(0, INTERROGATOR_LIMITS.prompt - 20)}\n(cut to fit)` : described;
+}
+
+/**
+ * The acceptance criteria numbered C1 to Cn as the clause rule names them (W09 third slice), at most `CLAUSE_QUESTION_LIMITS.clauses`, in the room the old list had (20 at 300 characters): with more than 20 each is cut shorter
+ * (at least 60 characters), so the round's line is never cut from the prompt.
+ */
+function criteriaList(criteria: readonly string[]): string {
+  if (criteria.length === 0) return "(none)";
+  const shown = criteria.slice(0, CLAUSE_QUESTION_LIMITS.clauses);
+  const each = Math.max(60, Math.min(300, Math.floor(6000 / shown.length)));
+  return shown.map((c, i) => `C${i + 1} ${quoted(c, each)}`).join(", ") + (criteria.length > shown.length ? ` (${criteria.length - shown.length} more not shown)` : "");
+}
+
+/**
+ * W09 third slice: for a task with clauses, which of them (C1 to Cn, the contract's order) the report does not show tested and no answered question asked about, so the second agent asks about them; the controller holds a
+ * supported back until each one is (`dispatch/clause-questions.ts`). Empty for a task without clauses.
+ */
+function clauseLine(criteria: readonly string[], report: string, rounds: InterrogationInput["rounds"]): string {
+  if (criteria.length === 0) return "";
+  const left = clausesLeft(criteria, report, rounds);
+  const rule = "a report line naming C<n>, a test name in double quotes and a passing result";
+  return left.length === 0
+    ? `Clauses: each of C1 to C${Math.min(criteria.length, CLAUSE_QUESTION_LIMITS.clauses)} is shown tested (${rule}) or was asked about.`
+    : `Clauses not shown tested (${rule}) and not asked about: ${clauseNames(left)}. Ask about each before you answer supported; the controller asks about any you leave.`;
 }
 
 /** The verdict in one answer; anything else is that route's failure. Questions are bounded here and again by the dispatcher. */

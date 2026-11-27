@@ -597,11 +597,12 @@ test("card W09b: a checkout command still running when the agent ends is stopped
   if (!s.usable) { if (required && process.platform === "linux") assert.fail(`NIMBLENEWT_REQUIRE_SANDBOX=1 but the sandbox is unusable: ${s.why}`); return t.skip("bubblewrap or a node install it can mount is unusable"); }
   // The agent here ends without a submit, so the ending is a plain done (the product host answers a submit's view and staging since the H12n launcher slice, but none is asked here). That an uncertain call that is not read-only turns a submit into
   // release_failed is shown by start-work-end-settle (H12n), through the real dispatcher binding.
+  // W09 third slice: the long command is a process that runs for 120 s, not a plain `sleep 120` (the checkout tool's run now refuses a command that only waits more than 60 s).
   const run = await runOne({
     variant: "D",
     agent: (i) => {
       if (i === 1) return callReply(CO, { action: "write", path: "src/b.mjs", text: "export const b = 2;\n" });
-      if (i === 2) return callsReply([[CO, { action: "run", command: "sleep 120" }], ["nimblenewt__work-end", { result: "done", report: "Added src/b.mjs exporting b = 2." }]]);
+      if (i === 2) return callsReply([[CO, { action: "run", command: "node -e \"setTimeout(() => {}, 120000)\"" }], ["nimblenewt__work-end", { result: "done", report: "Added src/b.mjs exporting b = 2." }]]);
       return textReply("Ended.");
     },
     second: () => judged(JSON.stringify({ verdict: "supported" })),
