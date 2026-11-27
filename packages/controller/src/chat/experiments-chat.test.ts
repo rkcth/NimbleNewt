@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { OPERATIONS } from "../api/operations.js";
 import { BlockerService } from "../domain/blockers.js";
+import { CommandRunner } from "../domain/runner.js";
 import { WaitService } from "../domain/waits.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
-import { ExperimentService } from "../experiments/index.js";
+import { EnvironmentService } from "../environments/index.js";
+import { ExperimentService, type ExperimentBody } from "../experiments/index.js";
 import { StatusService, STATUS_KINDS } from "../status/index.js";
 import { CHAT_OPS } from "./commands.js";
 import { ModelInterpreter, promptAbout } from "./model-interpreter.js";
@@ -19,6 +21,10 @@ const cmd = (op: string, args: Record<string, unknown>, evidence: string) => ({ 
 const PROPOSAL = { problem: "slow reviews", affectedWork: "handler reviews", change: "a checklist in the coder prompt", effort: "a day", runningCost: "none", benefit: "less rework", evaluation: "five tasks with and without", stoppingCondition: "five runs" };
 const CRITERIA = { baseline: { label: "v4", ref: "abc", digest: "a".repeat(64) }, evaluator: { label: "rubric", ref: "r2", digest: "b".repeat(64) }, cases: [{ id: "c1", text: "missing field" }], baselinePassing: ["c1"],
   baselineMetrics: { timeToAcceptedSeconds: 100, reworkCount: 4 }, budget: { maxRuns: 1, maxCost: 50 }, minRuns: 1 };
+// The A08 revision a run's disposable environment is built from (no protected extension, so the host found none); the controller checks it before keeping the run (slice 2).
+const MANIFEST = { base: { name: "nimblenewt-base", version: "1.0.0", digest: `sha256:${"1".repeat(64)}` }, packages: [], skills: [], capabilities: [], configuration: {}, limits: { cpus: 1, memoryMb: 512, diskMb: 1024, processes: 64 }, protectedExtensions: [] };
+let environments: EnvironmentService | undefined;
+const envOf = (agentId: string) => ({ agentId, revision: 1, observed: {}, disposable: true });
 
 test("the interpreter prompt describes the experiments view, proposing, pinning, budget and concluding, from the one status-kind and operation tables (card B04)", async () => {
   let system = "";
@@ -40,7 +46,11 @@ for (const backend of backends) {
     test(`${backend.name}: ${name}`, async () => {
       const script: Record<string, unknown> = {};
       let experiments: ExperimentService | undefined;
-      const w = await openWorld(backend, script, undefined, (storage, epoch) => { experiments = ExperimentService.withEpoch(storage, epoch, options); return { experiments }; });
+      const w = await openWorld(backend, script, undefined, (storage, epoch) => {
+        environments = EnvironmentService.withEpoch(storage, epoch, { ...options, reservedDigest: async () => undefined, skillUsable: async () => true });
+        experiments = ExperimentService.withEpoch(storage, epoch, { ...options, environments });
+        return { experiments };
+      });
       try {
         const epoch = w.projects.epoch;
         const status = StatusService.withEpoch(w.world.storage, epoch, { assignments: w.assignments, waits: WaitService.withEpoch(w.world.storage, epoch, w.assignments, options), blockers: BlockerService.withEpoch(w.world.storage, epoch, options), contracts: w.contracts, experiments: experiments! }, options);
@@ -51,6 +61,7 @@ for (const backend of backends) {
   suite("the owner proposes, pins, sees the budget run out, raises it after confirming, and concludes in free words; a negative result is kept and shown; a stranger sees nothing", async (w, script, experiments, status) => {
     const a = await w.project("Garden");
     const dev = await w.agent("dev", [{ action: "meeting.agenda", project: a }]);
+    await environments!.change(w.owner, { commandId: cid("env"), agentId: dev.principal.id, manifest: MANIFEST, reason: "first" });
     const chat = w.chat({ status });
     await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
     const say = async (text: string, intents: unknown[]) => { script[text] = intents; return (await chat.submit(w.ownerToken, { messageId: cid("m"), text })).outcomes[0]!; };
@@ -64,7 +75,7 @@ for (const backend of backends) {
 
     o = await say(`go ahead with ${id}, baseline v4 abc digest ${"a".repeat(64)}, evaluator rubric r2 digest ${"b".repeat(64)}, case c1 missing field, one run, budget 50`, [cmd("experiment.pin", { experimentId: id, criteria: CRITERIA }, `go ahead with ${id}`)]);
     assert.deepEqual([o.status, o.op], ["applied", "experiment.pin"], JSON.stringify(o));
-    const run = async (token: string, over: Record<string, unknown> = {}) => w.api.handle(token, { v: 1, op: "experiment.run", commandId: cid("r"), args: { experimentId: id, environment: { ref: "env-1", disposable: true }, cost: 4, metrics: { timeToAcceptedSeconds: 130, reworkCount: 5 }, cases: [{ id: "c1", passed: true }], ...over } } as never) as Promise<{ ok: boolean; error?: { code: string } }>;
+    const run = async (token: string, over: Record<string, unknown> = {}) => w.api.handle(token, { v: 1, op: "experiment.run", commandId: cid("r"), args: { experimentId: id, environment: envOf(dev.principal.id), cost: 4, metrics: { timeToAcceptedSeconds: 130, reworkCount: 5 }, cases: [{ id: "c1", passed: true }], ...over } } as never) as Promise<{ ok: boolean; error?: { code: string } }>;
     const first = await run(w.ownerToken);
     assert.equal(first.ok, true, JSON.stringify(first));
     assert.deepEqual([(await run(dev.token)).error?.code, (await run(w.ownerToken)).error?.code], ["forbidden", "unavailable"], "an agent that did not propose it may not report runs; the budget is used up for the owner");
@@ -83,6 +94,8 @@ for (const backend of backends) {
     const got = (await experiments.get(w.owner, id))!;
     assert.deepEqual([got.status, got.result!.verdict, got.result!.finding, got.runs.length], ["concluded", "worse", "it was slower", 1]);
     const said = lines(await say("did the checklist help?", [ask({ kind: "experiments" }, "did the checklist help")]));
+    // The owner reported that run in dev's environment: the view names the environment's agent, not the reporter.
+    assert.match(said, new RegExp(`"Checklist prompt"[^\\n]* Last run in ${dev.principal.id}'s environment revision 1, checked\\.`), said);
     assert.match(said, /concluded: "Checklist prompt"[\s\S]* Verdict: worse \(reworkCount 25% worse, timeToAcceptedSeconds 30% worse\)\. Finding: it was slower/);
 
     // An agent proposes through the API, reports its own runs, and cannot judge itself; a reader without meeting rights sees no list.
@@ -90,7 +103,7 @@ for (const backend of backends) {
     assert.equal(made.ok, true, JSON.stringify(made));
     const mineId = (made.result as { id: string }).id;
     await experiments.pin(w.owner, { commandId: cid("pin"), experimentId: mineId, expectedRevision: 1, criteria: CRITERIA } as never);
-    const ran = await w.api.handle(dev.token, { v: 1, op: "experiment.run", commandId: cid("r"), args: { experimentId: mineId, environment: { ref: "env-2", disposable: true }, cost: 1, metrics: { timeToAcceptedSeconds: 90, reworkCount: 3 }, cases: [{ id: "c1", passed: true }] } } as never) as { ok: boolean };
+    const ran = await w.api.handle(dev.token, { v: 1, op: "experiment.run", commandId: cid("r"), args: { experimentId: mineId, environment: envOf(dev.principal.id), cost: 1, metrics: { timeToAcceptedSeconds: 90, reworkCount: 3 }, cases: [{ id: "c1", passed: true }] } } as never) as { ok: boolean };
     assert.equal(ran.ok, true, "the proposer reports its own run");
     const own = await w.api.handle(dev.token, { v: 1, op: "experiment.conclude", commandId: cid("c"), args: { experimentId: mineId, expectedRevision: (await experiments.get(w.owner, mineId))!.revision, finding: "x" } } as never) as { ok: boolean; error?: { code: string } };
     assert.deepEqual([own.ok, own.error?.code], [false, "forbidden"]);
@@ -101,5 +114,21 @@ for (const backend of backends) {
     assert.deepEqual([mine.ok, mine.result?.item.status], [true, "paused"], "one run used its budget of one");
     const other = await w.api.handle(dev.token, { v: 1, op: "experiment.get", args: { experimentId: id } } as never) as { ok: boolean; error?: { code: string } };
     assert.deepEqual([other.ok, other.error?.code], [false, "not_found"], "an agent reads only its own experiment");
+
+    // A run recorded before the environment check (slice 1's free words, no revision) still reads beside a checked one, the view says it was not checked, and the experiment can still be concluded; nothing rewrote it.
+    const runner = new CommandRunner(w.world.storage, w.projects.epoch, options);
+    const found = (await runner.get("experiment", mineId))!;
+    const stored = found.body as unknown as ExperimentBody;
+    const { environmentRevision: checked, ...older } = stored.runs[0]!;
+    assert.equal(checked?.agentId, dev.principal.id);
+    await runner.command("test.older", { commandId: cid("t"), actor: w.owner.id }, async () => ({ payload: {}, build: async () => ({ ref: { kind: "experiment", id: mineId }, creates: false, changes: [{ type: "update" as const, ref: { kind: "experiment", id: mineId }, expectedRevision: found.revision, body: { ...stored, runs: [stored.runs[0]!, { ...older, n: 2, environment: "env-scratch-1" }] } as never }], detail: {} }) }));
+    const read = (await experiments.get(w.owner, mineId))!;
+    // The checked run comes first and the older one last, so the view must speak of the last run.
+    assert.deepEqual([read.status, read.runs.length, read.runs[1]!.environment, read.runs[1]!.environmentRevision, read.runs[0]!.environmentRevision?.revision], ["paused", 2, "env-scratch-1", undefined, 1]);
+    const view = lines(await say("how are the trials going?", [ask({ kind: "experiments" }, "how are the trials going")]));
+    assert.match(view, /"Own idea"[^\n]* Last run's environment: "env-scratch-1", not checked \(recorded before the environment check\)\./, view);
+    assert.doesNotMatch(view, /"Own idea"[^\n]*environment revision/, view);
+    const ended = await experiments.conclude(w.owner, { commandId: cid("c"), experimentId: mineId, expectedRevision: read.revision, finding: "an older run" });
+    assert.equal((await experiments.get(w.owner, mineId))!.result?.verdict, ended.verdict);
   });
 }

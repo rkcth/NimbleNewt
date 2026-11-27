@@ -108,6 +108,18 @@ export const TURN_END_KINDS = ["length", "empty-visible-text", "no-work-end", "a
 export type TurnEndKind = (typeof TURN_END_KINDS)[number];
 export const turnEndKindOf = (value: unknown): TurnEndKind => (typeof value === "string" && (TURN_END_KINDS as readonly string[]).includes(value) ? (value as TurnEndKind) : "unknown");
 
+/** W09 fixes: how a worker's replies were cut (restated from `@nimblenewt/contracts` `ReplyCut`). */
+export interface ReplyCut { readonly cuts: number; readonly limit: number; readonly ceiling: number }
+/** A reply-cut record when `value` is one (exact keys, whole numbers, at most 1,000 cuts, a limit from 1 to the ceiling, a ceiling at most 1,000,000); otherwise undefined. */
+export function replyCutOf(value: unknown): ReplyCut | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const v = value as Record<string, unknown>;
+  if (Object.keys(v).sort().join(",") !== "ceiling,cuts,limit") return undefined;
+  const ok = (n: unknown, max: number): n is number => Number.isSafeInteger(n) && (n as number) >= 0 && (n as number) <= max;
+  if (!ok(v["cuts"], 1000) || !ok(v["ceiling"], 1_000_000) || !ok(v["limit"], v["ceiling"] as number) || (v["limit"] as number) < 1) return undefined;
+  return { cuts: v["cuts"] as number, limit: v["limit"] as number, ceiling: v["ceiling"] as number };
+}
+
 export interface WorkerTurnResult {
   readonly status: "completed" | "failed" | "cancelled";
   /** How the turn ended (card W02). Absent (a worker from before W02, a remote worker that does not say): `unknown`. */
@@ -116,6 +128,8 @@ export interface WorkerTurnResult {
   readonly visibleChars?: number;
   /** Card W04: how many times the worker continued the turn after it yielded without a tool call or work.end (its own bound is 3), when it said. The model calls of those continuations are in `usage` like any other: nothing is charged twice. */
   readonly nudges?: number;
+  /** W09 fixes: the worker's replies cut at the reply limit with no visible text (a reasoning model that spent the limit thinking), the reply limit it raised to and the ceiling, when any was. A malformed one is left out. */
+  readonly replyCut?: ReplyCut;
   readonly text?: string;
   readonly error?: string;
   /** Card H07b: set only by the controller's own remote service when an offer was put back before the host read it (the policy refused it meanwhile). The turn never ran, so the dispatcher ends the attempt and admits the task again. A worker cannot send it (the wire result refuses unknown fields). */
@@ -171,7 +185,8 @@ export interface WorkProgress {
  * after another, each cut off at its time and output limit; the agent has no part in it.
  */
 export interface DoneCheckRequest {
-  readonly checks: readonly { readonly name: string; readonly run: readonly string[]; readonly timeoutMs: number }[];
+  /** `changedTests` (card W09 second slice): the host appends the test files the change adds or changes to `run` (see `ContractCheck.changedTests`) and reports them in `DoneCheckReport.changedTests`. */
+  readonly checks: readonly { readonly name: string; readonly run: readonly string[]; readonly timeoutMs: number; readonly changedTests?: boolean }[];
   /** Paths (relative to the checkout, `/`-separated) that must be files in the checkout's last commit. */
   readonly evidence: readonly string[];
   /** Each check's standard output and error are cut at this many bytes. */
@@ -225,6 +240,19 @@ export interface DoneCheckReport {
   /** Whether each evidence path is a plain, non-empty file of the checkout as it stands (not ignored; what a submission would carry). */
   readonly evidence?: readonly { readonly path: string; readonly present: boolean; readonly why?: string }[];
   readonly checks: readonly DoneCheckRun[];
+  /** Card W09 second slice: what the host found for the check with `changedTests` (absent when the request has none, or the host does not look: the controller then cannot judge that check). */
+  readonly changedTests?: ChangedTestsReport;
+}
+
+/**
+ * The test files an agent's change adds or changes against the task's base, as the host saw them after the check ran (card W09 second slice). `count` is all of them; at most `files` are listed (bounded by the host). `built` is the file the
+ * check ran (the path itself for a JavaScript test, the built file for a TypeScript one), null when none was found. `titles` are the test names the file declares (`test(...)`, `it(...)`, `describe(...)`, `suite(...)`), as written,
+ * bounded. `plan` is the text of PLAN.md at the top of the checkout (bounded), or why it could not be read.
+ */
+export interface ChangedTestsReport {
+  readonly count: number;
+  readonly files: readonly { readonly path: string; readonly built: string | null; readonly titles: readonly string[] }[];
+  readonly plan: { readonly text: string } | { readonly why: string };
 }
 
 /** What a submit is checked against (card H12n): the checkout's base, the landing branch's head, the files the agent changed against the base and the files the landing branch changed since. */

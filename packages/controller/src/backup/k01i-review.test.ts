@@ -134,8 +134,8 @@ test("an apply that fails after the restore was staged withdraws it and makes no
       const barrier = new MaintenanceBarrier();
       barrier.add({ name: "backups", hold: async () => backups.hold() });
       let snapshots = 0;
-      // The plan's schema probe fails the second time it is asked (the one after the restore was staged).
-      const flaky = { currentEpoch: () => storage.currentEpoch(), listAudit: (q: never) => storage.listAudit(q), snapshot: async () => { snapshots += 1; if (snapshots === 2) throw new Error("the disk went away"); return storage.snapshot(); } };
+      // The plan's schema probe fails the second time it is asked (the one after the restore was staged). The apply reads the live controller authority before it stages (card K05, second slice), so that probe is the third snapshot.
+      const flaky = { currentEpoch: () => storage.currentEpoch(), listAudit: (q: never) => storage.listAudit(q), snapshot: async () => { snapshots += 1; if (snapshots === 3) throw new Error("the disk went away"); return storage.snapshot(); } };
       let restarted = 0;
       const sr = new StagedRestore({ backups, root: join(d, "b"), barrier, sqlitePath: sqlite, dataDirectory: data, storage: flaky as never, piFinal: (id) => join(live, id), restart: { automatic: () => { restarted += 1; }, delayMs: 20 } });
       const plan = await sr.preview(made.manifest.name);

@@ -6,7 +6,7 @@ import { DISPATCH_LIMITS } from "../dispatch/model.js";
 import { contextUpdatesProblem } from "../dispatch/context-updates.js";
 import { ModelStreamRefused, type ModelStreamCall, type ModelStreamEvent, type ModelStreamTap } from "../dispatch/model-stream.js";
 import type { CallMonitor, RelayMonitor } from "../dispatch/relay.js";
-import { StartRefused, turnEndKindOf, type DoneCheckRequest, type ToolCallRequest, type ToolGateway, type ToolResult, type TurnUsage, type WorkOrder, type WorkerTurnResult } from "../dispatch/ports.js";
+import { StartRefused, replyCutOf, turnEndKindOf, type DoneCheckRequest, type ToolCallRequest, type ToolGateway, type ToolResult, type TurnUsage, type WorkOrder, type WorkerTurnResult } from "../dispatch/ports.js";
 import type { SecurityEvent } from "../notifications/urgent.js";
 import { DomainError, isDomainError } from "../domain/errors.js";
 import type { EffectBridge } from "../domain/effects.js";
@@ -2580,7 +2580,7 @@ function checkEnforcement(value: unknown): ContractEnforcement[] {
 function checkResult(value: unknown): StoredResult {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return invalid("result", "must be an object");
   const r = value as Record<string, unknown>;
-  onlyKnown(r, ["status", "text", "error", "checkpoint", "usage", "endKind", "visibleChars", "nudges"]);
+  onlyKnown(r, ["status", "text", "error", "checkpoint", "usage", "endKind", "visibleChars", "nudges", "replyCut"]);
   if (r["status"] !== "completed" && r["status"] !== "failed" && r["status"] !== "cancelled") invalid("result.status", "must be completed, failed or cancelled");
   const clip = (v: unknown, field: string): string | undefined => (v === undefined ? undefined : redactText(text(v, field, { min: 0, max: 100_000, multiline: true })).slice(0, REMOTE_LIMITS.text));
   const t = clip(r["text"], "result.text");
@@ -2593,7 +2593,9 @@ function checkResult(value: unknown): StoredResult {
   // Card W04: the nudges a remote worker gave the turn, carried for any status (a turn can be nudged and then fail).
   const nudges = r["nudges"];
   if (nudges !== undefined && !(Number.isSafeInteger(nudges) && (nudges as number) >= 0 && (nudges as number) <= 100)) invalid("result.nudges", "must be a whole number from 0 to 100");
-  return { status: r["status"] as StoredResult["status"], ...(t === undefined ? {} : { text: t }), ...(e === undefined ? {} : { error: e }), ...(r["usage"] === undefined ? {} : { usage: r["usage"] as never }), ...ending, ...(nudges === undefined ? {} : { nudges: nudges as number }) };
+  // W09 fixes: a remote worker's reply cuts, carried for any status; one that is not well formed is refused like any other field.
+  const replyCut = r["replyCut"] === undefined ? undefined : replyCutOf(r["replyCut"]) ?? invalid("result.replyCut", "must be { cuts, limit, ceiling }: whole numbers, at most 1,000 cuts, a limit from 1 to the ceiling");
+  return { status: r["status"] as StoredResult["status"], ...(t === undefined ? {} : { text: t }), ...(e === undefined ? {} : { error: e }), ...(r["usage"] === undefined ? {} : { usage: r["usage"] as never }), ...ending, ...(nudges === undefined ? {} : { nudges: nudges as number }), ...(replyCut === undefined ? {} : { replyCut }) };
 }
 
 /** The events a worker sends for a piece of a reply: a short list of known shapes, nothing else. */

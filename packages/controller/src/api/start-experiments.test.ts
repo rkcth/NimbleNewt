@@ -37,14 +37,22 @@ test("experiments through the running controller's API: propose, pin, a run that
     assert.equal((await call(ann.token, "experiment.pin", { experimentId: id, expectedRevision: 1, criteria }, "x0")).error.code, "forbidden", "the proposer cannot pin its own criteria");
     const pinned = await call(boot.token, "experiment.pin", { experimentId: id, expectedRevision: 1, criteria }, "x1");
     assert.ok(pinned.ok, JSON.stringify(pinned));
-    const run = { experimentId: id, environment: { ref: "env-1", disposable: true }, cost: 2, metrics: { timeToAcceptedSeconds: 80 }, cases: [{ id: "c1", passed: true }] };
+    // The run names ann's A08 environment revision; the composed controller checks it with A08's integrity check (slice 2): another agent's revision and a wrong extension digest are refused.
+    const manifest = { base: { name: "nimblenewt-base", version: "1.0.0", digest: `sha256:${"1".repeat(64)}` }, packages: [], skills: [], capabilities: [], configuration: {}, limits: { cpus: 1, memoryMb: 512, diskMb: 1024, processes: 64 }, protectedExtensions: [] };
+    await s.environments.change(rob, { commandId: "env-ann", agentId: ann.id, manifest, reason: "first" });
+    await s.environments.change(rob, { commandId: "env-bob", agentId: "agent:bob", manifest, reason: "first" });
+    const env = { agentId: ann.id, revision: 1, observed: {}, disposable: true };
+    const refused = [await call(ann.token, "experiment.run", { experimentId: id, environment: { ...env, agentId: "agent:bob" }, cost: 2, metrics: { timeToAcceptedSeconds: 80 }, cases: [{ id: "c1", passed: true }] }, "run0"),
+      await call(ann.token, "experiment.run", { experimentId: id, environment: { ...env, observed: { "nimblenewt.guard": `sha256:${"2".repeat(64)}` } }, cost: 2, metrics: { timeToAcceptedSeconds: 80 }, cases: [{ id: "c1", passed: true }] }, "run00")];
+    assert.deepEqual(refused.map((r) => r.error?.code), ["not_found", "integrity"], JSON.stringify(refused));
+    const run = { experimentId: id, environment: env, cost: 2, metrics: { timeToAcceptedSeconds: 80 }, cases: [{ id: "c1", passed: true }] };
     const ran = await call(ann.token, "experiment.run", run, "run1");
     assert.deepEqual([ran.ok, ran.result.run, ran.result.status], [true, 1, "paused"], JSON.stringify(ran));
     assert.equal((await call(ann.token, "experiment.run", run, "run2")).error.code, "unavailable");
 
     const view = await call(boot.token, "status.ask", { request: { kind: "experiments", projectId: project } });
     assert.ok(view.ok, JSON.stringify(view));
-    assert.match((view.result.item.lines as { text: string }[]).map((l) => l.text).join("\n"), /paused: "Checklist".*1 of 1 runs, cost 2 of 10; the budget is used up/);
+    assert.match((view.result.item.lines as { text: string }[]).map((l) => l.text).join("\n"), /paused: "Checklist".*1 of 1 runs, cost 2 of 10; the budget is used up.*Last run in agent:[a-z0-9-]+'s environment revision 1, checked\./);
 
     await c.close();
     c = await open();
@@ -52,6 +60,7 @@ test("experiments through the running controller's API: propose, pin, a run that
     assert.deepEqual([again.ok, again.result.run], [true, 1], "a replayed run is the same run");
     const got = (await call(boot.token, "experiment.get", { experimentId: id })).result.item;
     assert.deepEqual([got.status, got.runs.length, got.spent, got.pausedWhy], ["paused", 1, { runs: 1, cost: 2 }, "budget"]);
+    assert.deepEqual([got.runs[0].environmentRevision.agentId, got.runs[0].environmentRevision.revision, /^sha256:[0-9a-f]{64}$/.test(got.runs[0].environmentRevision.digest)], [ann.id, 1, true], "the run keeps the revision as checked, across a restart");
     const concluded = await call(boot.token, "experiment.conclude", { experimentId: id, expectedRevision: got.revision, finding: "faster" }, "c1");
     assert.deepEqual([concluded.ok, concluded.result.verdict], [true, "improved"], JSON.stringify(concluded));
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }

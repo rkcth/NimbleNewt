@@ -40,7 +40,7 @@ const invalid = (field: string, message: string): never => { throw new DomainErr
 const forbidden = (by: Principal, what: string): DomainError => new DomainError("forbidden", `${by.id} may not ${what}`);
 
 /** What the floor keeps, at most: the record it belongs to is bounded the same way (every list is a window). */
-export const FLOOR_LIMITS = { turns: 300, notices: 60, queue: 60, heldAnswers: 40, ownerAnswers: 60, chairQuestions: 30, investigations: 30, followUps: 60, stepsPerDrive: 400, unitRetries: 16, text: 3900, desk: 20, deskRead: 5, replies: 60, summaries: 80, tickUnits: 20, tickMeetings: 20, tickPages: 10 } as const;
+export const FLOOR_LIMITS = { sources: 10, followUpTries: 3, turns: 300, notices: 60, queue: 60, heldAnswers: 40, ownerAnswers: 60, chairQuestions: 30, investigations: 30, followUps: 60, stepsPerDrive: 400, unitRetries: 16, text: 3900, desk: 20, deskRead: 5, replies: 60, summaries: 80, tickUnits: 20, tickMeetings: 20, tickPages: 10 } as const;
 
 /** What the facilitator needs from the rest of the controller. Nothing is reached by any other road. */
 export interface FloorDeps {
@@ -66,12 +66,15 @@ export interface FloorDeps {
   readonly deskNotes?: (agent: string, recordId: string) => Promise<string | undefined>;
   /** Per-task and per-provider budgets: `ok: false` says what is reached. */
   readonly budget?: (agent: string, projectId: string) => Promise<{ readonly ok: true } | { readonly ok: false; readonly reason: string }>;
-  /** Makes an owned follow-up task. The command ID is stable, so a repeat makes no second task. */
-  readonly followUps?: { create(input: { commandId: string; projectId: string; title: string; description: string; owner?: string }): Promise<{ id: string }> };
+  /** Makes an owned follow-up task and gives it to its owner when it has one (`assigned` says whether that worked). The command ID is stable, so a repeat makes no second task. */
+  readonly followUps?: { create(input: { commandId: string; projectId: string; title: string; description: string; owner?: string }): Promise<{ id: string; assigned?: boolean }> };
   /** A member's saved checkpoint, for a question put to one who is not in the room. */
   readonly checkpointOf?: (agent: string, recordId: string) => Promise<{ readonly savedAt: string; readonly text: string } | undefined>;
-  /** The current revision of a record a statement cites, to tell whether the source has changed since. */
-  readonly sourceRevision?: (cite: SourceCite) => Promise<number | undefined>;
+  /**
+   * The current revision of a record an answer cites, to tell whether the source has changed since. `context` is the meeting's project and the agent that cited it; undefined means "not checked" (a private kind, another
+   * project's record, a missing record or a failed read), which is never shown as current.
+   */
+  readonly sourceRevision?: (cite: SourceCite, context: { readonly projectId: string; readonly agent: string }) => Promise<number | undefined>;
   /** The owner is told (reminder of an idle inquiry, a budget that was reached, a timebox, a correction during an open vote). Failing it never stops the meeting. */
   readonly notifyOwner?: (notice: { recordId: string; projectId: string; kind: string; text: string; /** Makes the notice its own (a reminder repeated each idle period); without it the same words about the same meeting are one notice. */ key?: string }) => Promise<void>;
   /** The notices about an inquiry (opened, idle) are closed once the owner ends it, so none stays on the owner's list after the answer. Failing it never stops the meeting. */
@@ -479,8 +482,9 @@ export class MeetingFloorService {
   }
 
   /** Runs units until nothing can be done now, the meeting is over, or `maxUnits` units ran. */
-  async drive(by: Principal, command: { recordId: string; maxUnits?: number }): Promise<{ did: number; last: AdvanceResult }> {
-    onlyKnown(command, ["recordId", "maxUnits"]);
+  async drive(by: Principal, command: { recordId: string; maxUnits?: number; commandId?: string }): Promise<{ did: number; last: AdvanceResult }> {
+    // The API passes every command's ID (meeting.floor.drive); each step keeps its own stable IDs, so the caller's is not used.
+    onlyKnown(command, ["commandId", "recordId", "maxUnits"]);
     const max = command.maxUnits === undefined ? FLOOR_LIMITS.stepsPerDrive : Number.isInteger(command.maxUnits) && command.maxUnits >= 1 && command.maxUnits <= 2000 ? command.maxUnits : invalid("maxUnits", "must be 1 to 2000");
     let did = 0;
     let last: AdvanceResult = { waiting: "none", phase: "none" };
@@ -645,7 +649,7 @@ export class MeetingFloorService {
           if (q === undefined) break;
           if (item!.noResponse !== undefined) { await notice("owner-answer-blocked", `${item!.agent} could not answer the owner's question: ${item!.noResponse}`); break; }
           let text: string;
-          const completed: string[] = []; const proposed: string[] = []; const stale: string[] = []; const invest: string[] = [];
+          const completed: string[] = []; const proposed: string[] = []; const stale: string[] = []; const unchecked: string[] = []; const invest: string[] = [];
           if (q.checkpoint === true) {
             const cp = await this.#deps.checkpointOf?.(item!.agent, recordId).catch(() => undefined);
             text = wrapCheckpointAnswer(item!.agent, cp?.savedAt ?? "an unknown time", item!.text);
@@ -653,24 +657,30 @@ export class MeetingFloorService {
           } else {
             const pick = (re: RegExp): string | undefined => { const m = re.exec(item!.text)?.[1]?.trim(); return m === undefined || /^none\.?$/i.test(m) ? undefined : m; };
             const answer = pick(/ANSWER:\s*([\s\S]*?)(?:\n\s*(?:SOURCES|COMPLETED|PROPOSED|INVESTIGATE):|$)/i) ?? item!.text;
+            // At most FLOOR_LIMITS.sources cited revisions are looked up (one read each); the rest are counted as not checked. A source that cannot be checked is listed as such, never taken as current.
+            let looked = 0, beyond = 0;
             for (const s of (pick(/SOURCES:\s*(.*)$/im) ?? "").split(",").map((x) => x.trim()).filter((x) => x !== "")) {
-              const m = /^([a-z-]+):([\w-]+)(?:@(\d+))?$/.exec(s);
+              const m = /^([a-z-]{1,40}):([\w-]{1,120})(?:@(\d{1,9}))?$/.exec(s);
               if (m === null || m[3] === undefined) continue;
-              const now = await this.#deps.sourceRevision?.({ kind: m[1]!, id: m[2]! }).catch(() => undefined);
-              if (now !== undefined && now !== Number(m[3])) stale.push(`${s} (now at revision ${now})`);
+              if (looked >= FLOOR_LIMITS.sources) { beyond += 1; continue; }
+              looked += 1;
+              const now = await this.#deps.sourceRevision?.({ kind: m[1]!, id: m[2]! }, { projectId: b.projectId, agent: item!.agent }).catch(() => undefined);
+              if (now === undefined) unchecked.push(s);
+              else if (now !== Number(m[3])) stale.push(`${s} (now at revision ${now})`);
             }
+            if (beyond > 0) unchecked.push(`${beyond} more`);
             const lines = (text: string | undefined): string[] => (text === undefined ? [] : text.split(/;|\n/).map((x) => x.trim()).filter((x) => x !== ""));
             completed.push(...lines(pick(/COMPLETED:\s*([\s\S]*?)(?:\n\s*(?:SOURCES|PROPOSED|INVESTIGATE):|$)/i)));
             proposed.push(...lines(pick(/PROPOSED:\s*([\s\S]*?)(?:\n\s*(?:SOURCES|COMPLETED|INVESTIGATE):|$)/i)));
             const inv = pick(/INVESTIGATE:\s*([\s\S]*?)$/i);
             if (inv !== undefined) invest.push(inv);
-            text = [answer, completed.length === 0 ? "" : `Done: ${completed.join("; ")}`, proposed.length === 0 ? "" : `Proposed, not done: ${proposed.join("; ")}`, stale.length === 0 ? "" : `Stale sources (changed since the agent looked): ${stale.join("; ")}`, invest.length === 0 ? "" : `Needs deeper work than this meeting (follow-up): ${invest.join("; ")}`].filter((x) => x !== "").join("\n");
+            text = [answer, completed.length === 0 ? "" : `Done: ${completed.join("; ")}`, proposed.length === 0 ? "" : `Proposed, not done: ${proposed.join("; ")}`, stale.length === 0 ? "" : `Stale sources (changed since the agent looked): ${stale.join("; ")}`, unchecked.length === 0 ? "" : `Sources not checked (could not be confirmed current): ${unchecked.join("; ")}`, invest.length === 0 ? "" : `Needs deeper work than this meeting (follow-up): ${invest.join("; ")}`].filter((x) => x !== "").join("\n");
           }
           // held while any vote of the meeting is open, the floor's own or one the meeting procedure (card M06) or the record runs
           const holding = (await this.#votingMotion(rec)) !== undefined;
           fx["held"] = holding;
           fx["text"] = recordText(text, FLOOR_LIMITS.text);
-          fx["completed"] = completed; fx["proposed"] = proposed; fx["stale"] = stale; fx["invest"] = invest;
+          fx["completed"] = completed; fx["proposed"] = proposed; fx["stale"] = stale; fx["unchecked"] = unchecked; fx["invest"] = invest;
           // During an open vote the answer goes to the owner at once (the floor view) and into the transcript only when the vote closes.
           fx["entryId"] = holding ? undefined : await this.#say(recordId, unit, "a", item!.agent, `(to the owner) ${recordText(text, FLOOR_LIMITS.text - 20)}`);
           if (holding) await notice("held-answer", `${item!.agent}'s answer to your question is kept out of the other voters' view until the vote closes.`);
@@ -852,7 +862,7 @@ export class MeetingFloorService {
         const q = b.queue.find((x) => x.id === unit.queueId);
         n = dropQueue();
         if (q === undefined || reply.items[0]?.noResponse !== undefined) return n;
-        const rec0 = { entryId: q.entryId ?? "held", answerEntryId: fx["entryId"] as string | undefined, agent: q.agent, question: recordText(q.question ?? "", 500), completed: (fx["completed"] as string[] | undefined) ?? [], proposed: (fx["proposed"] as string[] | undefined) ?? [], stale: (fx["stale"] as string[] | undefined) ?? [], ...(typeof fx["checkpoint"] === "string" ? { checkpoint: fx["checkpoint"] } : {}), ...(fx["held"] === true ? { held: true as const } : {}) };
+        const rec0 = { entryId: q.entryId ?? "held", answerEntryId: fx["entryId"] as string | undefined, agent: q.agent, question: recordText(q.question ?? "", 500), completed: (fx["completed"] as string[] | undefined) ?? [], proposed: (fx["proposed"] as string[] | undefined) ?? [], stale: (fx["stale"] as string[] | undefined) ?? [], ...((fx["unchecked"] as string[] | undefined)?.length ? { unchecked: fx["unchecked"] as string[] } : {}), ...(typeof fx["checkpoint"] === "string" ? { checkpoint: fx["checkpoint"] } : {}), ...(fx["held"] === true ? { held: true as const } : {}) };
         n = { ...n, ownerAnswers: [...n.ownerAnswers, rec0] };
         if (fx["held"] === true) n = { ...n, held: [...n.held, { agent: q.agent, text: (fx["text"] as string) ?? "", at: now, question: recordText(q.question ?? "", 500) }] };
         const inv = (fx["invest"] as string[] | undefined) ?? [];
@@ -1110,7 +1120,33 @@ export class MeetingFloorService {
     const out = await this.#deps.records.finish(this.#deps.service, { commandId: `fl-end-${base(recordId)}-${hash(by.id, command.commandId)}`, recordId, ...(command.reason === undefined ? {} : { reason: recordText(command.reason, 400) }) });
     const now = this.#runner.now();
     await this.#update(recordId, by, "ended", (b) => (b.state === "ended" ? undefined : { ...b, state: "ended", endedAt: now, inquiry: undefined, inflight: undefined, clock: { ...b.clock, pausedAt: undefined } }));
+    // What the meeting left open becomes owned follow-up work now; a failure here never undoes the end (the scheduled turn tries again).
+    await this.#endFollowUps(recordId).catch(() => undefined);
     return out;
+  }
+
+  /**
+   * Once a meeting has ended, the floor itself turns what it left open into owned follow-up tasks (the same work as `followUps`, as the floor's service), and notes when that was done so it is done once. Each try is counted;
+   * after `FLOOR_LIMITS.followUpTries` failed tries the owner is told once and the floor stops trying (the owner can still ask for the follow-ups). An archived project's meeting waits until it is restored (card P06).
+   * Returns whether it is settled (made, given up, or nothing to do).
+   */
+  async #endFollowUps(recordId: string): Promise<boolean> {
+    const f = await this.#load(recordId);
+    if (f === undefined || f.body.state !== "ended" || f.body.followUpsAt !== undefined || (f.body.followUpTries ?? 0) >= FLOOR_LIMITS.followUpTries) return true;
+    if (this.#deps.followUps === undefined) return true;
+    if (((await this.#runner.get("project", f.body.projectId))?.body as { state?: unknown } | undefined)?.state === "archived") return false;
+    const by = this.#deps.service;
+    try {
+      await this.followUps(by, { recordId });
+    } catch (error) {
+      const tries = (f.body.followUpTries ?? 0) + 1;
+      await this.#update(recordId, by, `fu-try-${tries}`, (b) => (b.followUpsAt !== undefined || (b.followUpTries ?? 0) >= tries ? undefined : { ...b, followUpTries: tries }));
+      if (tries >= FLOOR_LIMITS.followUpTries) await this.#deps.notifyOwner?.({ recordId, projectId: f.body.projectId, kind: "follow-ups-failed", text: `The follow-up tasks of an ended meeting could not be made after ${tries} tries${error instanceof DomainError ? ` (${error.code})` : ""}; ask for them again when the cause is fixed.` }).catch(() => undefined);
+      return tries >= FLOOR_LIMITS.followUpTries;
+    }
+    const at = this.#runner.now();
+    await this.#update(recordId, by, "fu-done", (b) => (b.followUpsAt !== undefined ? undefined : { ...b, followUpsAt: at }));
+    return true;
   }
 
   // ---- members and the chair -------------------------------------------------------------------------------------------------------------
@@ -1178,7 +1214,7 @@ export class MeetingFloorService {
    * Turns what the meeting left open into owned follow-up tasks, once each: an unresolved question (a tagged question nobody answered, owned by whoever raised it), a chair question nobody answered, research asked for before
    * a tabling, and a question an agent said needs deeper work than the meeting (deep investigations become follow-up work, never meeting time). Nonurgent agenda items that were not reached are batched to the next meeting.
    */
-  async followUps(by: Principal, command: { recordId: string }): Promise<{ created: { key: string; taskId: string; title: string; owner?: string }[]; deferred: string[] }> {
+  async followUps(by: Principal, command: { recordId: string }): Promise<{ created: { key: string; taskId: string; title: string; owner?: string; assigned?: boolean }[]; deferred: string[] }> {
     const recordId = RECORD_ID.test(command.recordId) ? command.recordId : invalid("recordId", "is not a meeting record ID");
     const rec = await this.#meeting(recordId);
     if (!this.#controls(by, rec.projectId)) throw forbidden(by, "make follow-ups for that meeting");
@@ -1189,11 +1225,11 @@ export class MeetingFloorService {
     for (const c of f.body.chairQuestions) if (c.state === "asked") wanted.push({ key: `c:${c.id}`, title: `Find out: ${recordText(c.topic, 150)}`, why: `A chair question to ${c.to} was never answered (${c.experienceSought}).`, owner: c.to });
     // keyed by what the investigation is, not by its place in the list: the list is a window, and a place that shifts must not make a second task
     f.body.investigations.forEach((i) => wanted.push({ key: `i:${hash(i.by, i.text).slice(0, 16)}`, title: `Investigate: ${recordText(i.text, 150)}`, why: `Deeper work than the meeting could do (${i.by}).`, ...(AGENT.test(i.by) ? { owner: i.by } : {}) }));
-    const made: { key: string; taskId: string; title: string; owner?: string }[] = [];
+    const made: { key: string; taskId: string; title: string; owner?: string; assigned?: boolean }[] = [];
     for (const w of wanted) {
       if (f.body.followUps.some((x) => x.key === w.key)) continue;
       const t = await this.#deps.followUps.create({ commandId: `fl-fu-${hash(recordId, w.key)}`, projectId: rec.projectId, title: w.title, description: w.why, ...(w.owner === undefined ? {} : { owner: w.owner }) });
-      made.push({ key: w.key, taskId: t.id, title: w.title, ...(w.owner === undefined ? {} : { owner: w.owner }) });
+      made.push({ key: w.key, taskId: t.id, title: w.title, ...(w.owner === undefined ? {} : { owner: w.owner }), ...(typeof t.assigned === "boolean" ? { assigned: t.assigned } : {}) });
     }
     if (made.length > 0) await this.#update(recordId, by, `fu-${hash(JSON.stringify(made))}`, (b) => ({ ...b, followUps: [...b.followUps, ...made.filter((m) => !b.followUps.some((x) => x.key === m.key))] }));
     const deferred = await this.#batchNonUrgent(by, rec);
@@ -1620,8 +1656,10 @@ export class MeetingFloorService {
       const page = await this.#runner.list(KIND, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
       for (const a of page) {
         const b = a.body as unknown as FloorBody;
-        if (b.state !== "running") { after = a.id; continue; }
+        const owes = b.state === "ended" && b.followUpsAt === undefined && (b.followUpTries ?? 0) < FLOOR_LIMITS.followUpTries && this.#deps.followUps !== undefined;
+        if (b.state !== "running" && !owes) { after = a.id; continue; }
         if (driven + failed >= most) break outer;
+        if (owes) { after = a.id; try { if (await this.#endFollowUps(b.recordId)) driven += 1; } catch { failed += 1; } continue; }
         after = a.id;
         try {
           if (!(await this.#live(by, b))) continue;

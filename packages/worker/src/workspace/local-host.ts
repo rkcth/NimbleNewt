@@ -185,6 +185,13 @@ export class LocalWorkspaces {
     return { ...(await this.#options.git.doneState({ gitDir: where.gitDir, checkout: where.checkout, paths })), agentCommits: false };
   }
 
+  /** Card W09 second slice: the test files the task's change adds or changes, their test names and built files, and its PLAN.md (`GitBridge.changedTests`). `undefined`: this host holds no checkout for the task. */
+  async changedTests(call: { readonly taskId: string; readonly projectId: string }): Promise<Awaited<ReturnType<GitBridge["changedTests"]>> | undefined> {
+    const where = this.locate(call);
+    if (where === undefined) return undefined;
+    return this.#options.git.changedTests({ gitDir: where.gitDir, checkout: where.checkout });
+  }
+
   /**
    * What a submit of the task's work is checked against (card H12n, `GitBridge.submitView`): the checkout's base, the landing branch's head, the files the agent changed and the files the landing branch changed since the base.
    * The landing branch's head is the one the author's refresh goes to (card H12p follow-up, `WorkspaceHost.landingHead`): the owner's landing branch when one is set, else the shared repository's checked-out head. A landing
@@ -462,6 +469,29 @@ export class LocalWorkspaces {
       const parsed = JSON.parse(await readFile(file, "utf8")) as StartState;
       return parsed.attemptId === call.attemptId && parsed.taskId === call.taskId && typeof parsed.digest === "string" && typeof parsed.tree === "string" ? parsed : undefined;
     } catch { return undefined; }
+  }
+
+  /**
+   * Card P05: the contribution guidance and agent instruction files of the repository at the task's base (`GitBridge.instructions`): what the project already asks of a contribution, read from the base commit, never from the
+   * checkout. `undefined`: this host holds no checkout for the task.
+   */
+  async instructions(call: { readonly taskId: string; readonly projectId: string }, scan?: (file: { path: string; bytes: Buffer }) => string | undefined | Promise<string | undefined>): Promise<Awaited<ReturnType<GitBridge["instructions"]>> | undefined> {
+    const where = this.locate(call);
+    if (where === undefined) return undefined;
+    const base = await this.#options.git.baseOf(where.gitDir);
+    return this.#options.git.instructions({ gitDir: where.gitDir, commit: base, ...(scan === undefined ? {} : { scan }) });
+  }
+
+  /**
+   * Card P05: the automated diff check of a contribution of the task (`GitBridge.contributionCheck`) over a submission's base and tree, read from the task's own git directory. The submission's base must be the task's base
+   * (a contribution is the task's own work, judged against what the task started from). `undefined`: this host holds no checkout for the task.
+   */
+  async contributionCheck(call: { readonly taskId: string; readonly projectId: string; readonly base: string; readonly tree: string; readonly intended: unknown }, scan: (file: { path: string; bytes: Buffer }) => string | undefined | Promise<string | undefined>): Promise<Awaited<ReturnType<GitBridge["contributionCheck"]>> | undefined> {
+    const where = this.locate(call);
+    if (where === undefined) return undefined;
+    const base = await this.#options.git.baseOf(where.gitDir);
+    if (call.base !== base) throw new WorkspaceError("invalid_path", "the contribution's base is not the task's base; check the submission the task made from it");
+    return this.#options.git.contributionCheck({ gitDir: where.gitDir, base: call.base, tree: call.tree, intended: call.intended, scan });
   }
 
   async #ensure(call: { readonly taskId: string; readonly projectId: string }, shared: string): Promise<{ readonly checkout: string; readonly gitDir: string }> {

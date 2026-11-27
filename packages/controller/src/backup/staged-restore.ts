@@ -9,7 +9,7 @@ import { DomainError } from "../domain/errors.js";
 import type { LedgerEntry } from "../retention/ledger.js";
 import { canonicalJson } from "../storage/json.js";
 import type { ControllerStorage } from "../storage/types.js";
-import { SqliteStorage } from "../storage/sqlite/index.js";
+import { SqliteStorage, readSqliteEpoch } from "../storage/sqlite/index.js";
 import { PostgresNoAnswer, PostgresStorage, PostgresSwapBusy, asideSchemaOf, postgresRestorePort, stagedSchemaOf, type PostgresRestorePort } from "../storage/postgres/index.js";
 import { postgresFingerprint } from "../transfer/transfer.js";
 import { UnlockFailed, type BackupKey } from "./crypto.js";
@@ -25,6 +25,7 @@ import { filesSealed, tableFile, type BackupManifest, type BackupScopeRecord } f
 import { validStoreId } from "./pi-state.js";
 import { acquireDataLocks, LINK_FALLBACK_CODES, type DataLock } from "./data-lock.js";
 import { canon, canonSync } from "./canon.js";
+import { AuthorityCarryRefused, authoritySideOf, carryControllerAuthority, type AuthoritySide } from "../recovery/carry.js";
 export { canon, canonSync };
 
 /**
@@ -140,6 +141,12 @@ export interface PendingRestore {
   readonly stagedDb: string;
   readonly liveDb: string;
   readonly pi: readonly { readonly id: string; readonly staged: string; readonly target: string }[];
+  /**
+   * The epoch of the controller that prepared the restore (card K05, second review). The start that swaps it in reads the live database's epoch first: when it moved (another controller or a controller
+   * promotion took the database after the restore was prepared), the restore is recorded as failed and nothing is moved, so a restore staged before a promotion's fence cannot bring back a store
+   * without the promotion. Absent in markers written before this field: not checked.
+   */
+  readonly epoch?: number;
   /** Set when the swap was tried at a start and failed (everything was rolled back, or not: `rolledBack`). The restore is not applied until the owner cancels it and prepares it again. */
   readonly failed?: { readonly at: string; readonly reason: string; readonly rolledBack: boolean };
   /** HMAC of the other fields under the controller's key (`.nn-restore.key` in the data directory): a marker anything else wrote is refused. */
@@ -157,6 +164,11 @@ export interface StagedRestoreOptions {
   /** The folder the markers and the key live in (the data directory). */
   readonly dataDirectory: string;
   readonly storage: Pick<ControllerStorage, "currentEpoch" | "snapshot"> & Partial<Pick<ControllerStorage, "listAudit">>;
+  /**
+   * The epoch the controller running this took (card K05 review). A preview and an apply are refused when the store's epoch is no longer this one: another controller or a controller promotion took the
+   * store, and a backup restored by the controller it replaced would bring back a store with that controller in charge. Absent: not checked (tests that drive the restore alone).
+   */
+  readonly epoch?: number;
   readonly blobs?: FileBlobStore;
   /** Where the live conversation store `id` is on this machine; one not known goes to `<data>/restored-pi-state/<id>`. The same function must be given to `applyPendingRestore` (it is the list of places a restore may write to). */
   readonly piFinal?: (id: string) => string | undefined;
@@ -202,6 +214,16 @@ export interface StagedRestoreOptions {
 export type RestoreDatabase = string | PostgresLive;
 export interface PostgresLive { readonly postgres: { readonly url: string; readonly schema: string; readonly port?: PostgresRestorePort; readonly openStaged?: (schema: string) => Promise<ControllerStorage> } }
 interface Live { readonly id: string; readonly dbDir?: string; readonly pg?: { readonly url: string; readonly schema: string; readonly port: PostgresRestorePort; readonly openStaged?: (schema: string) => Promise<ControllerStorage> } }
+/**
+ * The live database's epoch, read before a staged restore is swapped in (card K05, second review). SQLite: a file that is not there, or that cannot be read as a controller database, gives undefined (a
+ * damaged database is what a restore is for, and nothing can be said about who holds it); one that stays busy or locked (another program holds it) fails the start, nothing moved. PostgreSQL: a schema without the state table gives undefined; a server that does not answer fails the start, as
+ * the swap itself would.
+ */
+async function liveEpochOf(live: Live): Promise<number | undefined> {
+  if (live.pg !== undefined) return live.pg.port.liveEpoch === undefined ? undefined : live.pg.port.liveEpoch(live.pg.schema);
+  return (await exists(live.id)) ? readSqliteEpoch(live.id) : undefined;
+}
+
 async function liveOf(db: RestoreDatabase): Promise<Live> {
   if (typeof db === "string") { const id = await canon(db); return { id, dbDir: dirname(id) }; }
   return { id: postgresFingerprint(db.postgres.url, db.postgres.schema), pg: { url: db.postgres.url, schema: db.postgres.schema, port: db.postgres.port ?? postgresRestorePort(db.postgres.url), ...(db.postgres.openStaged === undefined ? {} : { openStaged: db.postgres.openStaged }) } };
@@ -298,7 +320,7 @@ async function readMarkerRaw(data: string): Promise<PendingRestore | undefined> 
   const { mac, ...rest } = parsed;
   if (key === undefined || !macEqual(macOf(key, rest), mac)) throw new Error("the pending restore marker is not authentic (it was not written by this controller); the restore was not applied. Remove the marker file to start without it.");
   const bad = (why: string): never => { throw new Error(`the pending restore marker is not valid (${why}); the restore was not applied`); };
-  if (parsed.format !== 2 || typeof parsed.stamp !== "string" || !/^[0-9TZ]{16}$/.test(parsed.stamp) || typeof parsed.name !== "string" || !BACKUP_NAME.test(parsed.name) || !Array.isArray(parsed.pi) || typeof parsed.liveDb !== "string" || typeof parsed.stagedDb !== "string") bad("shape");
+  if (parsed.format !== 2 || typeof parsed.stamp !== "string" || !/^[0-9TZ]{16}$/.test(parsed.stamp) || typeof parsed.name !== "string" || !BACKUP_NAME.test(parsed.name) || !Array.isArray(parsed.pi) || typeof parsed.liveDb !== "string" || typeof parsed.stagedDb !== "string" || (parsed.epoch !== undefined && !(Number.isSafeInteger(parsed.epoch) && parsed.epoch >= 0))) bad("shape");
   return parsed;
 }
 
@@ -484,6 +506,17 @@ export async function applyPendingRestore(dataDirectory: string, db: RestoreData
         return undefined;
       }
       if (live.pg !== undefined) await noOtherController(live.pg.port, live.pg.schema, options);
+      // Card K05, second review: a restore prepared before another controller or a controller promotion took the database is not swapped in (it would bring back the store as it was before, without the
+      // promotion's fence and record). Nothing is moved; the start goes on to its own checks on the live database.
+      if (pending.epoch !== undefined) {
+        const nowEpoch = await liveEpochOf(live);
+        if (nowEpoch !== undefined && nowEpoch !== pending.epoch) {
+          const why = `the database was taken by another controller or a controller promotion after the restore was prepared (its epoch is ${nowEpoch}, the restore was prepared at epoch ${pending.epoch}), so swapping the backup in would take it back; nothing was moved`;
+          await writeFailedMarker(data, (await requireKey(data)), pending, why, now());
+          print(`The restore of ${pending.name} was not applied: ${why}. The controller starts on the data it had. Cancel the restore (backup.restore.cancel) on the controller that now holds the database, and prepare it again there if it is still wanted.`);
+          return undefined;
+        }
+      }
       const plan = await planMoves(pending, live);
       if ("missing" in plan) {
         const why = `${plan.missing} is missing, so nothing was moved`;
@@ -589,8 +622,25 @@ export class StagedRestore {
   }
 
   /** The token: the time it was issued, a nonce and an HMAC (under a key only this process holds) over the whole manifest's digest, the backup's name, the installation's epoch and those two. How long it stays good is the owner's setting at the moment it is used. */
+  #stillPrimary(epoch: number): void {
+    if (this.#o.epoch !== undefined && epoch !== this.#o.epoch) throw new DomainError("invalid_transition", "this controller no longer holds the database (another controller or a controller promotion took it), so it cannot restore a backup onto it; nothing was staged");
+  }
+
+  /**
+   * The running store's epoch, holder and promotion record, read from one snapshot (card K05, second slice): the restored store is given them when the running store is the newer, so a backup
+   * made before a controller promotion does not bring back the controller it replaced. The epoch must still be this controller's.
+   */
+  async #liveAuthority(): Promise<AuthoritySide> {
+    const snap = await this.#o.storage.snapshot();
+    let side: AuthoritySide;
+    try { side = await authoritySideOf(snap); } catch (error) { throw error instanceof AuthorityCarryRefused ? new DomainError("invalid_transition", error.message) : error; } finally { await snap.close(); }
+    this.#stillPrimary(side.epoch);
+    return side;
+  }
+
   async #issue(m: BackupManifest, changes: number | undefined): Promise<{ token: string; expiresAt?: string }> {
     const epoch = await this.#o.storage.currentEpoch();
+    this.#stillPrimary(epoch);
     const ttl = await this.#ttlMs();
     const iat = this.#now().getTime();
     const nonce = randomBytes(8).toString("hex");
@@ -606,7 +656,9 @@ export class StagedRestore {
     const parts = /^(\d{1,16})\.([0-9a-f]{16})\.([0-9a-f]{32})$/.exec(confirm);
     if (parts === null) return wrong("it is not a restore token");
     const iat = Number(parts[1]);
-    const expected = macOf(this.#sessionKey, { name: m.name, digest: manifestDigestOf(m), epoch: await this.#o.storage.currentEpoch(), iat, nonce: parts[2]! }).slice(0, 32);
+    const epoch = await this.#o.storage.currentEpoch();
+    this.#stillPrimary(epoch);
+    const expected = macOf(this.#sessionKey, { name: m.name, digest: manifestDigestOf(m), epoch, iat, nonce: parts[2]! }).slice(0, 32);
     if (!macEqual(expected, parts[3])) return wrong("the preview is out of date, or the approval was for something else (the backup, or the installation, has changed)");
     const ttl = await this.#ttlMs();
     if (ttl !== null && this.#now().getTime() - iat > ttl) return wrong("it has expired; ask for a new preview");
@@ -629,10 +681,13 @@ export class StagedRestore {
   /** The plan without its token. `verify`: check a plain backup and count its effects and deliveries (a preview does; the apply verifies once, in the restore itself). */
   async #plan(path: string, m: BackupManifest, verify: boolean): Promise<Omit<RestorePlan, "token" | "expiresAt">> {
     const probe = await this.#o.storage.snapshot();
-    const live = probe.schemaVersion;
-    const since = await externalSince(probe, m.createdAt);
-    await probe.close();
-    if (live !== m.schemaVersion) throw new DomainError("invalid_command", `the backup has schema version ${m.schemaVersion} and this installation has ${live}; restore it with the version of NimbleNewt that made it, then upgrade`);
+    let since: ExternalSince | undefined, side: AuthoritySide;
+    try {
+      const live = probe.schemaVersion;
+      since = await externalSince(probe, m.createdAt);
+      if (live !== m.schemaVersion) throw new DomainError("invalid_command", `the backup has schema version ${m.schemaVersion} and this installation has ${live}; restore it with the version of NimbleNewt that made it, then upgrade`);
+      side = await authoritySideOf(probe);
+    } catch (error) { throw error instanceof AuthorityCarryRefused ? new DomainError("invalid_transition", error.message) : error; } finally { await probe.close(); }
     const encrypted = m.encryption !== undefined;
     // Only the scope "everything" seals the table files: in a "secrets only" backup they are plain and can be checked and counted without a key.
     const sealedFiles = filesSealed(m);
@@ -661,6 +716,13 @@ export class StagedRestore {
       warnings.push(`Since this backup was made, ${what.join(", ")}${since.truncated ? " (at least; the live data is larger than was read)" : ""}. A restore cannot undo any of that, and the restored data will not know it happened${since.targets.length === 0 ? "" : `: check ${since.targets.join(", ")} before anything is repeated`}. Actions the backup holds as only intended come back as uncertain and are never run again by themselves.`);
     }
     if (m.contentScope !== undefined) warnings.push(`NOT A FULL COPY. ${m.contentScope.text}`);
+    // A live record that cannot be read refuses the preview as it would the apply (who may use the restored store would not be known).
+    let authority: ReturnType<typeof carryControllerAuthority>["record"];
+    try { this.#stillPrimary(side.epoch); authority = carryControllerAuthority(side, { epoch: 0, holder: null }).record; } catch (error) { throw error instanceof AuthorityCarryRefused ? new DomainError("invalid_transition", error.message) : error; }
+    // The manifest's epoch says which side will decide (second review): the apply decides from the backup's state row, read when the backup is opened.
+    const promotion = authority === undefined ? "" : `the last controller promotion (${authority.promotionId}, ${authority.state === "promoted" ? `naming ${authority.successor}` : "not finished"})`;
+    if (authority !== undefined && m.epoch > side.epoch) warnings.push(`This backup was made at a later epoch (${m.epoch}) than the running database (${side.epoch}), so its own promotion record, holder and epoch are used. It must hold ${promotion} or a later one; otherwise the restore is refused when you approve, and nothing is changed.`);
+    else if (authority !== undefined) warnings.push(`The record of ${promotion} and the database's epoch are kept from the running database, so the restored data does not bring back the controller that promotion replaced.`);
     const last = await this.#lastAuditSeq();
     const backupSeq = m.files.find((f) => f.table === "audit")?.rows;
     const changes = last === undefined || backupSeq === undefined ? undefined : Math.max(0, last - backupSeq);
@@ -811,11 +873,13 @@ export class StagedRestore {
         if (t === undefined) { t = canonSync(this.#o.piFinal?.(id) ?? join(data, "restored-pi-state", id)); safeTarget(t, data, liveDb.dbDir); targets.set(id, t); }
         return stagedOf(t, stamp);
       };
+      // Card K05, second slice: read now, from the running store; the marker records this epoch, so a promotion after this read refuses the swap at the start.
+      const liveSide = await this.#liveAuthority();
       const fresh: ControllerStorage = liveDb.pg === undefined ? await SqliteStorage.open({ path: stagedDb }) : await (liveDb.pg.openStaged ?? ((schema: string) => PostgresStorage.open({ connectionString: liveDb.pg!.url, schema })))(stagedDb);
       try {
         // The one verification: the restore checks the backup, and the manifest it checked must be the one the approval named.
-        result = await restoreBackup(path, fresh, { ...(await this.#signatureOption()), ...(this.#o.blobs === undefined ? {} : { blobs: this.#o.blobs }), ...(unlock === undefined ? {} : { unlock }), ...(this.#o.secrets === undefined ? { skipSecrets: true } : { secrets: this.#o.secrets }), deletions: await this.#o.deletions?.() ?? [], piTarget, expectedManifestDigest: manifestDigestOf(manifest) });
-      } catch (error) { await fresh.close().catch(() => undefined); throw error instanceof RestoreRefused ? new DomainError("integrity", error.message) : error; }
+        result = await restoreBackup(path, fresh, { ...(await this.#signatureOption()), ...(this.#o.blobs === undefined ? {} : { blobs: this.#o.blobs }), ...(unlock === undefined ? {} : { unlock }), ...(this.#o.secrets === undefined ? { skipSecrets: true } : { secrets: this.#o.secrets }), deletions: await this.#o.deletions?.() ?? [], piTarget, expectedManifestDigest: manifestDigestOf(manifest), carryAuthority: (backup) => carryControllerAuthority(liveSide, backup) });
+      } catch (error) { await fresh.close().catch(() => undefined); throw error instanceof RestoreRefused ? new DomainError("integrity", error.message) : error instanceof AuthorityCarryRefused ? new DomainError("invalid_transition", error.message) : error; }
       await fresh.close();
       await this.#checkMargin(manifest, margin, shown);
       for (const [id, target] of targets) {
@@ -839,7 +903,9 @@ export class StagedRestore {
         const lastSeq = await this.#lastAuditSeq();
         const backupSeq = manifest.files.find((f) => f.table === "audit")?.rows;
         const key = await requireKey(data, true, this.#o.link);
-        const body: Omit<PendingRestore, "mac"> = { format: 2, name: manifest.name, stamp, preparedAt: this.#now().toISOString(), ...(liveDb.pg === undefined ? {} : { database: "postgres" as const }), stagedDb, liveDb: live, pi: staged.pi };
+        // The epoch the authority carried into the restored store was read at (the controller's own, checked by #liveAuthority): the start that swaps it in refuses when the live epoch moved (card K05).
+        const stagedEpoch = liveSide.epoch;
+        const body: Omit<PendingRestore, "mac"> = { format: 2, name: manifest.name, stamp, preparedAt: this.#now().toISOString(), ...(liveDb.pg === undefined ? {} : { database: "postgres" as const }), stagedDb, liveDb: live, pi: staged.pi, epoch: stagedEpoch };
         const pending: PendingRestore = { ...body, mac: macOf(key, body) };
         markerPath = join(data, PENDING_FILE);
         await writeFile(markerPath, `${JSON.stringify(pending, null, 2)}\n`, { flag: "wx", mode: 0o600 });

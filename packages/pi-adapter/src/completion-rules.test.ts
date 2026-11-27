@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { MemoryStorage } from "@earendil-works/pi-durable";
 import { PLAN_FILE, requestId } from "@nimblenewt/contracts";
-import { COMPLETION_CHECK_RULE, COMPLETION_END_RULE, COMPLETION_JOB_RULE, COMPLETION_REPORT_RULE, COMPLETION_RULES, COMPLETION_RULE_GROUPS, JOB_WAKE_RULE_TEXT, PI_AGENT_LAYOUT, PiAdapter, assertStableText, checkLayout, layoutFingerprint, sharedSystemText } from "./index.js";
+import { COMPLETION_BOUNDARY_RULE, COMPLETION_CHECK_RULE, COMPLETION_END_RULE, COMPLETION_JOB_RULE, COMPLETION_PLAN_RULE, COMPLETION_REPORT_RULE, COMPLETION_RULES, COMPLETION_TEST_RULE, COMPLETION_RULE_GROUPS, JOB_WAKE_RULE_TEXT, PI_AGENT_LAYOUT, PiAdapter, assertStableText, checkLayout, layoutFingerprint, sharedSystemText } from "./index.js";
 import { BRIDGE_TOOL_NAMES, WORK_ANSWER_TOOL, WORK_END_TOOL, WORK_NOTE_TOOL, createBridge } from "./bridge.js";
 import { NUDGE_TEXT, nudgeText } from "./worker/nudge.js";
 import { rig, wireBody } from "./testing/wire.js";
@@ -24,6 +24,31 @@ test("W06: the completion rules are fixed text that passes the layout's stabilit
   assert.ok(COMPLETION_END_RULE.includes(WORK_END_TOOL) && BRIDGE_TOOL_NAMES.includes(WORK_END_TOOL), "names the real work.end tool");
   assert.ok(COMPLETION_JOB_RULE.endsWith(JOB_WAKE_RULE_TEXT), "the job rule is W11's sentence, word for word");
   assert.ok(BRIDGE_TOOL_NAMES.includes("nimblenewt__job-start") && COMPLETION_JOB_RULE.includes("nimblenewt__job-start"));
+});
+
+test("W09 second slice: one rule line asks for a boundary sweep for every never or whatever-the-input rule, pinned word for word, after the plan rule and before the done check", () => {
+  assert.equal(COMPLETION_BOUNDARY_RULE, "For a rule that says never or whatever the input, write a test that sweeps every offset across its limit.");
+  assert.equal(COMPLETION_RULE_GROUPS.indexOf(COMPLETION_BOUNDARY_RULE), COMPLETION_RULE_GROUPS.indexOf(COMPLETION_CHECK_RULE) - 1);
+  assert.equal(COMPLETION_RULE_GROUPS.indexOf(COMPLETION_BOUNDARY_RULE), 2, "the third group: after the intro and the plan rule");
+  assert.ok(!COMPLETION_BOUNDARY_RULE.includes("\n"), "one line");
+});
+
+test("W09 third slice: one test-hygiene group (run only the named test files, never sleep-poll, end once they pass), pinned word for word, between the done check and the end rule; room made by shorter plan, check and end rules", () => {
+  assert.equal(COMPLETION_TEST_RULE, `Run only the test files you name, never a whole package. Never sleep to wait for a run. Once the build and those tests pass, end with ${WORK_END_TOOL}.`);
+  assert.equal(WORK_END_TOOL, "nimblenewt__work-end");
+  assert.equal(COMPLETION_RULE_GROUPS.indexOf(COMPLETION_TEST_RULE), COMPLETION_RULE_GROUPS.indexOf(COMPLETION_CHECK_RULE) + 1);
+  assert.equal(COMPLETION_RULE_GROUPS.indexOf(COMPLETION_TEST_RULE), COMPLETION_RULE_GROUPS.indexOf(COMPLETION_END_RULE) - 1);
+  assert.equal(COMPLETION_RULE_GROUPS.length, 8);
+  assert.ok(!COMPLETION_TEST_RULE.includes("\n") && COMPLETION_TEST_RULE.split(". ").length === 3, "three short rules on one line");
+  // The shortened wording, pinned where the room came from (each kept its meaning).
+  assert.ok(COMPLETION_PLAN_RULE.endsWith("Tick a step (- [x] ...) as soon as it is done and checked, so anyone can see what is left."), COMPLETION_PLAN_RULE);
+  assert.ok(COMPLETION_CHECK_RULE.startsWith("You do not commit: your checkout at the end is your work, and it is committed after review."), COMPLETION_CHECK_RULE);
+  assert.ok(COMPLETION_CHECK_RULE.includes("every required evidence item must be named in the work.end evidence with its file in your checkout, a plain file that is not empty;"), COMPLETION_CHECK_RULE);
+  assert.ok(COMPLETION_CHECK_RULE.endsWith("A done that does not pass is refused with what failed: fix it and end again."), COMPLETION_CHECK_RULE);
+  assert.ok(COMPLETION_END_RULE.endsWith("Never end with prose alone: it does not end the work."), COMPLETION_END_RULE);
+  // The whole section, measured: the fixed-part budget (controller context/fixed-part.ts) records it.
+  assert.equal(COMPLETION_RULES.length, 2_598, `the rules are ${COMPLETION_RULES.length} characters`);
+  assert.equal(sharedSystemText(PI_AGENT_LAYOUT).length, 2_631);
 });
 
 test("W06 with W10: the report group names the real note, end and answer tools, says every ending carries a report and that the second agent cannot approve; the stuck agent's way out names the report", () => {

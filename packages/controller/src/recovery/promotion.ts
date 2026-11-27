@@ -132,6 +132,8 @@ export async function promoteDatabaseWith(options: PromotionOptions, steps: Prom
       `the standby does not hold everything the recovery manifest of ${manifest.manifest.createdAt} lists (${comparison.problems.length}${comparison.truncated ? "+" : ""} problem${comparison.problems.length === 1 ? "" : "s"}): ${comparison.problems.slice(0, 3).map(describeProblem).join("; ")}`,
     ], comparison.problems);
   }
+  // A manifest of an earlier epoch was not written by the controller that holds the epoch now (card K04 first review): it may not list what that one wrote, which no check here can see.
+  if (comparison.watermark.epoch > manifest.manifest.watermark.epoch) notes.push(`the recovery manifest was written under epoch ${manifest.manifest.watermark.epoch} and the standby holds epoch ${comparison.watermark.epoch}: it was not written by the controller that holds the epoch now, so what that controller wrote may not be in it`);
   await checkWatched("last");
   // From here the outcome may be a change: an error from promote is never turned into a refusal.
   const done = await promote(standbyUrl);

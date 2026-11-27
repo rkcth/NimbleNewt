@@ -33,6 +33,19 @@ export function loadTaskset(file) {
     const timeoutMinutes = t?.timeoutMinutes ?? d.timeoutMinutes?.[t?.size];
     if (!(Number.isFinite(timeoutMinutes) && timeoutMinutes > 0)) problems.push(`${where}: no timeout for size ${t?.size}`);
     const acceptance = loadAcceptance(root, t, where, problems);
+    // W09 fixes: the task's own package tests for the done's check (lib/worker-run.mjs doneChecks): plain relative file paths, never a held-out or acceptance test (by name, in either its source or its built form).
+    if (t?.clauseTests !== undefined && typeof t.clauseTests !== "boolean") problems.push(`${where}: clauseTests must be true or false`);
+    if (t?.doneTests !== undefined) {
+      if (!Array.isArray(t.doneTests) || t.doneTests.length > 50) problems.push(`${where}: doneTests must be a list of at most 50 test files`);
+      else {
+        const stem = (f) => String(f).split(/[\\/]/).pop().replace(/\.(?:[cm]?[jt]s|tsx?)$/, "");
+        const heldOut = new Set([...(t?.hiddenFiles ?? []), ...(t?.testFiles ?? []), ...(acceptance?.files ?? []).map((f) => f.dest), ...(acceptance?.testFiles ?? [])].map(stem));
+        for (const f of t.doneTests) {
+          if (typeof f !== "string" || f === "" || isAbsolute(f) || f.split(/[\\/]/).includes("..") || /[*?[\]{}]/.test(f)) problems.push(`${where}: doneTests entry ${JSON.stringify(f)} must be a plain relative file path inside the repository (no pattern)`);
+          else if (heldOut.has(stem(f)) || /(?:^|\/)w01-acceptance-/.test(f)) problems.push(`${where}: doneTests entry ${f} names a held-out test; the done's check must never run or name one`);
+        }
+      }
+    }
     return {
       ...t,
       acceptance,
@@ -42,9 +55,12 @@ export function loadTaskset(file) {
       timeoutMinutes,
       copy: t?.copy ?? d.copy ?? [],
       setup: t?.setup ?? d.setup ?? null,
+      // W09 second slice: whether the worker bench's done check also runs the change's own tests and maps PLAN.md to the CONTRACT bullets (lib/worker-run.mjs doneChecks). A task's own value wins over the default.
+      clauseTests: (t?.clauseTests ?? d.clauseTests) === true,
       test: t?.test ?? d.test,
     };
   });
+  if (d.clauseTests !== undefined && typeof d.clauseTests !== "boolean") problems.push("defaults.clauseTests must be true or false");
   if (tasks.length === 0) problems.push("tasks is empty");
   if (problems.length > 0) throw new Error(`taskset ${file}:\n- ${problems.join("\n- ")}`);
   const variants = Object.fromEntries(Object.entries(raw.variants).map(([k, v]) => [k, { ...v, promptPath: v.prompt ? join(root, v.prompt) : null }]));

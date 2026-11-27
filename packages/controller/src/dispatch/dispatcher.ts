@@ -38,15 +38,18 @@ import { redactText } from "../security/redact.js";
 import { ACTIVITY_LIMITS, clipText } from "../activity/activity.js";
 import { quotedLine } from "../decisions/records.js";
 import { quoted } from "../status/explain.js";
+import { changedTestsOf, clausePlanProblem } from "./clause-plan.js";
 import type { Principal } from "../security/principals.js";
 import { DISPATCHER_PRINCIPAL, type TaskCredentialService } from "../security/task-credentials.js";
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
 import { ANCHOR_RECORD_KEEP, type AnchorRecord, DISPATCHER_ACTOR, DISPATCH_KIND, DISPATCH_LIMITS, DONE_VERIFY_LIMITS, STOPPED_EARLY_KIND, STOPPED_EARLY_READMITS, TASK_ATTEMPTS_KIND, TASK_ATTEMPTS_LIMIT, WORK_REPORT_KIND, WORK_REPORT_LIMITS, type AttemptReport, type DispatchBody, type LaunchLimitsRecord, type DoneVerification, type Interrogation, type InterrogationRound, type PlanCount, type TaskAttemptsBody, type WorkNote, type WorkNoteKind, type WorkReportTaskBody, type DispatchRevisions, type Frozen, type ToolIdentity, type ToolOperationBody, withSlotSpans } from "./model.js";
 import { ToolPath, type Loaded } from "./tools.js";
+import { CLAUSE_QUESTION_LIMITS, withClauseRule } from "./clause-questions.js";
 import { askingMessage, earlierReportNote, isNoteKind, keptText, qaOf, unansweredMessage, unsupportedMessage, type InterrogationInput, type InterrogatorAnswer, type ReportInterrogatorPort, type ReportVerdict } from "./report.js";
 import { sealContract } from "../remote/contract.js";
 import { boundContextUpdates } from "./context-updates.js";
-import { StartRefused, turnEndKindOf, type ContextUpdate, type HostProbe, type RecipeSummary, type ToolGateway, type WorkerTurnResult, type TurnUsage, type WorkOrder, type WorkerHandle, type WorkerHost, type HostLocalWork, type TurnEndKind, type WorkProgress, type DoneCheckReport, type DoneCheckRequest, type HostSubmitView, type HostStagedWork, type CheckoutToolReport, type CheckoutToolRequest } from "./ports.js";
+import { notRunCause } from "./not-run-cause.js";
+import { StartRefused, replyCutOf, turnEndKindOf, type ContextUpdate, type HostProbe, type RecipeSummary, type ToolGateway, type WorkerTurnResult, type TurnUsage, type WorkOrder, type WorkerHandle, type WorkerHost, type HostLocalWork, type TurnEndKind, type WorkProgress, type DoneCheckReport, type DoneCheckRequest, type HostSubmitView, type HostStagedWork, type CheckoutToolReport, type CheckoutToolRequest } from "./ports.js";
 import { chooseHost, type HostVerdict } from "../hosts/candidates.js";
 import { routeCostWords, UNREADABLE } from "./route-cost.js";
 import { JOB_WAKE_KIND, JOB_WAKE_LIMITS, JOB_WAKE_NOTE_KIND, JOB_WAKES_INDEX, dueRemoved, stateWords, wakeNote, type JobWakeBody, type JobWakesIndex } from "../jobs/wakes.js";
@@ -1173,7 +1176,7 @@ export class DispatcherService {
       if (path === undefined) fail(`Required evidence ${quoted(item, 200)} is not named: give it in work.end evidence as { item, path } with the file of your checkout that holds it.`);
       else wanted.push({ item, path });
     }
-    const checks = contract.checks.map((c) => ({ name: c.name, run: [...c.run], timeoutMs: (c.timeoutSeconds ?? CHECK_SECONDS) * 1000 }));
+    const checks = contract.checks.map((c) => ({ name: c.name, run: [...c.run], timeoutMs: (c.timeoutSeconds ?? CHECK_SECONDS) * 1000, ...(c.changedTests === true ? { changedTests: true } : {}) }));
     const host = this.#deps.workers.find((w) => w.hostId === b.hostId);
     let report: DoneCheckReport | undefined;
     if (host?.verify === undefined) {
@@ -1221,6 +1224,16 @@ export class DispatcherService {
       }
       for (const c of checks) {
         const r = (Array.isArray(report.checks) ? report.checks : []).find((x) => x?.name === c.name);
+        if (c.changedTests === true) {
+          // Card W09 second slice: the check runs the test files the change adds or changes. The host lists them; a host that does not (an older or a remote one) leaves the check unmade, never passed.
+          const t = changedTestsOf(report.changedTests);
+          // Second review: the host's own reason (no checkout, a listing that failed, a remote host) is named, redacted and bounded, as for any check it could not run.
+          if (t === undefined) { ran.push({ name: c.name, state: "not-run" }); cannot(`Check ${quoted(c.name, 80)} runs the test files your change adds or changes, and the host did not list them, so it could not be made${r?.state === "not-run" && typeof r.reason === "string" && r.reason !== "" ? `: ${quoted(redactText(r.reason), 300)}` : ""}.`); continue; }
+          if (t.count === 0) { ran.push({ name: c.name, state: "failed" }); fail(`Check ${quoted(c.name, 80)} runs the test files your change adds or changes, and it adds or changes none (a file named *.test.* or *.spec.*): write tests for what the task asks and end again.`); continue; }
+          if (t.count > t.files.length) { ran.push({ name: c.name, state: "failed" }); fail(`Check ${quoted(c.name, 80)} runs the test files your change adds or changes, and it has ${t.count} of them, more than the ${t.files.length} one check runs.`); continue; }
+          const unbuilt = t.files.filter((f) => f.built === null);
+          if (unbuilt.length > 0) { ran.push({ name: c.name, state: "failed" }); fail(`Check ${quoted(c.name, 80)} runs the built test files of your change, and ${unbuilt.length} had no built file it can run after the checks before it ran (a TypeScript test under src/ runs from dist/; a path that starts with - or holds any of * ? [ ] { } ( ) ! \\ is not run): ${unbuilt.slice(0, DONE_VERIFY_LIMITS.files).map((f) => quoted(f.path, 120)).join(", ")}${unbuilt.length > DONE_VERIFY_LIMITS.files ? ` and ${unbuilt.length - DONE_VERIFY_LIMITS.files} more` : ""}.`); continue; }
+        }
         if (r === undefined || (r.state !== "passed" && r.state !== "failed" && r.state !== "not-run")) { ran.push({ name: c.name, state: "not-run" }); cannot(`Check ${quoted(c.name, 80)} was not run by the host.`); continue; }
         ran.push({ name: c.name, state: r.state, ...(r.exitCode === undefined ? {} : { exitCode: r.exitCode }), ...(r.timedOut === true ? { timedOut: true } : {}), ...(typeof r.ms === "number" && Number.isFinite(r.ms) ? { ms: Math.max(0, Math.round(r.ms)) } : {}) });
         if (r.state === "passed") continue;
@@ -1231,6 +1244,10 @@ export class DispatcherService {
         const tail = out.length > DONE_VERIFY_LIMITS.output ? out.slice(out.length - DONE_VERIFY_LIMITS.output) : out;
         fail(`Check ${quoted(c.name, 80)} failed: ${how}. ${tail === "" ? "It wrote nothing." : `The end of its output (quoted): ${quoted(tail, DONE_VERIFY_LIMITS.output + 20)}.`}`);
       }
+      // Card W09 second slice: with clauses in the contract and a check of the changed tests, PLAN.md must map each clause to a test of the change. No clauses: the done check is as before.
+      const tests = contract.checks.some((c) => c.changedTests === true) ? changedTestsOf(report.changedTests) : undefined;
+      const plan = tests === undefined ? undefined : clausePlanProblem(contract.acceptanceCriteria ?? [], tests);
+      if (plan !== undefined) fail(plan);
     }
     const state: DoneVerification["state"] = failures.length === 0 ? "passed" : notChecked === failures.length ? "unknown" : "failed";
     const at = this.#runner.now();
@@ -1254,8 +1271,8 @@ export class DispatcherService {
   }
 
   /** The contract a done is checked against: the one stored now, except that a change made by the attempt's own agent after the attempt began does not count (the agent cannot loosen its own checks); `undefined`: none stored. */
-  async #doneContract(b: DispatchBody): Promise<{ version: number; requiredEvidence: readonly string[]; checks: readonly { name: string; run: readonly string[]; timeoutSeconds?: number }[]; expectedResult?: string; acceptanceCriteria?: readonly string[] } | undefined> {
-    type Stored = { version?: number; changedBy?: string; requiredEvidence?: readonly string[]; checks?: readonly { name: string; run: readonly string[]; timeoutSeconds?: number }[]; expectedResult?: string; acceptanceCriteria?: readonly string[] };
+  async #doneContract(b: DispatchBody): Promise<{ version: number; requiredEvidence: readonly string[]; checks: readonly { name: string; run: readonly string[]; timeoutSeconds?: number; changedTests?: boolean }[]; expectedResult?: string; acceptanceCriteria?: readonly string[] } | undefined> {
+    type Stored = { version?: number; changedBy?: string; requiredEvidence?: readonly string[]; checks?: readonly { name: string; run: readonly string[]; timeoutSeconds?: number; changedTests?: boolean }[]; expectedResult?: string; acceptanceCriteria?: readonly string[] };
     let c = (await this.#runner.get("task-contract", b.taskId))?.body as unknown as Stored | undefined;
     if (c === undefined) return undefined;
     const bare = (id: string | undefined): string => (id ?? "").replace(/^agent:/, "");
@@ -1393,7 +1410,10 @@ export class DispatcherService {
     if (this.#deps.interrogator === undefined) why = "no second agent is set up on this controller";
     else {
       try {
-        answer = await this.#deps.interrogator.ask(await this.#interrogationInput(b, text, request.verified, rounds, round, prior === undefined ? undefined : { ...(prior.reason === undefined ? {} : { reason: prior.reason }), questions: prior.rounds[prior.rounds.length - 1]?.questions ?? [] }));
+        const input = await this.#interrogationInput(b, text, request.verified, rounds, round, prior === undefined ? undefined : { ...(prior.reason === undefined ? {} : { reason: prior.reason }), questions: prior.rounds[prior.rounds.length - 1]?.questions ?? [] });
+        const given = await this.#deps.interrogator.ask(input);
+        // W09 third slice: with contract clauses, a supported is taken only once every clause is shown tested in the report or was asked about (the controller asks about the rest itself; `clause-questions.ts`).
+        answer = given === null || typeof given !== "object" ? given : withClauseRule(given, { criteria: input.task.acceptanceCriteria, report: input.report, rounds: input.rounds, round, maxRounds: input.maxRounds }) as InterrogatorAnswer;
       } catch (error) {
         this.#options.onError?.(error);
         why = `the second agent could not be asked: ${errorText(error).slice(0, 200)}`;
@@ -1405,6 +1425,8 @@ export class DispatcherService {
     const reason = answer?.verdict === "unsupported" ? keptText(answer.reason, WORK_REPORT_LIMITS.reason) || "it gave no reason" : answer?.verdict === "questions" ? (questions.length === 0 ? "it asked no question it could state" : "it still had questions after the last round") : undefined;
     const at = this.#runner.now();
     const route = answer?.route === undefined ? undefined : clip(String(answer.route), 120);
+    // W09 fixes: a questioning that did not run names its cause, read from the (redacted, bounded) why.
+    const cause = state === "not-run" ? notRunCause(why) : undefined;
     let used = 0;
     let lost = false;
     const written = await this.#update(attemptId, (x) => {
@@ -1417,8 +1439,8 @@ export class DispatcherService {
       const newRound: InterrogationRound[] = questions.length === 0 ? [] : [{ key: request.key, questions, at, ...(route === undefined ? {} : { route }) }];
       if (state === "asking") return { ...x, ...interrogated, interrogation: { state, rounds: [...(base?.rounds ?? []), ...newRound], at } };
       const exhausted = state === "unsupported" && used >= STOPPED_EARLY_READMITS;
-      const closed: Interrogation = { state, rounds: [...(base?.rounds ?? []), ...newRound], at, verdictKey: request.key, ...(reason === undefined ? {} : { reason }), ...(why === undefined ? {} : { why }), ...(route === undefined ? {} : { route }), ...(state === "unsupported" ? { counted: true, exhausted, goOn: used + 1 } : {}) };
-      const report: AttemptReport | undefined = state !== "unsupported" || exhausted ? { key: request.key, result: state === "unsupported" ? "blocked" : "done", text, at, questioning: state === "unsupported" ? "unsupported" : state, qa: qaOf(closed.rounds), ...(reason === undefined ? {} : { reason }), ...(why === undefined ? {} : { why }) } : undefined;
+      const closed: Interrogation = { state, rounds: [...(base?.rounds ?? []), ...newRound], at, verdictKey: request.key, ...(reason === undefined ? {} : { reason }), ...(why === undefined ? {} : { why }), ...(cause === undefined ? {} : { cause }), ...(route === undefined ? {} : { route }), ...(state === "unsupported" ? { counted: true, exhausted, goOn: used + 1 } : {}) };
+      const report: AttemptReport | undefined = state !== "unsupported" || exhausted ? { key: request.key, result: state === "unsupported" ? "blocked" : "done", text, at, questioning: state === "unsupported" ? "unsupported" : state, qa: qaOf(closed.rounds), ...(reason === undefined ? {} : { reason }), ...(why === undefined ? {} : { why }), ...(cause === undefined ? {} : { cause }) } : undefined;
       return { ...x, ...interrogated, interrogation: closed, ...(report === undefined ? {} : { report }) };
     }, async (x) => {
       // Another process answered this call meanwhile: its answer stands and nothing is counted again.
@@ -1445,7 +1467,7 @@ export class DispatcherService {
     const progress = await this.#progressOf(b);
     return {
       taskId: b.taskId, attemptId: b.attemptId,
-      task: { title: task?.title ?? b.taskId, ...(c?.expectedResult === undefined ? {} : { expectedResult: c.expectedResult }), acceptanceCriteria: c?.acceptanceCriteria ?? [], requiredEvidence: c?.requiredEvidence ?? [], checks: (c?.checks ?? []).map((x) => x.name) },
+      task: { title: task?.title ?? b.taskId, ...(typeof task?.description === "string" && task.description !== "" ? { description: task.description } : {}), ...(c?.expectedResult === undefined ? {} : { expectedResult: c.expectedResult }), acceptanceCriteria: c?.acceptanceCriteria ?? [], requiredEvidence: c?.requiredEvidence ?? [], checks: (c?.checks ?? []).map((x) => x.name) },
       report, notes: b.notes ?? [], evidence: { verified, plan: progress.plan, diff: progress.diff },
       rounds: rounds.map((r) => ({ questions: r.questions, ...(r.answers === undefined ? {} : { answers: r.answers }) })),
       ...(earlier === undefined ? {} : { earlier }), round, maxRounds: WORK_REPORT_LIMITS.rounds,
@@ -2983,10 +3005,12 @@ export class DispatcherService {
   async #doneNote(b: DispatchBody): Promise<string> {
     try {
       const c = await this.#doneContract(b);
-      if (c === undefined || (c.requiredEvidence.length === 0 && c.checks.length === 0)) return "";
+      if (c === undefined) return "";
+      const report = reportClauseNote(c.acceptanceCriteria ?? []);
+      if (c.requiredEvidence.length === 0 && c.checks.length === 0) return report === "" ? "" : `\n\n${report.trimStart()}`;
       const evidence = c.requiredEvidence.length === 0 ? "" : ` Name each evidence item the task requires in work.end evidence as { item, path }, with the file of your checkout that holds it: ${c.requiredEvidence.slice(0, 10).map((e) => quoted(e, 120)).join(", ")}${c.requiredEvidence.length > 10 ? ` and ${c.requiredEvidence.length - 10} more` : ""}.`;
       const checks = c.checks.length === 0 ? "" : ` The host then runs these checks in your sandbox, and each must pass: ${c.checks.map((x) => quoted(x.name, 80)).join(", ")}.`;
-      return `\n\nWhen you end with work.end done, the controller checks your work before it is taken: your checkout must hold your change against the task's base (your PLAN.md does not count; you do not commit it; what the checkout holds is what is checked, and it is committed after review).${evidence}${checks} A done that does not pass is refused with the list of what failed.`;
+      return `\n\nWhen you end with work.end done, the controller checks your work before it is taken: your checkout must hold your change against the task's base (your PLAN.md does not count; you do not commit it; what the checkout holds is what is checked, and it is committed after review).${evidence}${checks}${clauseNote(c)} A done that does not pass is refused with the list of what failed.${report}`;
     } catch { return ""; }
   }
 
@@ -3115,7 +3139,9 @@ export class DispatcherService {
         const nudges = Number.isSafeInteger(result.nudges) && result.nudges! >= 0 && result.nudges! <= MAX_RECORDED_NUDGES ? result.nudges : undefined;
         // Card W08: how far the plan got when a completed turn ended (the steps checked, of how many), as the host reports it; what it cannot say is left out, never guessed.
         // The turn's ending is held before the host is asked (up to 10 s): a stop that ends the attempt meanwhile records it; the plan joins it only while it is still held.
-        const held: NonNullable<DispatchBody["turnEnd"]> = { endKind: turnEndKindOf(result.endKind), ...(visibleChars === undefined ? {} : { visibleChars }), at: this.#runner.now(), ...(nudges === undefined ? {} : { nudges }) };
+        // W09 fixes: how the worker's replies were cut with no visible text (the reply limit it raised to), on the same record; a malformed figure is left out.
+        const replyCut = replyCutOf(result.replyCut);
+        const held: NonNullable<DispatchBody["turnEnd"]> = { endKind: turnEndKindOf(result.endKind), ...(visibleChars === undefined ? {} : { visibleChars }), at: this.#runner.now(), ...(nudges === undefined ? {} : { nudges }), ...(replyCut === undefined ? {} : { replyCut }) };
         this.#turnEnds.set(attemptId, held);
         mine = held;
         const progress = result.status === "completed" ? await this.#progressOf(d.body, true) : undefined;
@@ -3936,6 +3962,30 @@ type AdvanceOutcome = { kind: "started" } | { kind: "waiting"; capReason?: strin
 
 /** A limit of 0 states no limit; a limit that is set is used up when what was spent (and what may have been) reaches it. */
 const exhausted = (limit: number, used: number): boolean => limit > 0 && used >= limit;
+
+/**
+ * Card W09 second slice: what the done note adds for a contract with a check of the changed tests: which files that check runs and, with clauses, how PLAN.md maps each to a test. The clauses are the contract's words, quoted and
+ * cut (at most 50 of 100 characters each: the agent has them whole in the task's description). Empty without such a check.
+ */
+function clauseNote(c: { readonly checks: readonly { readonly name: string; readonly changedTests?: boolean }[]; readonly acceptanceCriteria?: readonly string[] }): string {
+  const check = c.checks.find((x) => x.changedTests === true);
+  if (check === undefined) return "";
+  const runs = ` The check ${quoted(check.name, 80)} runs the test files your change adds or changes (named *.test.* or *.spec.*; a TypeScript one from its built file, src/ becoming dist/), so a done needs tests of yours that pass.`;
+  const criteria = c.acceptanceCriteria ?? [];
+  if (criteria.length === 0) return runs;
+  const listed = criteria.slice(0, 50).map((x, i) => `C${i + 1} ${quoted(x, 100)}`).join("; ");
+  return `${runs} The contract has ${criteria.length} clause(s), in this order: ${listed}. Your PLAN.md must hold, for each, a ticked step that starts with its number and names a test file of your change and one of its tests by name, in quotes, as in that file: - [x] C1: ... path/to/x.test.ts "its test name".`;
+}
+
+/**
+ * W09 third slice, second review: the form of a report line that shows a clause tested (`clause-questions.ts` reads it), told at the start so the first report can hold it. Before, only the second agent's questions and the
+ * refusal showed it, so a task of 7 or more clauses whose first report had no such lines always cost a go-on (two rounds ask about 6 at most). Empty without clauses.
+ */
+export function reportClauseNote(criteria: readonly string[]): string {
+  const n = Math.min(criteria.length, CLAUSE_QUESTION_LIMITS.clauses);
+  if (n === 0) return "";
+  return ` Your work.end report must show each of the contract's clauses (${n === 1 ? "C1" : `C1 to C${n}`}, in the contract's order) tested, one line each naming the clause, its test and its passing result: C1: path/to/x.test.ts "its test name" passed. A clause it does not show is asked about before the done is taken.`;
+}
 
 /** The default time of a contract check, in seconds (`CONTRACT_LIMITS.checkSeconds`). */
 const CHECK_SECONDS = 600;

@@ -241,6 +241,31 @@ for (const backend of backends) {
     assert.ok(!JSON.stringify(ops).includes(credential), "the operation record keeps no credential either");
   });
 
+  suite("W09 third slice: a checkout run that only waits (a sleep of more than 60 s, alone or before the next command) is refused with a hint to run the named test, before it is recorded or reaches the host; every other command runs", async (c) => {
+    const ann = await c.agentFor("ann");
+    await c.task("code it", ann);
+    const asked: string[] = [];
+    c.checkoutHost.run = async (_call, request) => { asked.push(request.command ?? ""); return { ok: true, body: "", facts: {} }; };
+    const refused = ["sleep 240", "sleep 4m && tail -n 20 /tmp/out.log", "  sleep 61\n", "sleep 300; cat log", "sleep 30 31", "/usr/bin/sleep infinity"];
+    const run = ["sleep 60", "sleep 5 && npm test", "sleep 240 &", "npm test; sleep 300", "sleep $T", "(sleep 240)", "sleep '240'", "node --test dist/a.test.js"];
+    const seen: Record<string, BridgeResponse> = {};
+    c.worker.script = c.session(async (s) => {
+      for (const [i, command] of [...refused, ...run].entries()) seen[command] = await s.send("work.checkout", { action: "run", command }, `wg-${i}`);
+    });
+    await c.tick();
+    for (const command of refused) {
+      const r = bad(seen[command]!);
+      assert.equal(r.code, "invalid_command", command);
+      assert.match(r.message, /^command: a command that waits (?:\d+ s|without end) \(more than 60 s\) is not run: run the test files you named directly .* end with work-end$/, command);
+    }
+    assert.match(bad(seen["sleep 240"]!).message, /waits 240 s/);
+    assert.match(bad(seen["sleep 30 31"]!).message, /waits 61 s/, "the arguments of one sleep add up");
+    for (const command of run) assert.equal(good(seen[command]!)["state"], "confirmed", command);
+    assert.deepEqual(asked, run, "only the commands that do not only wait reach the host");
+    const ops = (await c.dispatcher.operations(c.dispatcherPrincipal, c.worker.starts[0]!.attemptId))!;
+    assert.equal(ops.length, run.length, "a refused wait is not recorded as an operation");
+  });
+
   suite("card W09b: the owner's approval policy for the project governs the checkout tool by class: with workspace edits set to ask the owner, a write waits for the owner and a read runs", async (c) => {
     const ann = await c.agentFor("ann");
     await c.task("code it", ann);

@@ -483,7 +483,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `context.route.get`
 
-The route-change check's settings (owner only): `check` (on by default: when a task is about to run on another model route than it last ran on, the dispatcher builds its context again for that route's window, refuses to start it if what must stay whole does not fit, and otherwise puts that rebuilt context, with references to what was cut, at the end of its first prompt) and `floorChars` (the characters counted as the fixed part, system prompt and tool schemas, of a route nobody has measured yet; default 22200, 2600 for the prompt and 19600 for the tool schemas, the real worker's measured fixed part with a little room; it only sizes the cut, an unmeasured route is never refused on it: the first call on the route is checked with its real size and the owner gets a notice). Also, for the goal anchor (card W12): `anchor` (on by default: each attempt's first prompt opens with a short block the controller writes from its own records, the task's goal, acceptance criteria, what a done is checked against, the agent's own work notes, the owner's rules and the IDs of the records it was made from, and the worker puts that block again at the top of every summary that replaces a cut conversation, so an agent that has lost its place finds its goal again; that summary is a plain extract, the start and the end of what was cut, written without a model, so details from the middle may be missing; a remote machine that sets no context of its own writes it only while the anchor is on, with it off the model writes the summary again; off: no block) and `anchorChars` (the most characters the block may take, 900 to 6000, default 2400; the route's window caps it further at 4 percent of the window, always well under the reply reserve). Also, for the memory tool (card W13): `recall` (on by default: the agent may call the read-only tool task.recall to read back, from the controller's own records of its current task, its goal and plan, its own earlier notes, hand-off facts, the full text of notes that were cut, and a short digest of what was done; off: the tool answers that it is switched off) and `recallCalls` (how many calls one attempt may make, 1 to 100, default 20). Shows the entries, the defaults and what applies now.
+The route-change check's settings (owner only): `check` (on by default: when a task is about to run on another model route than it last ran on, the dispatcher builds its context again for that route's window, refuses to start it if what must stay whole does not fit, and otherwise puts that rebuilt context, with references to what was cut, at the end of its first prompt) and `floorChars` (the characters counted as the fixed part, system prompt and tool schemas, of a route nobody has measured yet; default 22248, 2648 for the prompt and 19600 for the tool schemas, the real worker's measured fixed part with a little room; it only sizes the cut, an unmeasured route is never refused on it: the first call on the route is checked with its real size and the owner gets a notice). Also, for the goal anchor (card W12): `anchor` (on by default: each attempt's first prompt opens with a short block the controller writes from its own records, the task's goal, acceptance criteria, what a done is checked against, the agent's own work notes, the owner's rules and the IDs of the records it was made from, and the worker puts that block again at the top of every summary that replaces a cut conversation, so an agent that has lost its place finds its goal again; that summary is a plain extract, the start and the end of what was cut, written without a model, so details from the middle may be missing; a remote machine that sets no context of its own writes it only while the anchor is on, with it off the model writes the summary again; off: no block) and `anchorChars` (the most characters the block may take, 900 to 6000, default 2400; the route's window caps it further at 4 percent of the window, always well under the reply reserve). Also, for the memory tool (card W13): `recall` (on by default: the agent may call the read-only tool task.recall to read back, from the controller's own records of its current task, its goal and plan, its own earlier notes, hand-off facts, the full text of notes that were cut, and a short digest of what was done; off: the tool answers that it is switched off) and `recallCalls` (how many calls one attempt may make, 1 to 100, default 20). Shows the entries, the defaults and what applies now.
 
 Arguments:
 
@@ -5033,7 +5033,7 @@ Result: `{ settings }`.
 
 #### `meeting.floor.end`
 
-Owner only: ends the meeting. Nothing is asked after; nothing written is undone. The chair cannot prevent it.
+Owner only: ends the meeting. Nothing is asked after; nothing written is undone. The chair cannot prevent it. What the meeting left open then becomes follow-up tasks, each given to the agent that owns it.
 
 Arguments:
 
@@ -5914,13 +5914,13 @@ Result: `{ revision, seal }`.
 
 #### `experiment.run`
 
-The proposer (or a judge) reports one run of a running experiment: the disposable environment it used, the cost, exactly the pinned metrics and exactly the pinned cases (passed or not). A run that uses up the budget pauses the experiment; a paused one refuses more runs.
+The proposer (or a judge) reports one run of a running experiment: the disposable environment it used (the A08 environment revision it was built from, the reporter's own unless the owner reports, and the protected-extension digests the host found there; the controller checks them with A08's integrity check and refuses the run otherwise), the cost, exactly the pinned metrics and exactly the pinned cases (passed or not). A run that uses up the budget pauses the experiment; a paused one refuses more runs.
 
 Arguments:
 
 - `commandId`: required
 - `experimentId`: exp-...
-- `environment`: { ref, disposable: true }
+- `environment`: { agentId, revision, observed: { extension: "sha256:..." }, disposable: true }
 - `cost`: number
 - `metrics`: the pinned metrics
 - `cases`: [{ id, passed }]
@@ -6534,6 +6534,16 @@ Result: `{ taskId, branch, removed?, reservationEnded?, replayed }`; `removed` i
 
 Completion: finished when accepted (`completed: true`).
 
+#### `integrator.pool.next`
+
+For an integrator agent that holds no live integrator lease: takes the lease of the landing branch, among the projects where it has the right `integration.lease`, whose first queued approved work has waited longest (card P10b). `outcome` is `taken` (the project, branch, the queue's first task and submission, and the lease to land with), `holding` (you already hold a lease: that one, and nothing more is taken; a repeat of the request answers this way) or `none` with the reason and counts: branches held by another integrator, reserved first places still waiting for work, projects whose landing settings could not be read, and `partial` when not every queue was looked at. Agents only; not with a task credential.
+
+Arguments:
+
+- `ttlMs`: how long the lease is held before it must be renewed, in milliseconds (60000 to 86400000)
+
+Result: `{ outcome: "taken", projectId, branch, taskId, submissionId, waitingSince, lease }`, `{ outcome: "holding", projectId, branch, lease, holding, reason }` or `{ outcome: "none", reason, heldByOthers, awaitingWork, unreadable, partial }`
+
 #### `budget.request-more`
 
 A task asks for more budget. It goes to the holder of the parent node, or to the owner, who is told.
@@ -7100,7 +7110,7 @@ Arguments:
 - `budget` (optional): `{ maxAttempts?, maxMinutes?, maxCost? }`
 - `workClass` (optional): `P` or `PC`
 - `requiredEvidence` (optional): list of text: what the agent must name in work.end `evidence` (a file of its checkout each) before its done is accepted
-- `checks` (optional): list of `{ name, run, timeoutSeconds? }`: commands the host runs in the attempt's sandbox (the checkout as working directory) when the agent says done; each must exit 0 (at most 10; `run` is the program and its arguments; default 600 seconds, at most 3,600). A landing runs them too (a required `tests` check), but not checks set only by the task's own assignee or submitter; naming the checks the contract already holds, when someone else set them, accepts them so a landing runs them (the owner is told when a landing has none it can use)
+- `checks` (optional): list of `{ name, run, timeoutSeconds?, changedTests? }`: commands the host runs in the attempt's sandbox (the checkout as working directory) when the agent says done; each must exit 0 (at most 10; `run` is the program and its arguments; default 600 seconds, at most 3,600). `changedTests: true` on one check appends the test files the agent's change adds or changes (`*.test.*`, `*.spec.*`; a TypeScript one by its built file under `dist/`): a change with none, or one not built, does not pass; with `acceptanceCriteria`, the agent's PLAN.md must also hold one ticked step per criterion (`- [x] C<n>: ...`) naming one of those test files and one of its tests by name; the local worker host lists them, a remote host does not, so there such a done cannot be checked. A landing runs them too (a required `tests` check), but not checks set only by the task's own assignee or submitter; naming the checks the contract already holds, when someone else set them, accepts them so a landing runs them (the owner is told when a landing has none it can use)
 - `permissions` (optional): action names the work may use, at most
 - `recovery` (optional): `none`, `native-continuation` (default) or `portable-reconstruction`: what the task needs from its harness to be recovered
 
@@ -8768,7 +8778,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `release.window.set`
 
-Owner only (card K07): a maintenance window for one exact staged release: a local date and time in a named time zone and how long it lasts. From `prepareLeadMinutes` before it opens the controller prepares (verifies the staged files against the digest, checks the release is not quarantined and that `minFreeBytes` are free); while it is open and no agent attempt is running it activates the release through the same checks as release.activate (approval, signature, platform, targets, migration plan). Running work is never stopped: if it never goes quiet the window ends deferred. A window that closes before the update started ends missed and never deploys later. A release that fails its checks or fails to start after the window is quarantined (no later window can bring it back). One open window at a time.
+Owner only (card K07): a maintenance window for one exact staged release: a local date and time in a named time zone and how long it lasts. From `prepareLeadMinutes` before it opens the controller prepares (verifies the staged files against the digest, checks the release is not quarantined and that `minFreeBytes` are free); while it is open and no agent attempt is running it activates the release through the same checks as release.activate (approval, signature, platform, targets, migration plan). Running work is never stopped: if it never goes quiet the window ends deferred. A window that closes before the update started ends missed and never deploys later; one whose release NimbleNewt was not restarted into before the close has that switch undone (release.rollback to the release before, ending reverted), or, if it cannot be undone, ends failed saying so. A release that fails its checks or fails to start after the window is quarantined (no later window can bring it back). One open window at a time.
 
 Arguments:
 

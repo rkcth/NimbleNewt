@@ -11,7 +11,7 @@ import { ContractService } from "../planning/contracts.js";
 import { GrantService, PrincipalService, type Grant, type Principal } from "../security/index.js";
 import type { Difficulty } from "../planning/contracts.js";
 import { ownerLoadReport, readAuditLog } from "./owner-load.js";
-import { EscalationLadderService, RECOVERY_ACTIONS, RecoveryLadderService, StallService, type RecoveryAction, type RecoveryEffects, assessStall, DEFAULT_THRESHOLDS, type StallEvent, type StallOptions } from "./index.js";
+import { EscalationLadderService, RECOVERY_ACTIONS, RecoveryLadderService, StallService, type ConcernEvent, type RecoveryAction, type RecoveryEffects, assessStall, DEFAULT_THRESHOLDS, type StallEvent, type StallOptions } from "./index.js";
 
 after(stopServer);
 
@@ -1664,5 +1664,205 @@ for (const backend of backends) {
     assert.deepEqual(s1!.reached.map((x) => [x.taskId, x.projectId, x.sameProject]), [[second, c.other, false]], "the second stall, in another project, opened while the first was open");
     assert.deepEqual([s2!.taskId, s2!.endState, s2!.reached.length], [second, "cleared", 0]);
     assert.equal(report.stallsReachingUnrelatedWork, 1);
+  });
+  suite("onConcern is told a confirmed failure and a recovery after a confirmed failure or a step actually taken, from the stored record, per episode; a dismissal, a concern that clears by itself and other clearings are not; a failing hook never undoes the change (card B02, second slice)", async (c) => {
+    const told: ConcernEvent[] = [];
+    const notes: string[] = [];
+    let fail = false;
+    const setting = RecoveryLadderService.withEpoch(c.storage, c.projects.epoch, options);
+    const made: string[] = [];
+    // A rebrief is refused on a precondition, so the rung is passed (recorded as skipped), not taken.
+    const effects: RecoveryEffects = { run: async (action) => { if (action === "rebrief") throw new DomainError("invalid_transition", "the task has no brief to send again"); made.push(action); return {}; }, unavailable: async () => "not here" };
+    const svc = c.service({ onConcern: async (e) => { if (fail) throw new Error("the observations are down"); told.push(e); }, onNote: (m) => notes.push(m), recoveryPolicy: () => setting.policy(), recoveryEffects: effects });
+    const h = await c.host("h1");
+    const loop = async (t: string) => { for (let i = 0; i < 6; i++) await c.send(h, t, step("run tests", "tests")); };
+    const concernOf = async (t: string) => (await svc.list(c.owner, { taskId: t })).items[0]!;
+    const confirm = (id: string, revision: number, commandId = cid("d"), reason = "looping on the same failing test") => svc.decide(c.owner, { commandId, concernId: id, expectedRevision: revision, decision: "confirm", reason });
+    const task = async (t: string) => (await c.projects.getTask(t))!;
+
+    // Confirmed: told once with who and why, the episode (0) and no steps; a repeat of the decision tells the same facts again (the observation's own command ID makes that a replay).
+    const t1 = await c.work();
+    await loop(t1); await svc.scan(c.owner);
+    const k1 = await concernOf(t1);
+    await confirm(k1.id, k1.revision, "conf-1");
+    const first: ConcernEvent = { stage: "confirmed", concernId: k1.id, episode: 0, taskId: t1, projectId: c.project, kind: "loop", by: c.owner.id, reason: "looping on the same failing test", steps: [] };
+    assert.deepEqual(told, [first]);
+    assert.equal((await confirm(k1.id, k1.revision, "conf-1")).replayed, true);
+    assert.deepEqual(told, [first, first]);
+    told.length = 0;
+    // That confirmed failure is a recovery once its task is done; a confirmed one whose task is cancelled is not.
+    await c.projects.transitionTask({ commandId: cid("dn"), actor: c.owner.id, taskId: t1, expectedRevision: (await task(t1)).revision, to: "done" });
+    await svc.scan(c.owner);
+    assert.deepEqual(told, [{ stage: "recovered", concernId: k1.id, episode: 0, taskId: t1, projectId: c.project, kind: "loop", reason: "archived: the task is done", steps: [] }]);
+    told.length = 0;
+    const t2 = await c.work();
+    await loop(t2); await svc.scan(c.owner);
+    const k2 = await concernOf(t2);
+    await confirm(k2.id, k2.revision);
+    told.length = 0;
+    await c.projects.transitionTask({ commandId: cid("cn"), actor: c.owner.id, taskId: t2, expectedRevision: (await task(t2)).revision, to: "cancelled" });
+    await svc.scan(c.owner);
+    assert.equal((await svc.get(c.owner, k2.id))!.state, "cleared");
+    assert.equal(told.length, 0, "a cancelled task did not recover");
+
+    // A dismissal is not a failure; a suspected concern that clears with no step taken is not a recovery. It comes back as episode 1, and that confirmation says so.
+    const t3 = await c.work();
+    await loop(t3); await svc.scan(c.owner);
+    const k3 = await concernOf(t3);
+    await svc.decide(c.owner, { commandId: cid("d"), concernId: k3.id, expectedRevision: k3.revision, decision: "dismiss", reason: "a long retry on purpose" });
+    const t4 = await c.work();
+    await loop(t4); await svc.scan(c.owner);
+    const k4 = await concernOf(t4);
+    await c.send(h, t4, { type: "evidence", item: "tests green" });
+    await svc.scan(c.owner);
+    assert.equal((await svc.get(c.owner, k4.id))!.clearedBecause, "the signals recovered");
+    assert.equal(told.length, 0);
+    await loop(t4); await svc.scan(c.owner);
+    const back = await concernOf(t4);
+    assert.equal(back.reopened, 1);
+    await confirm(back.id, back.revision);
+    assert.deepEqual(told.map((e) => [e.stage, e.episode]), [["confirmed", 1]]);
+    told.length = 0;
+
+    // A step actually taken, then the signals recover: a recovery, with the step named. A passed step does not count.
+    const t5 = await c.work();
+    await loop(t5); await svc.scan(c.owner);
+    let k5 = await concernOf(t5);
+    await svc.recover(c.owner, { commandId: cid("rc"), concernId: k5.id, expectedRevision: k5.revision, action: "nudge", text: "please report" });
+    assert.deepEqual(made, ["nudge"]);
+    assert.equal(told.length, 0, "a step is not a recovery by itself");
+    await c.send(h, t5, { type: "evidence", item: "tests green" });
+    await svc.scan(c.owner);
+    k5 = (await svc.get(c.owner, k5.id))!;
+    assert.equal(k5.state, "cleared");
+    assert.deepEqual(told, [{ stage: "recovered", concernId: k5.id, episode: 0, taskId: t5, projectId: c.project, kind: "loop", reason: "the signals recovered", steps: ["nudge"] }]);
+    told.length = 0;
+    // A scan with nothing new tells nothing again.
+    await svc.scan(c.owner);
+    assert.equal(told.length, 0);
+    // Only a passed step, then the signals recover: nothing was done, so it is not a recovery.
+    const t8 = await c.work();
+    await loop(t8); await svc.scan(c.owner);
+    const k8 = await concernOf(t8);
+    const passed = await svc.recover(c.owner, { commandId: cid("rc"), concernId: k8.id, expectedRevision: k8.revision, action: "rebrief", text: "read it again" });
+    assert.equal(passed.step?.skipped, true);
+    await c.send(h, t8, { type: "evidence", item: "tests green" });
+    await svc.scan(c.owner);
+    assert.equal((await svc.get(c.owner, k8.id))!.clearedBecause, "the signals recovered");
+    assert.equal(told.length, 0, "a passed step is not a recovery step");
+    // A step taken and a step passed, then the signals recover: only the step taken is named.
+    const t11 = await c.work();
+    await loop(t11); await svc.scan(c.owner);
+    const k11 = await concernOf(t11);
+    await svc.recover(c.owner, { commandId: cid("rc"), concernId: k11.id, expectedRevision: k11.revision, action: "nudge", text: "please report" });
+    const k11b = (await svc.get(c.owner, k11.id))!;
+    assert.equal((await svc.recover(c.owner, { commandId: cid("rc"), concernId: k11.id, expectedRevision: k11b.revision, action: "rebrief", text: "read it again" })).step?.skipped, true);
+    await c.send(h, t11, { type: "evidence", item: "tests green" });
+    await svc.scan(c.owner);
+    assert.deepEqual(told.map((e) => [e.stage, e.concernId, e.steps]), [["recovered", k11.id, ["nudge"]]]);
+    told.length = 0;
+    // A step taken, then the task released: the concern clears, but nothing recovered.
+    const t10 = await c.work();
+    await loop(t10); await svc.scan(c.owner);
+    const k10 = await concernOf(t10);
+    await svc.recover(c.owner, { commandId: cid("rc"), concernId: k10.id, expectedRevision: k10.revision, action: "nudge", text: "please report" });
+    await c.assignments.releaseTask({ commandId: cid("rel"), actor: c.owner.id, taskId: t10, expectedRevision: (await c.assignments.getAssignment(t10))!.revision });
+    await svc.scan(c.owner);
+    assert.equal((await svc.get(c.owner, k10.id))!.clearedBecause, "the task has a new owner or is no longer assigned");
+    assert.equal(told.length, 0, "a released task did not recover");
+    // A confirmed failure whose task moved to another owner did not recover; the decision repeated after the archiving tells the same confirmation again (its observation is then a replay).
+    const t9 = await c.work();
+    await loop(t9); await svc.scan(c.owner);
+    const k9 = await concernOf(t9);
+    await confirm(k9.id, k9.revision, "conf-9");
+    told.length = 0;
+    await c.assignments.transferTask({ commandId: cid("tr"), actor: c.owner.id, taskId: t9, expectedRevision: (await c.assignments.getAssignment(t9))!.revision, to: { kind: "agent", id: "bob" } });
+    await svc.scan(c.owner);
+    assert.equal((await svc.get(c.owner, k9.id))!.clearedBecause, "archived: the task has a new owner");
+    assert.equal(told.length, 0, "a reassigned task did not recover");
+    assert.equal((await confirm(k9.id, k9.revision, "conf-9")).replayed, true);
+    assert.deepEqual(told.map((e) => [e.stage, e.concernId, e.episode, e.by]), [["confirmed", k9.id, 0, c.owner.id]]);
+    told.length = 0;
+
+    // The hook failing: the decision stands, the failure is noted, nothing is thrown at the decider.
+    fail = true;
+    const t6 = await c.work();
+    await loop(t6); await svc.scan(c.owner);
+    const k6 = await concernOf(t6);
+    assert.equal((await confirm(k6.id, k6.revision)).replayed, false);
+    assert.equal((await svc.get(c.owner, k6.id))!.state, "confirmed");
+    assert.ok(notes.some((m) => m.includes(k6.id) && /could not be told on \(the observations are down\)/.test(m)), notes.join("\n"));
+    // Without a hook nothing is told and nothing fails.
+    const plainSvc = c.service();
+    const t7 = await c.work();
+    await loop(t7); await plainSvc.scan(c.owner);
+    const k7 = (await plainSvc.list(c.owner, { taskId: t7 })).items[0]!;
+    assert.equal((await plainSvc.decide(c.owner, { commandId: cid("d"), concernId: k7.id, expectedRevision: k7.revision, decision: "confirm", reason: "yes" })).replayed, false);
+  });
+  suite("onConcern in the scan: a failing hook never fails the scan or its clearing; the steps taken are named oldest first; a clearing write that loses to a concurrent decision tells nothing (card B02, second slice)", async (c) => {
+    const told: ConcernEvent[] = [];
+    const notes: string[] = [];
+    let fail = false;
+    const setting = RecoveryLadderService.withEpoch(c.storage, c.projects.epoch, options);
+    const effects: RecoveryEffects = { run: async () => ({}), unavailable: async () => "not here" };
+    const more: StallOptions = { onConcern: async (e) => { if (fail) throw new Error("the observations are down"); told.push(e); }, onNote: (m) => notes.push(m), recoveryPolicy: () => setting.policy(), recoveryEffects: effects };
+    const svc = c.service(more);
+    const h = await c.host("h1");
+    const loop = async (t: string) => { for (let i = 0; i < 6; i++) await c.send(h, t, step("run tests", "tests")); };
+    const concernOf = async (t: string) => (await svc.list(c.owner, { taskId: t })).items[0]!;
+    const nudge = async (id: string, action: RecoveryAction = "nudge") => { const k = (await svc.get(c.owner, id))!; return svc.recover(c.owner, { commandId: cid("rc"), concernId: id, expectedRevision: k.revision, action, text: "please report" }); };
+
+    // Two steps taken: the recovery names both, oldest first.
+    const t1 = await c.work();
+    await loop(t1); await svc.scan(c.owner);
+    const k1 = await concernOf(t1);
+    await nudge(k1.id); await nudge(k1.id, "rebrief");
+    await c.send(h, t1, { type: "evidence", item: "tests green" });
+    await svc.scan(c.owner);
+    assert.deepEqual(told.map((e) => [e.stage, e.concernId, e.steps]), [["recovered", k1.id, ["nudge", "rebrief"]]]);
+    told.length = 0;
+
+    // The hook failing in the scan: the concern is cleared and counted, the failure noted, the scan goes on.
+    fail = true;
+    const t2 = await c.work();
+    await loop(t2); await svc.scan(c.owner);
+    const k2 = await concernOf(t2);
+    await nudge(k2.id);
+    await c.send(h, t2, { type: "evidence", item: "tests green" });
+    const report = await svc.scan(c.owner);
+    assert.equal(report.cleared, 1);
+    assert.equal((await svc.get(c.owner, k2.id))!.clearedBecause, "the signals recovered");
+    assert.ok(notes.some((m) => m.includes(k2.id) && /recovered concern .* could not be told on \(the observations are down\)/.test(m)), notes.join("\n"));
+    fail = false;
+
+    // The clearing write loses to a confirmation made meanwhile: the scan counts it contended and tells no recovery (the confirmation stands).
+    const t3 = await c.work();
+    await loop(t3); await svc.scan(c.owner);
+    const k3 = await concernOf(t3);
+    await nudge(k3.id);
+    await c.send(h, t3, { type: "evidence", item: "tests green" });
+    let armed = true;
+    const racing = new Proxy(c.storage, {
+      get(target, prop) {
+        if (prop === "applyOperation") {
+          return async (input: { changes: readonly { ref: { kind: string; id: string }; body?: { state?: string } }[] }) => {
+            if (armed && input.changes.some((ch) => ch.ref.kind === "stall-concern" && ch.ref.id === k3.id && ch.body?.state === "cleared")) {
+              armed = false;
+              const now3 = (await c.stall.get(c.owner, k3.id))!;
+              await c.stall.decide(c.owner, { commandId: cid("race"), concernId: k3.id, expectedRevision: now3.revision, decision: "confirm", reason: "confirmed meanwhile" });
+            }
+            return target.applyOperation(input as never);
+          };
+        }
+        const value = Reflect.get(target, prop, target) as unknown;
+        return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    const raced = StallService.withEpoch(racing, c.projects.epoch, c.assignments, c.waits, { ...options, hostStaleAfterMs: 60_000, ...more });
+    const lost = await raced.scan(c.owner);
+    assert.equal(armed, false, "the race was run");
+    assert.equal(lost.contended, 1);
+    assert.equal((await svc.get(c.owner, k3.id))!.state, "confirmed");
+    assert.equal(told.length, 0, "a clearing that was not written is not a recovery");
   });
 }

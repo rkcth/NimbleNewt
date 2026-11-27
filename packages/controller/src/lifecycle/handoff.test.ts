@@ -360,21 +360,28 @@ for (const backend of backends) {
     let release!: () => void;
     const gate = new Promise<void>((ok) => { release = ok; });
     let first = true;
+    // CI fix 2026-11-27: the test waits for a signal from inside the step, not a fixed time (a slow runner ran out of 2 x 250 ms polls), and always lets the manager's completion end before the storage closes
+    // (a completion still running at the close failed with "the storage is closed", which hid the real assertion).
+    let entered!: () => void;
+    const inside = new Promise<void>((ok) => { entered = ok; });
     // The manager's completion stops inside the responsibilities step, after the task has moved; the owner's advance finishes the hand-off meanwhile.
-    c.resp.apply = async (_by, r) => { if (first) { first = false; await gate; } return { moved: [...r.ids], failed: [] }; };
+    c.resp.apply = async (_by, r) => { if (first) { first = false; entered(); await gate; } return { moved: [...r.ids], failed: [] }; };
     const h = await c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "move it" });
     const slow = c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h.id, reassignResponsibilities: ["rsp-a"] });
-    for (let n = 0; n < 50 && (await c.handoffs.get(c.owner, h.id))?.phase !== "transferring"; n++) await new Promise((ok) => setTimeout(ok, 5));
-    for (let n = 0; n < 50 && first; n++) await new Promise((ok) => setTimeout(ok, 5));
-    assert.equal(first, false, "the manager's completion is inside the responsibilities step");
-    assert.equal((await c.reopen().advance(c.owner, { handoffId: h.id })).phase, "transferred");
-    assert.equal(await paused(c), false, "the hold the hand-off added is lifted");
-    // The owner pauses the task with the new owner on it; then the manager's completion goes on.
-    await c.pauses.pause(c.owner, { commandId: cid("p"), scope: scopeOf(c.task), reason: "owner hold after the move" });
-    release();
-    assert.equal((await slow).phase, "transferred");
-    assert.equal(await paused(c), true, "the owner's own pause stands");
-    assert.equal(c.told.length, 1, "the move is told once");
+    try {
+      const reached = await Promise.race([inside.then(() => true), slow.then(() => false, () => false)]);
+      if (!reached) await slow; // a completion that failed before the step shows its own error
+      assert.equal(reached, true, "the manager's completion is inside the responsibilities step");
+      assert.equal((await c.handoffs.get(c.owner, h.id))?.phase, "transferring", "the task has moved and the hand-off is not finished yet");
+      assert.equal((await c.reopen().advance(c.owner, { handoffId: h.id })).phase, "transferred");
+      assert.equal(await paused(c), false, "the hold the hand-off added is lifted");
+      // The owner pauses the task with the new owner on it; then the manager's completion goes on.
+      await c.pauses.pause(c.owner, { commandId: cid("p"), scope: scopeOf(c.task), reason: "owner hold after the move" });
+      release();
+      assert.equal((await slow).phase, "transferred");
+      assert.equal(await paused(c), true, "the owner's own pause stands");
+      assert.equal(c.told.length, 1, "the move is told once");
+    } finally { release(); await slow.catch(() => undefined); }
   });
 
   suite("a hand-off lifts only its own hold: a pause the owner set again while it was ready stands when it completes (card L04c review)", async (c) => {

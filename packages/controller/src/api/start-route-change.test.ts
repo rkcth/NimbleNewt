@@ -45,7 +45,7 @@ test("a task that moves to a route too small for its fixed part is refused with 
 
     // The settings: on by default, owner only.
     const first = (await call(boot.token, "context.route.get", {})).result.item;
-    assert.deepEqual([first.effective.check, first.effective.floorChars], [true, 22_200], "the real worker's fixed part with a little room (card Fixed-part sizing after T08; raised with card P03b's bridge tools)");
+    assert.deepEqual([first.effective.check, first.effective.floorChars], [true, 22_248], "the real worker's fixed part with a little room (card Fixed-part sizing after T08; raised with card P03b's bridge tools and card W09's second slice's completion rule)");
 
     // The route moves to a window too small for the prompt and tools of any harness: the attempt does not start, and the reason names the ways out.
     current = "tiny/one";

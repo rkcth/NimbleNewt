@@ -20,7 +20,8 @@ import { copyAcceptance, copyHidden, expandCopy, git, prepareCheckout, runHidden
 import { withSlot } from "./slot.mjs";
 import { aggregate, gatesFor, renderReport } from "./stats.mjs";
 import { COMPLETION_RULES_PLACEHOLDER } from "./taskset.mjs";
-import { attemptSummary, openW09Installation, radianceOnlyFetch, runW09Task, RADIANCE_KIND } from "./worker-embedder.mjs";
+import { attemptSummary, dailySpendOf, MEASURE_LIMITS, msStats, openW09Installation, radianceOnlyFetch, runW09Task, RADIANCE_KIND } from "./worker-embedder.mjs";
+import { contractClauses } from "./contract-clauses.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const promptOf = (name) => join(here, "..", "prompts", name);
@@ -63,6 +64,19 @@ export function buildCheck(task, timeoutSeconds = 1800) {
 }
 
 /**
+ * W09 fixes: the done's checks of a task, the build first and then the task's own package tests when it declares them (`doneTests` in the task set: test files visible in the task's checkout, relative to its root, run with the
+ * sandbox's Node.js after the build). The held-out tests are never among them: the task set refuses a `doneTests` entry that names one (lib/taskset.mjs), and they are only copied into the checkout after the attempt has ended.
+ */
+export function doneChecks(task, timeoutSeconds = 1800) {
+  const checks = buildCheck(task, timeoutSeconds);
+  const tests = Array.isArray(task.doneTests) ? task.doneTests : [];
+  const own = tests.length === 0 ? checks : [...checks, { name: "the task's package tests", run: [SANDBOX_NODE, "--test", ...tests.map(String)], timeoutSeconds }];
+  // W09 second slice, for a task of a set that opts in (`clauseTests`, lib/taskset.mjs): after the build, the test files the agent's change adds or changes, run from their built files (the product's `changedTests` check); with
+  // the task's CONTRACT bullets as the contract's criteria (lib/contract-clauses.mjs) the done also needs PLAN.md to map each bullet to one of those tests. Only with a build: a TypeScript test runs from its built file.
+  return checks.length === 0 || task.clauseTests !== true ? own : [...own, { name: "the tests your change adds or changes", run: [SANDBOX_NODE, "--test"], timeoutSeconds, changedTests: true }];
+}
+
+/**
  * Whether the tools offered to the agent include one that reads or changes files or runs a command in its checkout: Pi's own (read, write, edit, bash) or a catalogue tool by the names the approval policy classifies
  * (packages/controller/src/policy/catalog.ts), or the bridge's own checkout tool (card W09b, `nimblenewt__work-checkout`: read, write, edit and run in the checkout's sandbox). Before W09b the worker offered only the other bridge tools,
  * so this was false and a coding task could not be done there (see the W09 notes).
@@ -89,30 +103,125 @@ export function bridgeFilterFor(variant) {
 /**
  * A worker run's outcome, from the controller's records (`attemptSummary`) and the acceptance suite. The outcome names are the W01 bench's (lib/classify.mjs OUTCOMES), so the gates and the report read them unchanged.
  * Fail closed: only a done the controller verified, with a report the second agent found supported, whose work passes the acceptance suite, is a verified finish.
+ * W09 fixes: every outcome also names its cause (`cause`, one of WORKER_CAUSES, with the second agent's own cause after `second-agent-`), so no run ends without one. The causes change no outcome and no gate: an `unclassified`
+ * run still fails the "no silent non-finish" gate; it now says why.
  */
+export const WORKER_CAUSES = Object.freeze(["verified", "wall-limit", "no-attempt", "not-finished", "false-done", "interface-mismatch", "uncalibrated", "check-not-passed", "second-agent", "reply-cut-not-raised", "reply-cut-below-ceiling", "reply-cut-at-ceiling", "empty-reply", "early-stops-used-up", "ended-partial", "ended-blocked", "ended-abandoned", "done-refused", "ended-otherwise", "bench-error", "server-unavailable"]);
+
+/** The second agent's part of a cause: `second-agent-<the controller's cause>`, or its questioning state when no cause was recorded. */
+const secondAgentCause = (attempt) => `second-agent-${String(attempt.questioningCause ?? attempt.questioning ?? "none").replace(/[^a-z0-9-]/g, "-").slice(0, 40)}`;
+
+/** The reply-cut cause and words of a run whose last reply was cut off at the output limit. */
+function replyCutOutcome(attempt) {
+  const r = attempt.replyCut ?? null;
+  if (r === null) return { cause: "reply-cut-not-raised", words: "the worker did not say it raised its reply limit" };
+  return { cause: r.limit >= r.ceiling ? "reply-cut-at-ceiling" : "reply-cut-below-ceiling", words: `${r.cuts} reply(ies) cut with no visible text; the reply limit was ${r.limit} tokens of a ceiling of ${r.ceiling}` };
+}
+
 export function classifyWorkerRun({ attempt, hidden, changed, timedOut = false }) {
-  const out = (outcome, reason) => ({ outcome, reason, claimsDone: attempt?.reportResult === "done" && attempt?.status === "succeeded" });
-  if (timedOut) return out("timeout", "the attempt had not finished at the run's wall-clock limit");
-  if (attempt === null || attempt === undefined) return out("error", "the controller started no attempt for the task");
-  if (attempt.state !== "finished") return out("error", `the attempt is ${attempt.state ?? "unknown"}, not finished`);
+  const out = (outcome, reason, cause) => ({ outcome, reason, cause, claimsDone: attempt?.reportResult === "done" && attempt?.status === "succeeded" });
+  if (timedOut) return out("timeout", "the attempt had not finished at the run's wall-clock limit", "wall-limit");
+  if (attempt === null || attempt === undefined) return out("error", "the controller started no attempt for the task", "no-attempt");
+  if (attempt.state !== "finished") return out("error", `the attempt is ${attempt.state ?? "unknown"}, not finished`, "not-finished");
   const done = attempt.status === "succeeded" && attempt.reportResult === "done";
+  const notRun = attempt.questioningWhy ? `; why: ${attempt.questioningWhy}` : "";
   if (done) {
     const verified = attempt.verifications.at(-1) === "passed";
     if (hidden?.passed !== true) {
-      if (hidden?.interfaceMismatch === true) return out("interface-mismatch", "a done was recorded and the acceptance tests do not type-check against the work");
-      return out("wrong", `a done was recorded${verified ? "" : " without a passed check"}${attempt.questioning === "supported" ? "" : ` and no second agent accepted its report (${attempt.questioning ?? "none"})`} and the acceptance tests fail`);
+      if (hidden?.interfaceMismatch === true) return out("interface-mismatch", "a done was recorded and the acceptance tests do not type-check against the work", "interface-mismatch");
+      return out("wrong", `a done was recorded${verified ? "" : " without a passed check"}${attempt.questioning === "supported" ? "" : ` and no second agent accepted its report (${attempt.questioning ?? "none"}${notRun})`} and the acceptance tests fail`, "false-done");
     }
-    if (!changed) return out("error", "the acceptance tests pass on an unchanged checkout: the task is not calibrated");
-    if (!verified) return out("unclassified", `a done was recorded and the acceptance tests pass, but the controller's check of the done did not pass (${attempt.verifications.join(", ") || "never checked"}): not a verified finish`);
-    if (attempt.questioning !== "supported") return out("unclassified", `a done was recorded and the acceptance tests pass, but no second agent accepted its report (questioning ${attempt.questioning ?? "none"}): not a verified finish (fail closed)`);
-    return out("verified-finish", "a verified work.end done, a report the second agent found supported, and the acceptance tests pass on the work");
+    if (!changed) return out("error", "the acceptance tests pass on an unchanged checkout: the task is not calibrated", "uncalibrated");
+    if (!verified) return out("unclassified", `a done was recorded and the acceptance tests pass, but the controller's check of the done did not pass (${attempt.verifications.join(", ") || "never checked"}): not a verified finish`, "check-not-passed");
+    if (attempt.questioning !== "supported") return out("unclassified", `a done was recorded and the acceptance tests pass, but no second agent accepted its report (questioning ${attempt.questioning ?? "none"}${attempt.questioningCause ? `, cause ${attempt.questioningCause}` : ""}${notRun}): not a verified finish (fail closed)`, secondAgentCause(attempt));
+    return out("verified-finish", "a verified work.end done, a report the second agent found supported, and the acceptance tests pass on the work", "verified");
   }
-  if (attempt.endKind === "length") return out("length", `the attempt ended ${attempt.status}, its last reply cut off at the output limit`);
-  if (attempt.endKind === "empty-visible-text") return out("empty", `the attempt ended ${attempt.status} on a reply with no visible text`);
-  if (attempt.status === "stopped-early") return out("stopped-early", `the agent kept stopping before it said its work was done; its ${attempt.readmitted} readmit(s) were used up`);
-  if (attempt.reportResult === "partial" || attempt.reportResult === "blocked" || attempt.reportResult === "abandoned") return out("stopped-early", `the agent ended ${attempt.reportResult} with a report: ${attempt.summary.slice(0, 200)}`);
-  if (attempt.reportResult === "done") return out("stopped-early", `the agent's done was refused (the check or the second agent) until its go-ons were used up: ${attempt.summary.slice(0, 200)}`);
-  return out("error", `the attempt ended ${attempt.status ?? "without an outcome"}: ${attempt.summary.slice(0, 200)}`);
+  if (attempt.endKind === "length") { const c = replyCutOutcome(attempt); return out("length", `the attempt ended ${attempt.status}, its last reply cut off at the output limit (${c.words})`, c.cause); }
+  if (attempt.endKind === "empty-visible-text") return out("empty", `the attempt ended ${attempt.status} on a reply with no visible text`, "empty-reply");
+  if (attempt.status === "stopped-early") return out("stopped-early", `the agent kept stopping before it said its work was done; its ${attempt.readmitted} readmit(s) were used up`, "early-stops-used-up");
+  if (attempt.reportResult === "partial" || attempt.reportResult === "blocked" || attempt.reportResult === "abandoned") return out("stopped-early", `the agent ended ${attempt.reportResult} with a report: ${attempt.summary.slice(0, 200)}`, `ended-${attempt.reportResult}`);
+  if (attempt.reportResult === "done") return out("stopped-early", `the agent's done was refused (the check or the second agent) until its go-ons were used up: ${attempt.summary.slice(0, 200)}`, "done-refused");
+  return out("error", `the attempt ended ${attempt.status ?? "without an outcome"}: ${attempt.summary.slice(0, 200)}`, "ended-otherwise");
+}
+
+/**
+ * W09 bench measurement: the model calls of one run, as the run's one fetch saw them, per role (`agent`: the streamed calls through the relay; `second`: the second agent's). `add` takes what the fetch tells (a call not sent is
+ * ignored); `result` gives per role the calls sent, their durations (median, 95th percentile, largest, total, and the figures themselves up to `MEASURE_LIMITS.samples`), the provider's token counts summed, the calls with a 2xx
+ * reply that stated none (`uncounted`), the outages, and whether the run's last sent call was an outage.
+ */
+export function callLog() {
+  const roles = { agent: { ms: [], tokens: { input: 0, output: 0, cacheRead: 0, reasoning: 0 }, counted: 0, uncounted: 0, outages: 0 }, second: { ms: [], tokens: { input: 0, output: 0, cacheRead: 0, reasoning: 0 }, counted: 0, uncounted: 0, outages: 0 } };
+  let last = null;
+  const count = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : 0);
+  return {
+    add(c) {
+      if (c === null || typeof c !== "object" || c.sent !== true) return;
+      const r = roles[c.streamed === true ? "agent" : "second"];
+      r.ms.push(c.ms);
+      if (c.outage === true) r.outages++;
+      if (c.usage !== null && typeof c.usage === "object") { r.counted++; for (const k of Object.keys(r.tokens)) r.tokens[k] = Math.min(Number.MAX_SAFE_INTEGER, r.tokens[k] + count(c.usage[k])); } else if (c.ok === true) r.uncounted++;
+      last = { role: c.streamed === true ? "agent" : "second", outage: c.outage === true };
+    },
+    result() {
+      const one = (r) => ({ sent: r.ms.length, ...msStats(r.ms), ms: r.ms.slice(0, MEASURE_LIMITS.samples).map((x) => (Number.isFinite(x) ? Math.round(x) : null)), ...(r.ms.length > MEASURE_LIMITS.samples ? { msTruncated: true } : {}), tokens: { ...r.tokens }, counted: r.counted, uncounted: r.uncounted, outages: r.outages });
+      return { agent: one(roles.agent), second: one(roles.second), lastCall: last };
+    },
+  };
+}
+
+/** The run's token use (input, output, cache read, reasoning: the provider's own counts over every sent call) and whether it is unknown: no call was sent, or a 2xx reply stated no counts (the batch budget's rule, lib/batch.mjs). */
+export function tokensOfCalls(calls) {
+  const t = { input: 0, output: 0, cacheRead: 0, reasoning: 0 };
+  for (const r of [calls.agent, calls.second]) for (const k of Object.keys(t)) t[k] = Math.min(Number.MAX_SAFE_INTEGER, t[k] + r.tokens[k]);
+  return { tokens: t, unknown: calls.agent.sent + calls.second.sent === 0 || calls.agent.uncounted + calls.second.uncounted > 0 };
+}
+
+/**
+ * W09 bench measurement: a run whose last sent model call was a server outage (`lib/worker-embedder.mjs` OUTAGE_STATUSES, or no connection) and that is a non-finish (a done not accepted by the check or the second agent included)
+ * gets the cause `server-unavailable`, with the cause it would have had kept as `causeOtherwise`. The OUTCOME is never changed, so the run counts in every gate exactly as before (a non-finish stays one, an unclassified run still fails
+ * the "no silent non-finish" gate). A verified finish, a false done, an interface mismatch and an uncalibrated task (its acceptance tests pass on the unchanged checkout) keep their cause: the outage did not make them.
+ */
+export function withOutageCause(classified, calls) {
+  const keep = ["verified-finish", "wrong", "interface-mismatch"];
+  if (calls?.lastCall?.outage !== true || keep.includes(classified.outcome) || classified.cause === "uncalibrated") return classified;
+  return { ...classified, cause: "server-unavailable", causeOtherwise: classified.cause ?? null, reason: `${classified.reason}; the run's last model call found the server unavailable` };
+}
+
+/**
+ * Informational lines (never a gate): per variant with runs whose cause is `server-unavailable`, its gate figures again over the runs without them, labelled as such. The gates above them, and the release blocker's verdict, still count
+ * every run. Null when no run has that cause.
+ */
+export function outagesLines(records) {
+  const out = records.filter((x) => x.cause === "server-unavailable");
+  if (out.length === 0) return null;
+  const lines = [];
+  for (const v of [...new Set(out.map((x) => String(x.variant ?? "?")))].sort()) {
+    const n = out.filter((x) => String(x.variant ?? "?") === v).length;
+    const rest = records.filter((x) => String(x.variant ?? "?") === v && x.cause !== "server-unavailable");
+    const g = gatesFor(v, aggregate(rest));
+    lines.push(`informational, NOT the gate: variant ${v} without its ${n} server-unavailable run(s) (the gate counts them as non-finishes): ${g.lines.join("; ")}`);
+  }
+  return lines;
+}
+
+/** A line per run (at most 50) with its model calls' times and tokens and its checkout tool time (W09 bench measurement); null when no run has them. */
+export function callsLines(records) {
+  const f = (s) => (s === null || s === undefined ? "-" : `${s} ms`);
+  const rows = records.filter((x) => x.calls !== undefined && x.calls !== null).slice(0, 50).map((x) => {
+    const c = x.calls; const tt = x.worker?.toolTime ?? null;
+    const tool = tt === null ? "tool time not read" : Object.entries(tt).map(([k, v]) => `${k} ${v.calls} call(s) ${v.totalMs} ms`).join(", ") || "no tool calls";
+    const spend = x.dailySpend?.tokens === undefined || x.dailySpend?.tokens === null ? "daily-cap record not read" : `daily-cap record ${x.dailySpend.tokens} tokens in ${x.dailySpend.calls} call(s) on ${x.dailySpend.day}`;
+    return `- ${x.runId}: agent ${c.agent.sent} call(s), median ${f(c.agent.medianMs)}, p95 ${f(c.agent.p95Ms)}; second agent ${c.second.sent} call(s), median ${f(c.second.medianMs)}, p95 ${f(c.second.p95Ms)}; tokens in ${x.tokens?.input ?? "-"} out ${x.tokens?.output ?? "-"}${x.tokensUnknown ? " (some unknown)" : ""}; ${spend}; ${tool}${c.agent.outages + c.second.outages > 0 ? `; ${c.agent.outages + c.second.outages} outage call(s)` : ""}`;
+  });
+  return rows.length === 0 ? null : ["model calls and tool time per run (informational):", ...rows];
+}
+
+/** A line naming how many runs ended with each cause (W09 fixes), for a batch's report; null when no run has one. */
+export function causesLine(records) {
+  const counts = new Map();
+  for (const x of records) if (typeof x.cause === "string") counts.set(x.cause, (counts.get(x.cause) ?? 0) + 1);
+  if (counts.size === 0) return null;
+  return `causes: ${[...counts].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).map(([c, n]) => `${c} ${n}`).join(", ")}`;
 }
 
 /** What the agent changed in its checkout, read through the task's own git directory (the agent's PLAN.md not counted). */
@@ -160,9 +269,12 @@ export async function runWorkerOne(ctx, task, variantName, repeat, { beforeAgent
   let inst;
   const requests = { agent: 0, second: 0, refused: 0 };
   let agentTools = null;
+  const calls = callLog();
+  let spendRead = false;
   try {
     const template = await readFile(variant.prompt, "utf8");
-    const description = renderWorkerPrompt(template, { task, taskText: await readFile(task.promptPath, "utf8") });
+    const taskText = await readFile(task.promptPath, "utf8");
+    const description = renderWorkerPrompt(template, { task, taskText });
     await writeFile(join(artifacts, "prompt.md"), `${description}\n`);
     record.prompt = { sha256: createHash("sha256").update(description).digest("hex").slice(0, 16), chars: description.length };
     log(`preparing ${dir} at ${task.base.slice(0, 8)}`);
@@ -171,7 +283,7 @@ export async function runWorkerOne(ctx, task, variantName, repeat, { beforeAgent
       const g = await beforeAgent();
       if (!g.ok) { record.gateRefused = String(g.why ?? "refused"); throw new Error(`the Radiance gate refused the start: ${record.gateRefused}`); }
     }
-    const fetch = radianceOnlyFetch({ baseUrl: r.baseUrl, fetch: ctx.fetch ?? globalThis.fetch, onCall: (c) => { if (c.sent === false) return; if (c.streamed) { requests.agent++; if (agentTools === null) agentTools = [...c.tools].sort(); } else requests.second++; }, onRefused: () => { requests.refused++; } });
+    const fetch = radianceOnlyFetch({ baseUrl: r.baseUrl, fetch: ctx.fetch ?? globalThis.fetch, onCall: (c) => { calls.add(c); if (c.sent === false) return; if (c.streamed) { requests.agent++; if (agentTools === null) agentTools = [...c.tools].sort(); } else requests.second++; }, onRefused: () => { requests.refused++; } });
     inst = await openW09Installation({
       root: ctx.root, dataDir: join(nnDir, "data"), baseUrl: r.baseUrl, model: r.model, contextTokens: r.contextTokens, ...(r.maxTokens === undefined ? {} : { maxTokens: r.maxTokens }), ...(r.reasoningTokens === undefined ? {} : { reasoningTokens: r.reasoningTokens }),
       ...(r.apiKey === undefined ? {} : { apiKey: r.apiKey }), fetch, prepareCheckout: dependencyCopier(dir, task.copy ?? []), ...(bridgeFilterFor(variant) === undefined ? {} : { bridgeFilter: bridgeFilterFor(variant) }),
@@ -179,14 +291,15 @@ export async function runWorkerOne(ctx, task, variantName, repeat, { beforeAgent
     });
     log(`agent started on the worker (limit ${ctx.timeoutMinutes ?? task.timeoutMinutes} min, variant ${variantName}: ${variant.about})`);
     record.startedAt = new Date().toISOString();
-    const ran = await runW09Task(inst, { repository: dir, title: workerTitle(task), description, checks: buildCheck(task), timeoutMs: (ctx.timeoutMinutes ?? task.timeoutMinutes) * 60_000, tag: runId.slice(-24), ...(ctx.pollMs === undefined ? {} : { pollMs: ctx.pollMs }) });
+    const ran = await runW09Task(inst, { repository: dir, title: workerTitle(task), description, checks: doneChecks(task), ...(task.clauseTests === true ? { acceptanceCriteria: contractClauses(taskText) } : {}), timeoutMs: (ctx.timeoutMinutes ?? task.timeoutMinutes) * 60_000, tag: runId.slice(-24), ...(ctx.pollMs === undefined ? {} : { pollMs: ctx.pollMs }) });
     record.endedAt = new Date().toISOString();
     record.wallMs = ran.wallMs;
     record.timedOut = ran.timedOut;
     const summary = attemptSummary(ran.attempt);
     // Closed before grading: nothing of the agent runs while the acceptance tests do.
     await inst.close(); inst = undefined;
-    record.worker = { attemptId: ran.attemptId ?? null, ...(summary ?? {}), requests, agentTools, fileTools: offersFileTools(agentTools ?? []), checkoutCalls: ran.checkoutCalls ?? null };
+    record.dailySpend = ran.dailySpend ?? null; spendRead = true;
+    record.worker = { attemptId: ran.attemptId ?? null, ...(summary ?? {}), requests, agentTools, fileTools: offersFileTools(agentTools ?? []), checkoutCalls: ran.checkoutCalls ?? null, toolTime: ran.toolTime ?? null };
     record.nudges = summary?.nudges ?? 0;
     log(`attempt ended after ${(ran.wallMs / 60000).toFixed(1)} min: ${summary?.status ?? "none"} (${summary?.reportResult ?? "-"}, questioning ${summary?.questioning ?? "-"})`);
     const plan = existsSync(join(ran.checkout, "PLAN.md")) ? planProgress(readFileSync(join(ran.checkout, "PLAN.md"), "utf8")) : null;
@@ -207,10 +320,16 @@ export async function runWorkerOne(ctx, task, variantName, repeat, { beforeAgent
         }
       }, { log });
     }
-    Object.assign(record, classifyWorkerRun({ attempt: summary, hidden, changed: ch.changed, timedOut: ran.timedOut }), { plan, changed: ch.changed, dirty: ch.dirty, diffStat: ch.diffStat, hidden, shipped });
+    Object.assign(record, withOutageCause(classifyWorkerRun({ attempt: summary, hidden, changed: ch.changed, timedOut: ran.timedOut }), calls.result()), { plan, changed: ch.changed, dirty: ch.dirty, diffStat: ch.diffStat, hidden, shipped });
   } catch (e) {
-    Object.assign(record, { outcome: "error", reason: `bench error: ${String(e?.message ?? e).slice(0, 500)}`, benchError: true });
+    Object.assign(record, { outcome: "error", reason: `bench error: ${String(e?.message ?? e).slice(0, 500)}`, cause: "bench-error", benchError: true });
   } finally {
+    // W09 bench measurement: the calls and their tokens in every record, a bench error's too; the day's spend record read before the installation closes when the run did not read it.
+    record.calls = calls.result();
+    const used = tokensOfCalls(record.calls);
+    record.tokens = used.tokens;
+    if (used.unknown) record.tokensUnknown = true; else delete record.tokensUnknown;
+    if (!spendRead) record.dailySpend = inst === undefined ? null : await dailySpendOf(inst);
     if (inst !== undefined) await inst.close().catch(() => undefined);
     if (!ctx.keep) {
       for (const d of [dir, nnDir]) {
@@ -235,14 +354,14 @@ export async function releaseBlocker({ records, resultsDir, batchId, benchCommit
   const blocker = {
     card: "W09", kind: "release-blocker", createdAt: now(), batchId, benchCommit, route, variant: shipped,
     why: `the W01 release gates do not hold for the shipped variant ${shipped} on the real worker`,
-    failures: verdict.failures, gates: verdict.lines, ...(fileToolsLine(mine) === null ? {} : { fileTools: fileToolsLine(mine) }),
-    results: mine.map((x) => ({ runId: x.runId, taskId: x.taskId, size: x.size, outcome: x.outcome, reason: x.reason, attemptId: x.worker?.attemptId ?? null, questioning: x.worker?.questioning ?? null, verifications: x.worker?.verifications ?? [], nudges: x.nudges ?? 0, wallMs: x.wallMs, artifacts: x.artifacts })),
+    failures: verdict.failures, gates: verdict.lines, ...(fileToolsLine(mine) === null ? {} : { fileTools: fileToolsLine(mine) }), ...(outagesLines(mine) === null ? {} : { informationalWithoutOutages: outagesLines(mine) }),
+    results: mine.map((x) => ({ runId: x.runId, taskId: x.taskId, size: x.size, outcome: x.outcome, cause: x.cause ?? null, ...(x.causeOtherwise === undefined ? {} : { causeOtherwise: x.causeOtherwise }), reason: x.reason, attemptId: x.worker?.attemptId ?? null, questioning: x.worker?.questioning ?? null, questioningCause: x.worker?.questioningCause ?? null, questioningWhy: x.worker?.questioningWhy ?? null, replyCut: x.worker?.replyCut ?? null, verifications: x.worker?.verifications ?? [], nudges: x.nudges ?? 0, wallMs: x.wallMs, artifacts: x.artifacts })),
   };
   const dir = join(resultsDir, "release-blockers");
   await mkdir(dir, { recursive: true });
   const base = join(dir, `w09-${batchId}`);
   await writeFile(`${base}.json`, `${JSON.stringify(blocker, null, 2)}\n`);
-  await writeFile(`${base}.md`, [`# Release blocker (card W09): ${blocker.why}`, "", `Batch ${batchId}, bench commit ${benchCommit}, route ${route.provider}/${route.model} (kind ${route.kind}).`, "", "Failures:", ...verdict.failures.map((f) => `- ${f}`), ...(blocker.fileTools === undefined ? [] : ["", blocker.fileTools]), "", report.text, "", `Results: ${base}.json`, ""].join("\n"));
+  await writeFile(`${base}.md`, [`# Release blocker (card W09): ${blocker.why}`, "", `Batch ${batchId}, bench commit ${benchCommit}, route ${route.provider}/${route.model} (kind ${route.kind}).`, "", "Failures:", ...verdict.failures.map((f) => `- ${f}`), ...(causesLine(mine) === null ? [] : ["", causesLine(mine)]), ...(outagesLines(mine) === null ? [] : ["", ...outagesLines(mine)]), ...(blocker.fileTools === undefined ? [] : ["", blocker.fileTools]), "", report.text, "", `Results: ${base}.json`, ""].join("\n"));
   return { pass: false, verdict, json: `${base}.json`, md: `${base}.md` };
 }
 

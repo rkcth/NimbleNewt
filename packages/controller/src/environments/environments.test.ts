@@ -99,6 +99,8 @@ for (const backend of backends) {
     await c.env.change(c.owner, { commandId: cid("c"), agentId: "agent:ann", manifest: manifest(), reason: "first" });
     await refuses("forbidden", () => c.env.activate(c.ann, { commandId: cid("a"), agentId: "agent:ann", revision: 1, observed }));
     await refuses("not_found", () => c.env.activate(c.owner, { commandId: cid("a"), agentId: "agent:ann", revision: 9, observed }));
+    // What the worker found must be a map; anything else is refused for its shape (the check activation shares with a run's environment check, card B04).
+    for (const bad of [undefined, null, [], "nimblenewt.desk"]) await refuses("invalid_command", () => c.env.activate(c.owner, { commandId: cid("a"), agentId: "agent:ann", revision: 1, observed: bad as never }), (e) => assert.match(e.message, /observed/));
     for (const [what, observedBad, mutate] of [
       ["missing on disk", { "nimblenewt.desk": D("c") }, undefined],
       ["changed on disk", { ...observed, "nimblenewt.tasks": D("0") }, undefined],
@@ -115,7 +117,7 @@ for (const backend of backends) {
     assert.equal((await c.env.get(c.owner, "agent:ann"))!.active!.revision, 1);
     // A later revision that fails keeps revision 1 active.
     await c.env.change(c.owner, { commandId: cid("c"), agentId: "agent:ann", manifest: manifest({ packages: [] }), reason: "second", expectedRevision: 1 });
-    await refuses("integrity", () => c.env.activate(c.owner, { commandId: cid("a"), agentId: "agent:ann", revision: 2, observed: {} }));
+    await refuses("integrity", () => c.env.activate(c.owner, { commandId: cid("a"), agentId: "agent:ann", revision: 2, observed: {} }), (e) => assert.equal(e.field, "observed"));
     assert.equal((await c.env.get(c.owner, "agent:ann"))!.active!.revision, 1);
   });
 

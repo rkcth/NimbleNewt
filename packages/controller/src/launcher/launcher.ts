@@ -8,6 +8,7 @@ import { startController, type Controller, type StartOptions, type StorageChoice
 import { OWNER_SECRET_PREFIX } from "../admin/index.js";
 import { keptSecretRefusal, providerSecretRefusal } from "../setup/reserved-secrets.js";
 import { HttpModelCall } from "../chat/http-model.js";
+import { reviewerCallLimits } from "../work-end/reviewer-limits.js";
 import { ModelInterpreter } from "../chat/model-interpreter.js";
 import { narratorFrom, stewardFrom } from "../meetings/agents.js";
 import { chatRoutes } from "../chat/routed-model.js";
@@ -189,12 +190,21 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
   const book = providerAddressBook(async () => (live === undefined ? undefined : live.services.setupProviders.endpoints()));
   const endpoints = book.endpoints;
   const refresh = book.refresh;
-  const model = new HttpModelCall({
-    ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
-    endpoint: (route): ModelEndpoint | undefined => {
-      const e = endpoints.get(route.slice(0, route.indexOf("/")));
-      if (e === undefined) return undefined;
-      return { url: e.endpoint, ...(e.credentialName === undefined ? {} : { headers: async () => { const key = await providerSecret(e.credentialName!); if (key === undefined) throw new Error(`the secret "${e.credentialName}" is not in the secret store`); return { authorization: `Bearer ${key}` }; } }) };
+  const chatEndpoint = (route: string): ModelEndpoint | undefined => {
+    const e = endpoints.get(route.slice(0, route.indexOf("/")));
+    if (e === undefined) return undefined;
+    return { url: e.endpoint, ...(e.credentialName === undefined ? {} : { headers: async () => { const key = await providerSecret(e.credentialName!); if (key === undefined) throw new Error(`the secret "${e.credentialName}" is not in the secret store`); return { authorization: `Bearer ${key}` }; } }) };
+  };
+  const model = new HttpModelCall({ ...(options.fetch === undefined ? {} : { fetch: options.fetch }), endpoint: chatEndpoint });
+  // The second agent's own client (W09 fixes): the same addresses and credentials, with each route's reply limit, ceiling, time limit and reasoning cap (`reviewerCallLimits`): the route's declared budget (card W07) when it has
+  // one, larger defaults for the kinds that serve reasoning models, the old 1,500 tokens and 60 s otherwise. Read at each call, so a budget the owner changes applies to the next questioning.
+  const reviewerHttp = new HttpModelCall({
+    ...(options.fetch === undefined ? {} : { fetch: options.fetch }), endpoint: chatEndpoint,
+    limits: async (route) => {
+      const routes = live === undefined ? undefined : (await live.services.routing.get())?.routes;
+      const entry = routes !== undefined && Object.hasOwn(routes, route) ? routes[route] : undefined;
+      const kind = endpoints.get(route.slice(0, route.indexOf("/")))?.kind;
+      return reviewerCallLimits({ ...(kind === undefined ? {} : { kind }), ...(entry?.maxTokens === undefined ? {} : { maxTokens: entry.maxTokens }), ...(entry?.reasoningTokens === undefined ? {} : { reasoningTokens: entry.reasoningTokens }), ...(entry?.contextTokens === undefined ? {} : { contextTokens: entry.contextTokens }) });
     },
   });
   /** A route's endpoint for the worker host's relay: read from the records at each call, the key from the secret store by name at each call. */
@@ -241,8 +251,8 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
   // The second agent that questions a done (card W10 wiring; the resume reviewer of L04d is not given it): the same HTTP client over the recorded provider addresses, which are re-read before each call (a restart has read none yet). It is asked
   // only on the route the owner set (`report.reviewerRoute`); with none set the controller records that no second agent questioned the report.
   const reviewerModel: NonNullable<StartOptions["reviewerModel"]> = {
-    complete: async (route, request) => { await refresh(); return model.complete(route, request); },
-    completeDetailed: async (route, request) => { await refresh(); return model.completeDetailed(route, request); },
+    complete: async (route, request) => { await refresh(); return reviewerHttp.complete(route, request); },
+    completeDetailed: async (route, request) => { await refresh(); return reviewerHttp.completeDetailed(route, request); },
   };
 
   // The meeting steward and narrator (card M02h, wiring): the same HTTP client, on the route the coordinator's chat uses (local first, a cloud route only when no local one is there), looked up at each call from the recorded providers.
@@ -380,15 +390,15 @@ export const launcherDir = (file: string): string => dirname(resolve(file));
  * The provider addresses the launcher's own model client (the chat and the second agent) looks routes up in, refreshed from the owner's records before calls. Each refresh reads first and swaps the whole map in one step:
  * the chat and the second agent refresh concurrently, and a map cleared before the read would leave a call that looks its route up meanwhile with no endpoint. `read` gives undefined while there is no controller yet.
  */
-export function providerAddressBook(read: () => Promise<readonly { readonly provider: string; readonly endpoint: string; readonly credentialName?: string }[] | undefined>): { readonly endpoints: ReadonlyMap<string, { readonly endpoint: string; readonly credentialName?: string }>; refresh(): Promise<void> } {
-  const endpoints = new Map<string, { endpoint: string; credentialName?: string }>();
+export function providerAddressBook(read: () => Promise<readonly { readonly provider: string; readonly endpoint: string; readonly credentialName?: string; readonly kind?: string }[] | undefined>): { readonly endpoints: ReadonlyMap<string, { readonly endpoint: string; readonly credentialName?: string; readonly kind?: string }>; refresh(): Promise<void> } {
+  const endpoints = new Map<string, { endpoint: string; credentialName?: string; kind?: string }>();
   return {
     endpoints,
     refresh: async () => {
       const found = await read();
       if (found === undefined) return;
       endpoints.clear();
-      for (const e of found) endpoints.set(e.provider, { endpoint: e.endpoint, ...(e.credentialName === undefined ? {} : { credentialName: e.credentialName }) });
+      for (const e of found) endpoints.set(e.provider, { endpoint: e.endpoint, ...(e.credentialName === undefined ? {} : { credentialName: e.credentialName }), ...(typeof e.kind === "string" ? { kind: e.kind } : {}) });
     },
   };
 }

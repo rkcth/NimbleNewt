@@ -10,6 +10,13 @@ import { parsePiIndex, writePiState } from "./pi-state.js";
 import { readPlain, type BackupKey } from "./crypto.js";
 import { ledgerFilter, type LedgerEntry } from "../retention/ledger.js";
 import { ARTIFACT_FOLDER, type BackupManifest, type BackupScopeRecord, type BlobIndexLine } from "./format.js";
+import { isAuthorityRow } from "../recovery/carry.js";
+
+/**
+ * Card K05, second slice: who may control the restored store. Given the backup's epoch, holder and promotion record, it returns what the restored store gets instead (`recovery/carry.ts` decides
+ * from the running store's). Throwing refuses the restore; the partly filled copy is discarded by the caller, as for any refused restore.
+ */
+export type AuthorityCarry = (backup: { readonly epoch: number; readonly holder: string | null; readonly authority?: SnapshotRow }) => { readonly epoch: number; readonly holder: string | null; readonly authority: SnapshotRow | null };
 
 export class RestoreRefused extends Error {
   constructor(message: string) { super(message); this.name = "RestoreRefused"; }
@@ -48,7 +55,7 @@ const RESTORED_EVIDENCE = canonicalJson({ restoredFromBackup: true, note: "this 
  * Restores a backup into an empty store (one no controller has owned). The backup is verified first, against its manifest and the store's schema version; nothing is written when it fails. An interrupted restore leaves
  * a partly filled store, which the caller discards (a restore always starts from a new, empty database), because the state row that makes a store look used is written last.
  */
-export async function restoreBackup(path: string, storage: ControllerStorage, options: { pageSize?: number; /** Where the backup's artifact blobs go; required when the backup has any. */ blobs?: FileBlobStore; /** The unlocked key, for an encrypted backup. */ unlock?: BackupKey; /** The deletions recorded outside the database (`DeletionLedger.read`): applied to the rows as they are restored. */ deletions?: readonly LedgerEntry[]; /** The signing public keys already trusted (card K01b3): the backup must carry a valid signature of one of them. */ signatureTrust?: SignatureTrust; /** Refuse a backup that is not encrypted. */ requireEncrypted?: boolean; /** Where the backup's secret values go (card K01b); required when the backup holds them and a key was given, unless `skipSecrets`. */ secrets?: SecretsSink; /** Take a value that is already in the store over the backup's value (default: keep what is there, a secret changed since the backup is not rolled back). */ overwriteSecrets?: boolean; /** Leave the secret values out on purpose. */ skipSecrets?: boolean; /** Where the conversation store `id` goes (an empty or missing folder); required when the backup has Pi state. */ piTarget?: (id: string) => string; /** The digest of the manifest the caller approved (`manifestDigestOf`): the backup verified here must be exactly that one. */ expectedManifestDigest?: string } = {}): Promise<RestoreResult> {
+export async function restoreBackup(path: string, storage: ControllerStorage, options: { pageSize?: number; /** Where the backup's artifact blobs go; required when the backup has any. */ blobs?: FileBlobStore; /** The unlocked key, for an encrypted backup. */ unlock?: BackupKey; /** The deletions recorded outside the database (`DeletionLedger.read`): applied to the rows as they are restored. */ deletions?: readonly LedgerEntry[]; /** The signing public keys already trusted (card K01b3): the backup must carry a valid signature of one of them. */ signatureTrust?: SignatureTrust; /** Refuse a backup that is not encrypted. */ requireEncrypted?: boolean; /** Where the backup's secret values go (card K01b); required when the backup holds them and a key was given, unless `skipSecrets`. */ secrets?: SecretsSink; /** Take a value that is already in the store over the backup's value (default: keep what is there, a secret changed since the backup is not rolled back). */ overwriteSecrets?: boolean; /** Leave the secret values out on purpose. */ skipSecrets?: boolean; /** Where the conversation store `id` goes (an empty or missing folder); required when the backup has Pi state. */ piTarget?: (id: string) => string; /** The digest of the manifest the caller approved (`manifestDigestOf`): the backup verified here must be exactly that one. */ expectedManifestDigest?: string; /** Card K05, second slice: the restored store's epoch, holder and promotion record (absent: the backup's, as before). */ carryAuthority?: AuthorityCarry } = {}): Promise<RestoreResult> {
   const check = await verifyBackup(path, { ...(options.signatureTrust === undefined ? {} : { signatureTrust: options.signatureTrust }), ...(options.unlock === undefined ? {} : { unlock: options.unlock }), ...(options.requireEncrypted === undefined ? {} : { requireEncrypted: options.requireEncrypted }) });
   if (!check.ok || check.manifest === undefined) throw new RestoreRefused(`the backup cannot be restored: ${check.problems.join("; ")}`);
   const manifest = check.manifest;
@@ -111,18 +118,33 @@ export async function restoreBackup(path: string, storage: ControllerStorage, op
   let marked = 0;
   let resend = 0;
   const ledger = ledgerFilter(options.deletions ?? []);
+  const lines = (file: string) => createInterface({ input: Readable.from(readPlain(join(path, file), cipher, file)), crlfDelay: Infinity });
+  // Card K05, second slice: the backup's state row is read first (one line), so the decision is made with the backup's epoch before its promotion record would be written.
+  let backupState: SnapshotRow | undefined;
+  if (options.carryAuthority !== undefined) {
+    for await (const line of lines(manifest.files.find((f) => f.table === "state")!.file)) { if (line !== "") { backupState = JSON.parse(line) as SnapshotRow; break; } }
+    if (backupState === undefined) throw new RestoreRefused("the backup cannot be restored: it holds no state row, so its epoch is not known");
+  }
+  let backupAuthority: SnapshotRow | undefined;
+  let carried: ReturnType<AuthorityCarry> | undefined;
   for (const table of SNAPSHOT_TABLES) {
     const entry = manifest.files.find((f) => f.table === table)!;
     let batch: SnapshotRow[] = [];
     const flush = async (): Promise<void> => { if (batch.length > 0) { await storage.restoreRows(table, batch); total += batch.length; batch = []; } };
-    for await (const line of createInterface({ input: Readable.from(readPlain(join(path, entry.file), cipher, entry.file)), crlfDelay: Infinity })) {
+    for await (const line of lines(entry.file)) {
       if (line === "") continue;
       let row = JSON.parse(line) as SnapshotRow;
       if (table === "effects" && row["status"] === "intended") { row = { ...row, status: "uncertain", evidence: RESTORED_EVIDENCE }; marked += 1; }
       if (table === "deliveries" && row["state"] !== "delivered") resend += 1;
+      if (table === "aggregates" && carried === undefined && options.carryAuthority !== undefined && isAuthorityRow(row)) { if (backupAuthority !== undefined) throw new RestoreRefused("the backup cannot be restored: it holds two records of a controller promotion"); backupAuthority = row; continue; }
       if (table === "aggregates") { const kept = ledger.apply(row); if (kept === undefined) continue; row = kept; }
+      if (table === "state" && carried !== undefined) row = { ...row, epoch: carried.epoch, holder: carried.holder };
       batch.push(row);
       if (batch.length >= pageSize) await flush();
+    }
+    if (table === "aggregates" && options.carryAuthority !== undefined) {
+      carried = options.carryAuthority({ epoch: Number(backupState!["epoch"]), holder: (backupState!["holder"] ?? null) as string | null, ...(backupAuthority === undefined ? {} : { authority: backupAuthority }) });
+      if (carried.authority !== null) batch.push(carried.authority);
     }
     await flush();
   }

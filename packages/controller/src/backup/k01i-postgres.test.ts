@@ -6,9 +6,11 @@ import { after, test } from "node:test";
 import { ManualTimer } from "../dispatch/testing/timer.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { startController } from "../api/index.js";
-import { asideSchemaOf, postgresRestorePort, stagedSchemaOf, type PostgresRestorePort } from "../storage/postgres/index.js";
+import { PostgresStorage, asideSchemaOf, postgresRestorePort, stagedSchemaOf, type PostgresRestorePort } from "../storage/postgres/index.js";
 import { startTestServer, type TestServer } from "../storage/postgres/testing/server.js";
 import { JOURNAL_FILE, PENDING_FILE, applyPendingRestore } from "./staged-restore.js";
+import { FileBlobStore } from "../artifacts/index.js";
+import { promoteController, readControllerAuthority, writeFencedRecoveryManifest } from "../recovery/index.js";
 
 // Card K01i: the owner's restore from inside the running controller on PostgreSQL. The backup is restored into a new schema of the same (disposable, embedded test) database; the next start swaps it in with one
 // transaction, after the conversation folders, in the same journal.
@@ -176,4 +178,107 @@ test("a rollback that stops after the schema swap committed is continued by the 
     assert.equal(await r.port.exists(stagedSchemaOf(r.schema, stamp)), true);
     assert.equal(JSON.parse(readFileSync(join(r.d, "data", PENDING_FILE), "utf8")).failed.rolledBack, true);
   } finally { rmSync(r.d, { recursive: true, force: true }); }
+});
+
+test("a restore prepared before another controller or a controller promotion took the schema is not swapped in; the live schema stays as that one left it (K05 second review)", async () => {
+  const r = await rig();
+  try {
+    const { token, stamp } = await prepared(r);
+    assert.equal(await r.port.liveEpoch!(r.schema), 1, "the live epoch reads back");
+    assert.equal(await r.port.liveEpoch!("k05_no_such_schema"), undefined, "a schema that is not there has no epoch");
+    // Another handle takes the epoch after the restore was prepared (what a promotion's fence does).
+    const other = await PostgresStorage.open({ connectionString: r.url, schema: r.schema });
+    try { await other.acquireEpoch({ holder: "promotion-fence:k05pg:1:controller", at: "2026-11-27T12:05:00.000Z", expectedEpoch: 1 }); } finally { await other.close(); }
+    const lines: string[] = [];
+    assert.equal(await applyPendingRestore(join(r.d, "data"), { postgres: { url: r.url, schema: r.schema } }, (l) => { lines.push(l); }, { piFinal: (id: string) => join(r.live, id), controllersGoneMs: 0 }), undefined);
+    assert.match(lines.join("\n"), /was not applied: the database was taken by another controller or a controller promotion .*epoch is 2, the restore was prepared at epoch 1/);
+    assert.equal(await r.port.exists(stagedSchemaOf(r.schema, stamp)), true, "the staged schema is left for a cancel");
+    assert.equal(await r.port.exists(asideSchemaOf(r.schema, stamp)), false, "the live schema was not renamed aside");
+    assert.equal(await r.port.liveEpoch!(r.schema), 2);
+    assert.match(JSON.parse(readFileSync(join(r.d, "data", PENDING_FILE), "utf8")).failed.reason, /taken by another controller/);
+    void token;
+  } finally { rmSync(r.d, { recursive: true, force: true }); }
+});
+
+test("on PostgreSQL the successor restores a backup made before the promotion: the swapped-in schema keeps the promotion record, the successor's holder and the live epoch, so the old controller is still refused (K05 second slice)", async () => {
+  const r = await rig();
+  const opened: Controller[] = [];
+  const open = async (holder?: string): Promise<Controller> => {
+    const c = await startController({ storage: { kind: "postgres", url: r.url, schema: r.schema }, dataDirectory: join(r.d, "data"), argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer(), intervalMs: 1000 },
+      ...(holder === undefined ? {} : { holder }), backup: { directory: join(r.d, "backups"), piState: { list: async () => [{ id: "att-1", dir: join(r.live, "att-1") }] }, restore: { piFinal: (id: string) => join(r.live, id) } } } as never);
+    opened.push(c); return c;
+  };
+  const onSchema = async <R>(f: (s: PostgresStorage) => Promise<R>): Promise<R> => { const s = await PostgresStorage.open({ connectionString: r.url, schema: r.schema }); try { return await f(s); } finally { await s.close(); } };
+  try {
+    const a = await open();
+    const boot = await a.services.principals.bootstrapOwner({ name: "rob" });
+    await call(a, boot.token, "project.create", { name: "Garden" }, "p1");
+    const name = (await call(a, boot.token, "backup.now", {}, "b1")).result.item.name as string;
+    await call(a, boot.token, "project.create", { name: "Late" }, "p2");
+    await a.close();
+    const now = () => new Date("2026-11-27T12:05:00.000Z");
+    await onSchema(async (s) => {
+      await writeFencedRecoveryManifest({ storage: s, epoch: await s.currentEpoch(), directory: join(r.d, "m"), now });
+      await promoteController({ storage: s, manifestDirectory: join(r.d, "m"), blobs: await FileBlobStore.open({ directory: join(r.d, "blobs-b") }), successor: "controller-b", promotionId: "k05pg2", now });
+    });
+    const b = await open("controller-b");
+    const preview = await call(b, boot.token, "backup.restore.preview", { name });
+    assert.ok((await call(b, boot.token, "backup.restore.apply", { name, confirm: preview.result.item.token }, "r1")).ok);
+    const epochB = await r.port.liveEpoch!(r.schema);
+    await b.close();
+    const b2 = await open("controller-b");
+    const names = await projectNames(b2, boot.token);
+    assert.ok(names.includes("Garden") && !names.includes("Late"), names);
+    await b2.close();
+    const st = await onSchema(async (s) => ({ epoch: await s.currentEpoch(), record: await readControllerAuthority(s) }));
+    assert.equal(st.epoch, epochB! + 1, "the restored schema went on from the live epoch");
+    assert.ok(st.record !== undefined && st.record !== "unreadable" && st.record.successor === "controller-b" && st.record.promotionId === "k05pg2");
+    await assert.rejects(open(), /the controller promotion k05pg2 named controller-b .*this controller starts as controller/);
+    const b3 = await open("controller-b");
+    assert.equal((await call(b3, boot.token, "project.create", { name: "After" }, "p3")).ok, true);
+  } finally {
+    for (const c of opened) await c.close().catch(() => undefined);
+    rmSync(r.d, { recursive: true, force: true });
+  }
+});
+
+test("on PostgreSQL a restore whose authority carry is refused at apply (the running promotion record changed after the preview and no longer reads) stages nothing: no staged schema, no marker, the live schema as it was (K05 second slice, second review)", async () => {
+  const r = await rig();
+  const at = new Date("2026-11-27T12:10:00.000Z");
+  const opened: Controller[] = [];
+  const open = async (holder?: string): Promise<Controller> => {
+    const c = await startController({ storage: { kind: "postgres", url: r.url, schema: r.schema }, dataDirectory: join(r.d, "data"), argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer(), intervalMs: 1000 },
+      ...(holder === undefined ? {} : { holder }), backup: { directory: join(r.d, "backups"), now: () => at, piState: { list: async () => [{ id: "att-1", dir: join(r.live, "att-1") }] }, restore: { piFinal: (id: string) => join(r.live, id) } } } as never);
+    opened.push(c); return c;
+  };
+  try {
+    const a = await open();
+    const boot = await a.services.principals.bootstrapOwner({ name: "rob" });
+    await call(a, boot.token, "project.create", { name: "Garden" }, "p1");
+    const name = (await call(a, boot.token, "backup.now", {}, "b1")).result.item.name as string;
+    await call(a, boot.token, "project.create", { name: "Late" }, "p2");
+    await a.close();
+    const s = await PostgresStorage.open({ connectionString: r.url, schema: r.schema });
+    try {
+      await writeFencedRecoveryManifest({ storage: s, epoch: await s.currentEpoch(), directory: join(r.d, "m"), now: () => at });
+      await promoteController({ storage: s, manifestDirectory: join(r.d, "m"), blobs: await FileBlobStore.open({ directory: join(r.d, "blobs-b") }), successor: "controller-b", promotionId: "k05pg3", now: () => at });
+    } finally { await s.close(); }
+    const b = await open("controller-b");
+    const preview = await call(b, boot.token, "backup.restore.preview", { name });
+    assert.equal(preview.ok, true, JSON.stringify(preview));
+    const ref = { kind: "controller-authority", id: "primary" };
+    const current = await b.storage.getAggregate(ref);
+    await b.storage.applyOperation({ operationId: "k05-r2-damage", epoch: b.epoch, actor: "t", correlationId: "k05-r2", at: at.toISOString(), changes: [{ type: "update", ref, expectedRevision: current!.revision, body: { format: 99 } }],
+      audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);
+    const applied = await call(b, boot.token, "backup.restore.apply", { name, confirm: preview.result.item.token }, "r1");
+    assert.equal(applied.ok, false, JSON.stringify(applied));
+    assert.match(JSON.stringify(applied), /record of a controller promotion in the running database cannot be read.*nothing was changed/);
+    assert.equal(await r.port.exists(stagedSchemaOf(r.schema, at.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z"))), false, "the staged schema is dropped");
+    assert.equal(existsSync(join(r.d, "data", PENDING_FILE)), false, "no restore is recorded for the next start");
+    assert.equal(await r.port.liveEpoch!(r.schema), b.epoch, "the live schema keeps its epoch");
+    assert.match(await projectNames(b, boot.token), /Late/);
+  } finally {
+    for (const c of opened) await c.close().catch(() => undefined);
+    rmSync(r.d, { recursive: true, force: true });
+  }
 });

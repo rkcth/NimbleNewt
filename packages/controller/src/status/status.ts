@@ -3,6 +3,8 @@ import { deferredCommandState } from "../api/command-state.js";
 import { assignmentIdOf } from "../domain/assignment-model.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import type { SimulationService } from "../simulation/scopes.js";
+import type { RecoveryWatermarkStatus } from "../recovery/service.js";
+import type { ControllerAuthority } from "../recovery/controller.js";
 import type { ActivityBody, AssignmentBody, AttemptBody, GenerationBody } from "../domain/assignment-model.js";
 import { defaultBasis, type BlockerBasis, type BlockerBody, type BlockerService, type BlockerType } from "../domain/blockers.js";
 import { versionIdOf } from "../catalog/catalog.js";
@@ -547,6 +549,56 @@ interface NeedItem { text: string; cites: Cite[]; taskId?: string; projectId?: s
 
 // ---- retention status lines (card K06d) ---------------------------------------------------------------------------------------
 
+/**
+ * The recovery watermark in plain lines (card K04), read only: how often the manifest is written, the latest one (when, which epoch and counters, how many records and artifact files), what the store
+ * holds that it does not cover yet, and the last write if it did not go through. Every value is bounded; no path or address is shown.
+ */
+export function recoveryWatermarkLines(st: RecoveryWatermarkStatus, ref: Cite): Line[] {
+  const lines: Line[] = [];
+  const minutes = Math.round(st.everyMs / 60_000);
+  lines.push(line(st.fenced
+    ? st.last?.refusal === "manifest_newer"
+      // Second review: a newer manifest in the folder also means this store was restored from an older copy, with no other controller running.
+      ? "This controller writes no more recovery manifests until it is restarted: the folder holds one newer than its store (written by a controller that took over, or before this store was restored from an older copy)."
+      : "This controller found it is no longer the primary, so it writes no more recovery manifests; the controller that took over writes them."
+    : `The recovery manifest (what a promoted standby or a restored copy must hold) is written every ${minutes} minute${minutes === 1 ? "" : "s"} by this controller while it is the primary (epoch ${st.epoch}).`, ref));
+  const m = st.manifest;
+  if (m.state === "absent") lines.push(line("No recovery manifest has been written yet, so a standby promotion would be refused for want of one.", ref));
+  else if (m.state === "unreadable") lines.push(line(`The recovery manifest cannot be used (${shown(m.reason, 200)}); a standby promotion is refused until a good one is written.`, ref));
+  else {
+    lines.push(line(`The latest recovery manifest was written ${shown(m.createdAt, 40)} at epoch ${m.watermark.epoch}, audit entry ${m.watermark.auditSeq} and delivery ${m.watermark.deliverySeq}; it lists ${m.records} record${m.records === 1 ? "" : "s"} and ${m.blobs} artifact file${m.blobs === 1 ? "" : "s"}.`, ref));
+    const nc = st.notCovered;
+    if (nc !== undefined) {
+      lines.push(line(nc.earlierEpoch
+        ? "It was written under an earlier epoch than the store's now: a newer one is due from the controller that holds the epoch."
+        : nc.auditEntries === 0 && nc.deliveries === 0
+          ? "It covers everything the store holds now."
+          : `Since it was written the store has ${nc.auditEntries} more audit entr${nc.auditEntries === 1 ? "y" : "ies"} and ${nc.deliveries} more deliver${nc.deliveries === 1 ? "y" : "ies"}; a promotion checked against it cannot vouch for those until the next one.`, ref));
+    }
+  }
+  const last = st.last;
+  if (last !== undefined && last.outcome !== "written") {
+    lines.push(line(`The last write, ${shown(last.at, 40)}, ${last.outcome === "refused" ? "was refused" : "failed"}: ${shown(last.reason ?? "no reason given", 300)}${last.withdrawn === true ? " (the manifest it had put in place was taken away again)" : ""}.`, ref));
+  }
+  return lines;
+}
+
+/**
+ * The last controller promotion of this store in plain lines (card K05), read only: which controller was fenced, at which epoch, and which one may use the store now, or why none may. Bounded; no path.
+ */
+export function controllerAuthorityLines(a: ControllerAuthority | "unreadable", ref: Cite): Line[] {
+  if (a === "unreadable") return [line("The record of a controller promotion on this store cannot be read, so no controller may start on it until that is resolved.", ref)];
+  const who = `the controller of epoch ${a.fencedEpoch}${a.fencedHolder === null ? "" : ` (${shown(a.fencedHolder, 80)})`}`;
+  const lines: Line[] = [];
+  if (a.state === "promoted") {
+    lines.push(line(`Controller promotion ${shown(a.promotionId, 48)} (${shown(a.at, 40)}) fenced ${who} at epoch ${a.fenceEpoch} and then named ${shown(a.successor, 80)} as the controller of this store: only a controller started as ${shown(a.successor, 80)} may use it, and the old one cannot write or dispatch.`, ref));
+  } else {
+    lines.push(line(`Controller promotion ${shown(a.promotionId, 48)} (${shown(a.at, 40)}) fenced ${who} at epoch ${a.fenceEpoch} but did not name a successor, so no controller may start on this store until a promotion goes through${a.reasons === undefined || a.reasons.length === 0 ? "" : `: ${a.reasons.slice(0, 2).map((r) => shown(r, 200)).join("; ")}`}.`, ref));
+  }
+  if (a.manifest !== undefined) lines.push(line(`It was decided on a recovery manifest written after the fence (${shown(a.manifest.createdAt, 40)}, epoch ${a.manifest.epoch}, ${a.manifest.records} record${a.manifest.records === 1 ? "" : "s"}, ${a.manifest.blobs} artifact file${a.manifest.blobs === 1 ? "" : "s"}).`, ref));
+  return lines;
+}
+
 const RETENTION_SHOWN = { quotaScopes: 10, deletions: 5, runs: 5, backups: 9, backupLine: 330, valueLine: 330, bulkLogs: 3 } as const;
 /**
  * Card K06d, second review: the chat shows the first 30 lines of a status answer (`CHAT_LIMITS.statusLines`, the same number; a test holds them equal), so the whole retention answer is kept to that many
@@ -769,6 +821,10 @@ export interface StatusDeps {
   /** The hand-off going on for a task (card L03f). Absent: the view is not offered. */
   /** Whether the installation could be stopped now (card L06). Absent: the view is not offered. */
   /** Where the controller database lives and what a move did (card F04m). Owner only. Absent: the view is not offered. */
+  /** The recovery watermark (card K04): the latest recovery manifest and this controller's writes of it, read only, shown in the `database_transfer` view. Absent: not set up here. */
+  readonly recoveryWatermark?: { status(): Promise<RecoveryWatermarkStatus> };
+  /** The last controller promotion of this store (card K05), read only, shown in the `database_transfer` view when there was one. */
+  readonly controllerAuthority?: { get(): Promise<ControllerAuthority | "unreadable" | undefined> };
   readonly databaseTransfer?: { status(): Promise<{ readonly source: { readonly name: string; readonly kind: string }; readonly targets: readonly { readonly name: string; readonly kind: string }[]; readonly journal?: { readonly id: string; readonly phase: string; readonly to: { readonly name: string }; readonly note?: string; readonly failure?: { readonly reason: string; readonly destinationClean: boolean }; readonly restart?: { readonly state: string; readonly reason?: string } } }>; settings(): Promise<{ readonly enabled: boolean; readonly restart: boolean; readonly restartOffered: boolean }> };
   readonly shutdown?: { readiness(by: Principal): Promise<{ readonly ready: boolean; readonly paused: boolean; readonly unsettled: readonly { readonly kind: string; readonly ref: string; readonly state: string }[]; readonly tracked?: readonly { readonly kind: string; readonly ref: string; readonly state: string }[]; readonly truncated: boolean }> };
   /** What the latest suspension or stop of a scope spent on cleanup (card L02d). Absent: the view is not offered. */
@@ -1353,9 +1409,11 @@ export class StatusService {
     for (const e of got.items) {
       const c = e.criteria;
       const budget = c === undefined ? "criteria not pinned yet" : `${e.spent.runs} of ${c.budget.maxRuns} runs, cost ${e.spent.cost} of ${c.budget.maxCost}${e.status === "paused" ? "; the budget is used up, so it waits for the budget to be raised or the experiment to be concluded" : ""}`;
+      const last = e.runs.at(-1);
+      const where = last === undefined ? "" : last.environmentRevision === undefined ? ` Last run's environment: "${shown(last.environment, 60)}", not checked (recorded before the environment check).` : ` Last run in ${shown(last.environmentRevision.agentId, 60)}'s environment revision ${last.environmentRevision.revision}, checked.`;
       const r = e.result;
       const verdict = r === undefined ? "" : ` Verdict: ${r.verdict} (${Object.entries(r.betterPct).sort(([x], [y]) => (x < y ? -1 : 1)).map(([m, v]) => `${shown(m, 30)} ${Math.abs(v as number)}% ${(v as number) < 0 ? "worse" : "better"}`).join(", ") || "no metric"}${r.failedCases.length > 0 ? `; failed cases ${r.failedCases.slice(0, 5).map((x) => shown(x, 40)).join(", ")}` : ""}${r.savings.length === 0 ? "" : `; savings ${r.savings.map((x) => `${shown(x.metric, 30)} ${x.amount}${x.counted ? "" : ` not counted again (${x.duplicateOf})`}`).join(", ")}`}). Finding: ${shown(r.finding, 200)}`;
-      out.push(line(`${shown(e.status, 20)}: "${shown(e.title, 120)}": ${shown(e.proposal.change, 200)} Stops: ${shown(e.proposal.stoppingCondition, 120)}. ${budget}.${verdict} [${e.id}, revision ${e.revision}]`, cite("experiment", e.id, e.revision)));
+      out.push(line(`${shown(e.status, 20)}: "${shown(e.title, 120)}": ${shown(e.proposal.change, 200)} Stops: ${shown(e.proposal.stoppingCondition, 120)}. ${budget}.${where}${verdict} [${e.id}, revision ${e.revision}]`, cite("experiment", e.id, e.revision)));
     }
     return { observedAt: this.#runner.now(), lines: out };
   }
@@ -2332,10 +2390,13 @@ export class StatusService {
   }
 
   async databaseTransferLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
-    if (this.#deps.databaseTransfer === undefined || by.kind !== "owner") return undefined;
+    if ((this.#deps.databaseTransfer === undefined && this.#deps.recoveryWatermark === undefined && this.#deps.controllerAuthority === undefined) || by.kind !== "owner") return undefined;
     const at = this.#runner.now();
-    const st = await this.#deps.databaseTransfer.status(), se = await this.#deps.databaseTransfer.settings();
     const here = cite("installation", "installation");
+    const authority = this.#deps.controllerAuthority === undefined ? undefined : await this.#deps.controllerAuthority.get();
+    const recovery = [...(authority === undefined ? [] : controllerAuthorityLines(authority, here)), ...(this.#deps.recoveryWatermark === undefined ? [] : recoveryWatermarkLines(await this.#deps.recoveryWatermark.status(), here))];
+    if (this.#deps.databaseTransfer === undefined) return this.#deps.recoveryWatermark === undefined && authority === undefined ? undefined : { observedAt: at, lines: recovery };
+    const st = await this.#deps.databaseTransfer.status(), se = await this.#deps.databaseTransfer.settings();
     const lines: Line[] = [line(`The controller database is ${shown(st.source.name)} (${shown(st.source.kind)}). It can be moved to: ${st.targets.length === 0 ? "nowhere (no destination is configured)" : st.targets.map((t) => `${shown(t.name)} (${shown(t.kind)})`).join(", ")}.`, here)];
     lines.push(line(se.enabled ? "Moving the database is allowed." : "Moving the database is switched off.", here));
     lines.push(line(!se.restartOffered ? "The host restarts the controller itself after a move only if it was set up to; it was not, so the restart is yours." : se.restart ? "After a move the host restarts the controller onto the new database by itself." : "After a move the controller waits for you to restart it (the automatic restart is off).", here));
@@ -2345,6 +2406,7 @@ export class StatusService {
       if (j.failure !== undefined) lines.push(line(`It failed: ${shown(j.failure.reason)}. ${j.failure.destinationClean ? "The destination is clean." : "A partial copy may be left at the destination; ask to remove it."}`, here));
       if (j.restart !== undefined) lines.push(line(j.restart.state === "failed" ? `The host could not restart the controller (${shown(j.restart.reason ?? "no reason given")}); restart it yourself.` : "The host was asked to restart the controller onto the database it moved to.", here));
     }
+    lines.push(...recovery);
     return { observedAt: at, lines };
   }
 

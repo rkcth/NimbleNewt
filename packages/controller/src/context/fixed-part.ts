@@ -36,10 +36,14 @@ import { admitFirstCall, type FirstCall } from "./dispatch.js";
  *    2,537 + 19,589 (22,126). The budget moved 200 characters from the system text (2,800 to 2,600, 63 over its measured figure) to the tool schemas (19,400 to 19,600, 11 left), so the floor stays 22,200 and the window told stays 36,864.
  *    First review of card W09b: the recorded figure is the measured one (19,589, not 19,210), so the owner is told about 7,400 tokens, the truth (7,376), not 7,200; the window told is unchanged (36,864: the most that
  *    starts a task on it is 22,248). The next addition does steps 1 to 3.
+ * Card W09's second slice added one completion rule (`COMPLETION_BOUNDARY_RULE`, 105 characters and its paragraph break): measured 2,644 + 19,589 (22,233, 7,411 tokens, still about 7,400). The system text's budget moved from 2,600 to
+ *    2,648, so the floor is 22,248, exactly the most that starts a task on 36,864: the window told is unchanged and no room is left. The next addition does steps 1 to 3 or shortens other text.
+ * Card W09's third slice added the test rule (`COMPLETION_TEST_RULE`, 155 characters and its paragraph break) and paid for it by shortening the plan, check and end rules (170 characters): measured 2,631 + 19,589 (22,220, 7,407
+ *    tokens, still about 7,400). The budget stays 2,648 + 19,600 (the floor 22,248, the window told 36,864); 17 characters of system text are left under it. The next addition shortens other text first or does steps 1 to 3.
  */
-export const WORKER_FIXED_PART = { systemPromptChars: 2_537, toolSchemaChars: 19_589 } as const;
+export const WORKER_FIXED_PART = { systemPromptChars: 2_631, toolSchemaChars: 19_589 } as const;
 /** The most the real fixed part may grow to before the budget test fails: a little room over the measured figures, no more. It is also the floor counted for a route nobody has measured (`ROUTE_FLOOR_DEFAULTS`). */
-export const WORKER_FIXED_PART_BUDGET = { systemPromptChars: 2_600, toolSchemaChars: 19_600 } as const;
+export const WORKER_FIXED_PART_BUDGET = { systemPromptChars: 2_648, toolSchemaChars: 19_600 } as const;
 export const WORKER_FIXED_PART_CHARS = WORKER_FIXED_PART.systemPromptChars + WORKER_FIXED_PART.toolSchemaChars;
 /** The measured fixed part in tokens at the budgets' estimate (three characters to a token), and the figure the owner is told, rounded to hundreds ("about N tokens"; the budget test pins it). */
 export const WORKER_FIXED_PART_TOKENS = Math.ceil(WORKER_FIXED_PART_CHARS / BUDGET_DEFAULTS.charsPerToken);
@@ -54,6 +58,19 @@ const WINDOW_STEP = 1_024;
  * figure as the model's `maxTokens`, and its first call reserves it (`replyReserveTokens`). A route with a reply limit reserves that limit instead.
  */
 export const DEFAULT_REPLY_TOKENS = 4_096;
+
+/** W09 fixes: the most a worker's reply limit may grow to after replies cut with no visible text, when the route declares no reply limit of its own. */
+export const REPLY_CUT_MAX_TOKENS = 32_768;
+/**
+ * The ceiling a worker host gives a worker for replies cut at the limit with no visible text (W09 fixes, `ChannelModel.replyCeiling`). A route whose reply limit the owner set (`maxTokens`, card W07) keeps it: the ceiling is that
+ * limit, so it never grows. Otherwise the reply may grow from `DEFAULT_REPLY_TOKENS` to an eighth of the window (the share Pi's compaction keeps for a reply), at most `REPLY_CUT_MAX_TOKENS`, and never below the default.
+ */
+export function replyCeilingFor(route: { readonly contextTokens: number; readonly maxTokens?: number }): number {
+  const declared = route.maxTokens;
+  if (declared !== undefined && Number.isSafeInteger(declared) && declared > 0) return declared;
+  const window = Number.isSafeInteger(route.contextTokens) && route.contextTokens > 0 ? route.contextTokens : 0;
+  return Math.max(DEFAULT_REPLY_TOKENS, Math.min(REPLY_CUT_MAX_TOKENS, Math.floor(window / 8)));
+}
 /** The window figures are worked out for: from the smallest `contextBudget` accepts up to the largest. */
 const WINDOW_RANGE = { min: 1_024, max: 100_000_000 } as const;
 

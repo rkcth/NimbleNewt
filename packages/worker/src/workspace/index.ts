@@ -7,5 +7,6 @@ export { WorkspaceHost, HOST_LIMITS, type CheckoutLocation, type HostJson, type 
 export { LANDING_CHECK_OUTPUT_CHARS, landingChecks, type LandingCheckCall, type LandingCheckReport, type LandingCheckRun, type LandingChecksOptions } from "./landing-checks.js";
 export { HANDOVER_LIMITS, LocalWorkspaces, PROGRESS_LIMITS, START_STATE_LIMITS, readPlan, type HandoverState, type LeftBy, type LocalWorkspacesOptions, type StartState, type WorkspaceAdmissionAnswer } from "./local-host.js";
 export { DEFAULT_PROTECTED_PATHS, isProtectedPath } from "./protected-paths.js";
+export { BLOCK_REASON, CONTRIBUTION_LIMITS, asksSignOff, instructionKind, instructionText, isIgnoreRuleFile, isIntended, isNimbleNewtState, readIntended, unfitName, type ContributionBlock, type InstructionKind, type IntendedPaths } from "./contribution.js";
 export { WipBackupHost, type HostRestoreTarget, type HostWipBackupCall, type HostWipBackupOutcome, type HostWipRestoreCall, type HostWipRestoreOutcome, type WipBackupHostOptions } from "./wip-host.js";
 export { httpsOrigin, httpsTokenEnv, isSshRemote, redactEnv, sshAgentEnv, wipPushEnv } from "./wip-credential.js";

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { backends, stopServer } from "../domain/testing/backends.js";
-import { decisionLoops, improvementOutcomeLoops, liveProjectIds, projectIds, recordLoops, responsibilityLoops, responsibilityRunLoops, leaseExpiryLoops, reviewLoops, standupLoops, untoldImprovementLoops } from "./loops.js";
+import { decisionLoops, improvementOutcomeLoops, liveProjectIds, projectIds, recordLoops, responsibilityLoops, responsibilityRunLoops, leaseExpiryLoops, reviewLoops, standupLoops, untoldImprovementLoops, untoldLessonLoops, lessonOutcomeLoops } from "./loops.js";
 import { buildWorld } from "./testing/world.js";
 
 after(stopServer);
@@ -36,6 +36,9 @@ for (const backend of backends) {
         ...decisionLoops({ resume: serve("decisions") as never }, live),
         ...improvementOutcomeLoops({ deliverOutcomes: serve("improvements") }, live),
         ...untoldImprovementLoops({ untold: async (_by, id) => { await serve("untold")(by, id); return []; } }, live, async () => undefined),
+        // Card B03: telling lessons' proposers and showing the owner untold lesson outcomes.
+        ...lessonOutcomeLoops({ deliverOutcomes: serve("lessons") }, live),
+        ...untoldLessonLoops({ untold: async (_by, id) => { await serve("lessonsUntold")(by, id); return []; } }, live, async () => undefined),
         ...standupLoops({ prepare: (async () => undefined) as never, deliverOutcomes: serve("standups") as never }, noOccurrences, all, live).filter((l) => l.name === "standups.deliverOutcomes"),
         ...responsibilityLoops({ generate: async (_by, id) => serve("checks")(by, id) }, { escalate: async () => undefined, untold: async () => [], markNotified: async () => undefined }, live),
         ...responsibilityRunLoops({ runner: { run: async (_by, id) => serve("runner")(by, id) } }, live),
@@ -48,7 +51,7 @@ for (const backend of backends) {
       const settled: string[] = [];
       const settle = recordLoops({ sweep: async (_by, c) => { settled.push(c.projectId === w.project ? "first" : "second"); return {} as never; } }, all);
       const runAll = async (): Promise<void> => { for (const l of [...loops, ...settle]) await l.run(by); };
-      const names = ["reviews", "decisions", "improvements", "untold", "standups", "checks", "runner", "lease"];
+      const names = ["reviews", "decisions", "improvements", "untold", "lessons", "lessonsUntold", "standups", "checks", "runner", "lease"];
 
       // Active: both projects are served by every loop.
       await runAll();
@@ -56,7 +59,7 @@ for (const backend of backends) {
       // Each loop alone, so which loop skipped which project is visible.
       for (const l of loops) { reset(); await l.run(by); }
 
-      // Archive the first project: nothing is served for it by any of the eight loops, the other project still is, and the record sweep still settles it.
+      // Archive the first project: nothing is served for it by any of the ten loops, the other project still is, and the record sweep still settles it.
       await flip(w.project, "archived");
       assert.deepEqual(await live(), [second], "the live list leaves the archived project out, and reads it fresh");
       assert.ok((await all()).includes(w.project), "the full list keeps it");

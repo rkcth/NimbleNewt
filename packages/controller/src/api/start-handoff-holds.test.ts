@@ -26,8 +26,9 @@ test("composed: a hand-off names the sender's integrator lease and the workspace
     const project = (await call(boot.token, "project.create", { name: "Garden" }, "p1")).result.id as string;
     const task = (await call(boot.token, "task.create", { projectId: project, title: "land the beds", description: "Land the bed work." }, "t1")).result.id as string;
     const agent = async (n: string, actions: string[]) => { const id = (await c.services.agents.create(rob, { commandId: `ag-${n}`, friendlyName: n })).id; for (const action of actions) await c.services.grants.grant(rob, { commandId: `g-${n}-${action}`, grantee: `agent:${id}`, action, project, source: "direct", basis: "test" } as never); return id; };
-    const a = await agent("A", ["attempt.work", "responsibility.read"]);
-    const b = await agent("B", ["attempt.work", "responsibility.read"]);
+    // Both may see leases and workspace requests (card L03j: the package names them in full only for such a recipient; the next test is one that may not).
+    const a = await agent("A", ["attempt.work", "responsibility.read", "integration.lease", "workspace.manage"]);
+    const b = await agent("B", ["attempt.work", "responsibility.read", "integration.lease", "workspace.manage"]);
     // A manager who may hand the task over but is not the owner.
     await c.services.principals.enroll(rob, { commandId: "e-mgr", kind: "agent", name: "mgr", grants: [{ action: "assignment.manage", project }, { action: "assignment.read", project }] });
     const mgr = (await c.services.principals.issueCredential(rob, "agent:mgr")).token;
@@ -80,5 +81,106 @@ test("composed: a hand-off names the sender's integrator lease and the workspace
     await leases.release({ commandId: "lz3", leaseId: lease.leaseId, fence: 3 });
     const third = await call(boot.token, "handoff.prepare", { taskId: task, to: { kind: "agent", id: b }, reason: "again" }, "h6");
     assert.match(third.result.item.package.sections.locks, /^none: /);
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("composed: a recipient that may not see leases or workspace requests is told every kind of hold the sender has, counted, without the branch, fence, request or who started it; the hand-off still releases the lease (card L03j)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-handoff-seen-"));
+  let enter!: () => void; const entered = new Promise<void>((ok) => { enter = ok; });
+  let release!: () => void; const gate = new Promise<void>((ok) => { release = ok; });
+  const host: WorkerHost = { hostId: "host:w1", resources: { cpus: 1, memoryMb: 512 }, start: async () => { throw new Error("no attempt"); }, workspace: { run: async () => { enter(); await gate; return { ok: true, summary: "refreshed" }; } } };
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI], dispatch: { timer: new ManualTimer(), intervalMs: 1000, workers: [host] } });
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    const call = async (op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    const project = (await call("project.create", { name: "Garden" }, "p1")).result.id as string;
+    const other = (await call("project.create", { name: "Orchard" }, "p2")).result.id as string;
+    const task = (await call("task.create", { projectId: project, title: "land the beds", description: "Land the bed work." }, "t1")).result.id as string;
+    const agent = async (n: string, rights: [string, string][]) => { const id = (await c.services.agents.create(rob, { commandId: `ag-${n}`, friendlyName: n })).id; for (const [action, where] of rights) await c.services.grants.grant(rob, { commandId: `g-${n}-${action}-${where}`, grantee: `agent:${id}`, action, project: where, source: "direct", basis: "test" } as never); return id; };
+    const a = await agent("A", [["attempt.work", project]]);
+    // Broad or elsewhere is not enough: a wildcard in the project, the exact rights in another project.
+    const blind = await agent("Blind", [["attempt.work", project], ["*", project], ["integration.lease", other], ["workspace.manage", other]]);
+    const leasesOnly = await agent("Leases", [["attempt.work", project], ["integration.lease", project]]);
+    await call("task.transition", { taskId: task, to: "ready", expectedRevision: 1 }, "tr1");
+    assert.ok((await call("task.assign", { taskId: task, owner: { kind: "agent", id: a } }, "as1")).ok);
+    const lease = await c.services.integratorLeases.acquire({ commandId: "lz1", projectId: project, branch: "integration", holder: a, taskId: task, ttlMs: 3_600_000 });
+    // The sender's lease for a task in another project is not this task's: neither counted nor named.
+    const elsewhere = (await call("task.create", { projectId: other, title: "prune", description: "Prune the orchard." }, "t2")).result.id as string;
+    await c.services.integratorLeases.acquire({ commandId: "lz-far", projectId: other, branch: "orchard-main", holder: a, taskId: elsewhere, ttlMs: 3_600_000 });
+    // Another agent's lease for the same task is not the sender's: neither counted nor named.
+    await c.services.integratorLeases.acquire({ commandId: "lz-other", projectId: project, branch: "release", holder: leasesOnly, taskId: task, ttlMs: 3_600_000 });
+    const pending = call("workspace.request", { operation: "refresh", taskId: task, reason: "base moved" }, "w1");
+    await entered;
+
+    const seen = await call("handoff.prepare", { taskId: task, to: { kind: "agent", id: blind }, reason: "A moves on" }, "h1");
+    assert.ok(seen.ok, JSON.stringify(seen));
+    const locks = seen.result.item.package.sections.locks as string;
+    assert.match(locks, /^integrator leases: 1 held by the sender for this task; it is released when the task moves/m, locks);
+    assert.match(locks, /a workspace operation \(refresh\) is in progress; .*who started it and the request are withheld/, locks);
+    for (const hidden of ["branch integration", `fence ${lease.fence}`, lease.expiresAt, "owner:rob", "wsr-"]) assert.ok(!locks.includes(hidden), `${hidden} withheld: ${locks}`);
+    assert.ok(!/not tracked|none: /.test(locks), "held kinds are listed, neither a gap nor none");
+    assert.ok(!locks.includes("orchard-main"), locks);
+    assert.ok(!seen.result.item.package.sections.locks.includes("orchard-main"));
+    // Cancelled: another recipient that may see leases but not workspace requests gets the lease named and the operation withheld.
+    assert.ok((await call("handoff.cancel", { handoffId: seen.result.item.id }, "hc1")).ok);
+    // A recipient whose principal is disabled cannot pass the doors: it is refused before any package is written (the locks source gives such a recipient no details either, should it be disabled after preparation).
+    const gone = await agent("Gone", [["attempt.work", project], ["integration.lease", project], ["workspace.manage", project]]);
+    const gp = await c.services.principals.get(`agent:${gone}`);
+    await c.services.principals.disable(rob, { commandId: "dis-gone", principalId: `agent:${gone}`, expectedRevision: gp!.revision });
+    const toGone = await call("handoff.prepare", { taskId: task, to: { kind: "agent", id: gone }, reason: "A moves on" }, "h-gone");
+    assert.equal(toGone.ok, false, JSON.stringify(toGone));
+    // workspace.manage limited to this very task is the workspace door's right: the operation is named in full, the leases are not.
+    const taskWs = await agent("TaskWs", [["attempt.work", project]]);
+    await c.services.grants.grant(rob, { commandId: "g-taskws", grantee: `agent:${taskWs}`, action: "workspace.manage", project, resource: { kind: "task", id: task }, source: "direct", basis: "test" } as never);
+    const ws = await call("handoff.prepare", { taskId: task, to: { kind: "agent", id: taskWs }, reason: "A moves on" }, "h-taskws");
+    assert.ok(ws.ok, JSON.stringify(ws));
+    assert.match(ws.result.item.package.sections.locks, /refresh in progress, started by owner:rob \(request wsr-/, ws.result.item.package.sections.locks);
+    assert.match(ws.result.item.package.sections.locks, /^integrator leases: 1 held by the sender for this task;/m);
+    assert.ok((await call("handoff.cancel", { handoffId: ws.result.item.id }, "hc-taskws")).ok);
+    // The lease service failing to read is a gap line in the composed package, not an absence, and does not hide the workspace lines.
+    const forTask = c.services.integratorLeases.forTask;
+    (c.services.integratorLeases as { forTask: unknown }).forTask = async () => { throw new Error("storage down"); };
+    try {
+      const gap = await call("handoff.prepare", { taskId: task, to: { kind: "agent", id: leasesOnly }, reason: "A moves on" }, "h-gap");
+      assert.ok(gap.ok, JSON.stringify(gap));
+      assert.match(gap.result.item.package.sections.locks, /^integrator leases: could not be read just now, .*not absent$/m, gap.result.item.package.sections.locks);
+      assert.match(gap.result.item.package.sections.locks, /a workspace operation \(refresh\) is in progress/);
+      assert.ok((await call("handoff.cancel", { handoffId: gap.result.item.id }, "hc-gap")).ok);
+    } finally { (c.services.integratorLeases as { forTask: unknown }).forTask = forTask; }
+    // Second review: the recipient's rights failing to read give no details (fail closed) and keep every line; the resource-claims read failing is its own gap line and keeps the lines before it.
+    const get = c.services.principals.get.bind(c.services.principals);
+    let recipientReads = 0;
+    (c.services.principals as { get: unknown }).get = async (id: string) => { if (id === `agent:${leasesOnly}` && recipientReads++ > 0) throw new Error("storage down"); return get(id); };
+    try {
+      const closed = await call("handoff.prepare", { taskId: task, to: { kind: "agent", id: leasesOnly }, reason: "A moves on" }, "h-rights");
+      assert.ok(closed.ok, JSON.stringify(closed));
+      const l = closed.result.item.package.sections.locks as string;
+      assert.ok(recipientReads >= 2, "the locks source read the recipient after the eligibility check");
+      assert.match(l, /^integrator leases: 1 held by the sender for this task;/m, l);
+      assert.match(l, /a workspace operation \(refresh\) is in progress/, l);
+      assert.ok(!l.includes("branch integration") && !l.includes(`fence ${lease.fence}`), l);
+      assert.ok((await call("handoff.cancel", { handoffId: closed.result.item.id }, "hc-rights")).ok);
+    } finally { (c.services.principals as { get: unknown }).get = get; }
+    const list = c.services.responsibilities.list;
+    (c.services.responsibilities as { list: unknown }).list = async () => { throw new Error("storage down"); };
+    try {
+      const claims = await call("handoff.prepare", { taskId: task, to: { kind: "agent", id: leasesOnly }, reason: "A moves on" }, "h-claims");
+      assert.ok(claims.ok, JSON.stringify(claims));
+      const l = claims.result.item.package.sections.locks as string;
+      assert.match(l, /^resource claims: could not be read just now, .*not absent$/m, l);
+      assert.match(l, /^integrator lease on branch integration: held by /m, l);
+      assert.match(l, /a workspace operation \(refresh\) is in progress/, l);
+      assert.ok((await call("handoff.cancel", { handoffId: claims.result.item.id }, "hc-claims")).ok);
+    } finally { (c.services.responsibilities as { list: unknown }).list = list; }
+    const half = (await call("handoff.prepare", { taskId: task, to: { kind: "agent", id: leasesOnly }, reason: "A moves on" }, "h2")).result.item;
+    assert.match(half.package.sections.locks, new RegExp(`integrator lease on branch integration: held by ${a} \\(the sender, fence ${lease.fence}`));
+    assert.ok(!half.package.sections.locks.includes("owner:rob") && !half.package.sections.locks.includes("wsr-"), half.package.sections.locks);
+    assert.ok(!half.package.sections.locks.includes("branch release"), "another agent's lease is not the sender's");
+    // The withheld details change nothing the hand-off does: the lease is released when the task moves.
+    const done = await call("handoff.complete", { handoffId: half.id, acceptGaps: true }, "h3");
+    assert.equal(done.result?.item.phase, "transferred", JSON.stringify(done));
+    assert.equal((await c.services.integratorLeases.get(lease.leaseId))?.state, "released");
+    release(); await pending;
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

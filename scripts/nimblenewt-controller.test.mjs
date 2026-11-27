@@ -20,6 +20,10 @@ const RELEASE = "rcn-0123456789abcdef01234567";
 
 const capture = () => { let text = ""; return { stderr: { write: (t) => { text += t; } }, get text() { return text; } }; };
 const until = async (what, cond, ms = 30_000) => { const end = Date.now() + ms; while (!(await cond())) { if (Date.now() > end) throw new Error(`timed out waiting for ${what}`); await new Promise((r) => setTimeout(r, 25)); } };
+// CI fix 2026-11-27: a controller coming up. On a hosted Windows runner one start took over 30 s once (first attempt of exhaustive run 45994253605; the same test took 9 to 15 s for two starts in the other
+// three Windows jobs): its secret store starts a PowerShell for every secret it reads or writes. The bound is 120 s, and a start that still misses it fails with what the controller had said by then.
+const START_MS = 120_000;
+const upOrTimeout = (what, cond, log) => until(what, cond, START_MS).catch((e) => { throw new Error(`${e.message} (${START_MS / 1000} s); its log so far:\n${log.text}`); });
 
 /** Staged releases are read-only; make them removable. */
 const unlockAll = (dir) => { try { chmodSync(dir, 0o700); for (const e of readdirSync(dir, { withFileTypes: true })) if (e.isDirectory()) unlockAll(join(dir, e.name)); } catch { /* gone */ } };
@@ -52,7 +56,9 @@ async function runEntry(args, env, during = async () => undefined, extra = {}) {
   const ac = new AbortController();
   let seen;
   const done = main(["--allow-unsupported-environment", ...args], { stderr: c.stderr, env, signal: ac.signal, ready: (handle) => { seen = handle; }, ...extra });
-  await Promise.race([until("the controller", () => seen !== undefined), done.then((code) => { throw new Error(`exited ${code} before it was up:\n${c.text}`); })]);
+  // A start that misses the bound is stopped as well (it used to keep running, so the test file never ended and reported nothing); the failure is the timeout, not what the stopping says.
+  try { await Promise.race([upOrTimeout("the controller", () => seen !== undefined, c), done.then((code) => { throw new Error(`exited ${code} before it was up:\n${c.text}`); })]); }
+  catch (e) { ac.abort(); done.catch(() => undefined); throw e; }
   try { await during(seen); } finally { ac.abort(); }
   return { code: await done, log: c.text };
 }
@@ -261,7 +267,7 @@ test("a database move under the launcher ends with exit 75, and the entry starte
     const c = capture();
     let seen;
     const done = main(["--allow-unsupported-environment", "--data", inst.dataDir], { stderr: c.stderr, env, ready: (handle) => { seen = handle; } });
-    await Promise.race([until("the controller", () => seen !== undefined), done.then((code) => { throw new Error(`exited ${code} before it was up:\n${c.text}`); })]);
+    await Promise.race([upOrTimeout("the controller", () => seen !== undefined, c), done.then((code) => { throw new Error(`exited ${code} before it was up:\n${c.text}`); })]);
     const token = await (await fileStore(inst.dataDir)).resolve(ownerSecretName(inst.dataDir));
     const call = (op, args, commandId) => seen.controller.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args });
     assert.equal((await call("project.create", { name: "Garden" }, "p1")).ok, true);
@@ -277,7 +283,7 @@ test("a database move under the launcher ends with exit 75, and the entry starte
     const c2 = capture();
     let seen2;
     const done2 = main(["--allow-unsupported-environment", "--data", inst.dataDir], { stderr: c2.stderr, env, ready: (handle) => { seen2 = handle; } });
-    await Promise.race([until("the second controller", () => seen2 !== undefined), done2.then((code) => { throw new Error(`exited ${code} before it was up:\n${c2.text}`); })]);
+    await Promise.race([upOrTimeout("the second controller", () => seen2 !== undefined, c2), done2.then((code) => { throw new Error(`exited ${code} before it was up:\n${c2.text}`); })]);
     assert.match(c2.text, /The controller database was moved to moved \(sqlite\) by a database transfer; this start uses it\./);
     const t2 = await (await fileStore(inst.dataDir)).resolve(ownerSecretName(inst.dataDir));
     const call2 = (op, args, commandId) => seen2.controller.api.handle(t2, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args });
@@ -308,7 +314,7 @@ test("production wiring of backups: a backup is made in <data>/backups, a restor
     const done = main(["--allow-unsupported-environment", "--data", inst.dataDir], { stderr: c.stderr, env, signal: ac.signal, ready: (handle) => { seen = handle; } });
     done.then(() => { ended = true; }, () => { ended = true; });
     try {
-      await Promise.race([until("the controller", () => seen !== undefined), done.then((code) => { throw new Error(`exited ${code} before it was up:\n${c.text}`); })]);
+      await Promise.race([upOrTimeout("the controller", () => seen !== undefined, c), done.then((code) => { throw new Error(`exited ${code} before it was up:\n${c.text}`); })]);
       const token = await (await fileStore(inst.dataDir)).resolve(ownerSecretName(inst.dataDir));
       const call = (op, args, commandId) => seen.controller.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args });
       assert.equal((await call("project.create", { name: "Garden" }, "p1")).ok, true);
@@ -364,7 +370,7 @@ test("after a move, a destination whose file is gone (a disk not attached) is no
     const c = capture();
     let seen;
     const done = main(["--allow-unsupported-environment", "--data", inst.dataDir], { stderr: c.stderr, env, ready: (handle) => { seen = handle; } });
-    await Promise.race([until("the controller", () => seen !== undefined), done.then((code) => { throw new Error(`exited ${code} before it was up:\n${c.text}`); })]);
+    await Promise.race([upOrTimeout("the controller", () => seen !== undefined, c), done.then((code) => { throw new Error(`exited ${code} before it was up:\n${c.text}`); })]);
     const token = await (await fileStore(inst.dataDir)).resolve(ownerSecretName(inst.dataDir));
     const call = (op, args, commandId) => seen.controller.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args });
     assert.equal((await call("project.create", { name: "Garden" }, "p1")).ok, true);
