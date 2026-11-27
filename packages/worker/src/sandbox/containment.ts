@@ -21,7 +21,8 @@ import { NATIVE_BACKEND_NAME as NATIVE_BACKEND, RUN_PROFILE_PREFIX } from "./win
  *    and the evidence only a real Windows PC can give. Since the owner's decision of 2026-11-26 (keep the AppContainer launcher, no Windows Sandbox) that is the native launcher's evidence
  *    (`NativeWindowsEvidence`): the launcher is the released one for this commit, the run was not elevated, in the signed-in user's interactive session with its window objects made, every
  *    per-run profile gone and every grant read back clean, plus the packaged controller working directory (accepted, not passed, while no packaged controller exists). The Windows
- *    Sandbox era block (`windows`: the unattended service identity after logout and reboot, the mapped-output ACL controls, the strict supervisor-ACL check) no longer satisfies it. A run refused cleanly after the owner signs out is NOT yet required (open item, A03b).
+ *    Sandbox era block (`windows`: the unattended service identity after logout and reboot, the mapped-output ACL controls, the strict supervisor-ACL check) no longer satisfies it. The sign-out / restart check (`afterSignOut`: a held confined task stopped by the owner's sign-out, swept and recorded as
+ *    interrupted after the next sign-in) is judged when present and NOT yet required (AFTER_SIGNOUT_REQUIRED, open item, A03b).
  */
 
 export const CONTAINMENT_SCHEMA = "nimblenewt.containment/1";
@@ -94,6 +95,34 @@ export interface NativeWindowsEvidence {
    * read-back, the profile lifecycle and the elevation check above).
    */
   readonly packagedControllerWorkingDirectory: { readonly packaged: boolean; readonly passed: boolean } | null;
+  /**
+   * Card A03b, the sign-out / restart check (OPTIONAL in this slice; `AFTER_SIGNOUT_REQUIRED`): what `run-g05.ps1 -Hold`, a sign-out (or restart) by the owner and `run-g05.ps1 -AfterSignIn` recorded
+   * (windows-native-signout.ts). Absent: not measured, listed as not proven. Present: every field is judged, and any bad one refuses the report.
+   */
+  readonly afterSignOut?: AfterSignOutEvidence;
+}
+
+/**
+ * The sign-out / restart check of one held confined task (card A03b). Filled by `afterSignIn` (windows-native-signout.ts) from the hold's state file and what the machine shows after the next sign-in,
+ * never typed in by hand.
+ */
+export interface AfterSignOutEvidence {
+  /** Phase 1 started a confined idle task through the native backend, saw the program itself running in the container, and recorded its profile's SID. */
+  readonly held: boolean;
+  /** The Windows logon session changed between the hold and the check (a sign-out and sign-in, or a restart). `null`: not recorded (whoami /logonid could not be read). */
+  readonly newLogon: boolean | null;
+  /** Any process of the held run (its runner, launcher or confined program, matched by number AND start time) still running at the check, or the process list could not be read (fail closed). */
+  readonly taskRunningAfter: boolean;
+  /** Informational, not judged: the held run's container profile folder still existed before the sweep (expected when Windows ended the run without its own cleanup). */
+  readonly profileLeftBeforeSweep: boolean;
+  /** The problems the backend's leftover sweep reported after the sign-in. `null`: the sweep did not run (the task was still running). */
+  readonly sweepProblems: number | null;
+  /** `NimbleNewtRun-*` profiles under %LOCALAPPDATA%\Packages after the sweep. `null`: not counted. */
+  readonly leftoverAfterSweep: number | null;
+  /** The launcher's own read-back (`check`, by the held profile's SID) of every path the held run was granted, after the sweep. */
+  readonly grantsAfter: "clean" | "left" | "not-measured";
+  /** The held run's record says it was interrupted (written by the sweep) or failed (written by a runner that outlived its launcher), never that it succeeded or ran to its time limit. */
+  readonly interruptedRecorded: boolean;
 }
 
 export interface ContainmentReport {
@@ -546,9 +575,20 @@ const exactKeys = (o: Record<string, unknown>, keys: readonly string[]): boolean
 const REPORT_KEYS: readonly string[] = ["schema", "generatedAt", "implementationCommit", "dirty", "platform", "arch", "osVersion", "macosVersion", "backend", "backendVersion", "capacityAvailable",
   "capacityReason", "weakerThanLinux", "cases", "trustedHost", "windows", "nativeWindows"];
 const NATIVE_KEYS = ["launcher", "elevated", "accountKind", "sessionId", "windowStation", "windowStationOk", "profiles", "grantsReadBack", "symlinkRight", "packagedControllerWorkingDirectory"] as const;
-/** The shape of the native Windows block, every field required (a missing field is malformed, not "not measured": the producer writes `not-measured` or `null` itself). No other field. */
+const AFTER_SIGNOUT_KEYS = ["held", "newLogon", "taskRunningAfter", "profileLeftBeforeSweep", "sweepProblems", "leftoverAfterSweep", "grantsAfter", "interruptedRecorded"] as const;
+const count = (v: unknown): boolean => Number.isSafeInteger(v) && (v as number) >= 0 && (v as number) <= 100_000;
+/** The shape of the sign-out check block: exactly these fields, each of its type (the producer writes `null` / `not-measured` itself for what it could not see). */
+export function isAfterSignOutEvidence(a: unknown): a is AfterSignOutEvidence {
+  return isObject(a) && exactKeys(a, AFTER_SIGNOUT_KEYS) && bool(a["held"]) && (a["newLogon"] === null || bool(a["newLogon"])) && bool(a["taskRunningAfter"]) && bool(a["profileLeftBeforeSweep"])
+    && (a["sweepProblems"] === null || count(a["sweepProblems"])) && (a["leftoverAfterSweep"] === null || count(a["leftoverAfterSweep"]))
+    && (a["grantsAfter"] === "clean" || a["grantsAfter"] === "left" || a["grantsAfter"] === "not-measured") && bool(a["interruptedRecorded"]);
+}
+/** The shape of the native Windows block, every field required (a missing field is malformed, not "not measured": the producer writes `not-measured` or `null` itself), except the optional sign-out check. No other field. */
 export function isNativeWindowsEvidence(n: unknown): n is NativeWindowsEvidence {
-  if (!isObject(n) || !exactKeys(n, NATIVE_KEYS)) return false;
+  if (!isObject(n)) return false;
+  const hasAfter = Object.hasOwn(n, "afterSignOut");
+  if (!exactKeys(n, hasAfter ? [...NATIVE_KEYS, "afterSignOut"] : NATIVE_KEYS)) return false;
+  if (hasAfter && !isAfterSignOutEvidence(n["afterSignOut"])) return false;
   const l = n["launcher"], p = n["profiles"], wd = n["packagedControllerWorkingDirectory"];
   if (!isObject(l) || !exactKeys(l, ["recordCommit", "recordSha256", "fileSha256"]) || !isObject(p) || !exactKeys(p, ["created", "deleted", "gone", "leftover"])) return false;
   if (wd !== null && (!isObject(wd) || !exactKeys(wd, ["packaged", "passed"]))) return false;
@@ -578,6 +618,12 @@ export const isLinkRightInconclusive = (c: CaseResult): boolean => {
  * flipped while this is false (containment-native-gate.test.ts checks it), so the exception cannot outlive the release decision unnoticed.
  */
 export const PACKAGED_CONTROLLER_EXISTS = false;
+/**
+ * Whether a Windows report must carry the sign-out / restart check (`nativeWindows.afterSignOut`, card A03b). While false (this slice) the check is judged when present, any bad field refuses the report,
+ * and its absence is only listed as not proven; once true, its absence is refused too. The release-readiness card D03 cannot be flipped while this is false (containment-native-gate.test.ts checks
+ * it, as for PACKAGED_CONTROLLER_EXISTS), so the open sign-out item cannot be left behind by the release decision unnoticed.
+ */
+export const AFTER_SIGNOUT_REQUIRED = false;
 
 /** Checks the shape of one report read from a file. Returns the report or the reason it is not one. Nothing in a report is trusted before this. */
 export function parseReport(raw: string): { report: ContainmentReport } | { error: string } {
@@ -622,6 +668,8 @@ export interface GateOptions {
   readonly platforms?: readonly PlatformName[];
   /** Tests only: whether a packaged controller exists (default `PACKAGED_CONTROLLER_EXISTS`). */
   readonly packagedControllerExists?: boolean;
+  /** Tests only: whether the sign-out / restart check is required (default `AFTER_SIGNOUT_REQUIRED`). */
+  readonly afterSignOutRequired?: boolean;
 }
 
 export interface GateResult {
@@ -635,9 +683,9 @@ export interface GateResult {
 
 /**
  * The native Windows block's requirements (card A03b, owner decision 2026-11-26), each a separate problem. `commit` is the report's own commit, already compared with the release commit by the caller.
- * Not required in this slice: a run attempted after the owner signs out is refused cleanly and leaves nothing (the hold / sign-out step is still open).
+ * The sign-out / restart check (`afterSignOut`) is judged whenever it is present; while AFTER_SIGNOUT_REQUIRED is false its absence is not a problem (it is listed as not proven by the producer).
  */
-function nativeWindowsProblems(n: NativeWindowsEvidence, commit: string, accepted: string[], packagedExists: boolean): string[] {
+function nativeWindowsProblems(n: NativeWindowsEvidence, commit: string, accepted: string[], packagedExists: boolean, afterSignOutRequired: boolean): string[] {
   const problems: string[] = [];
   if (n.launcher.recordCommit !== commit) problems.push(`the launcher's release record is for commit ${n.launcher.recordCommit.slice(0, 12)}, not the evidence's ${commit.slice(0, 12)}`);
   if (n.launcher.fileSha256 !== n.launcher.recordSha256) problems.push("the launcher that ran does not match its release record (SHA-256)");
@@ -658,6 +706,26 @@ function nativeWindowsProblems(n: NativeWindowsEvidence, commit: string, accepte
   else if (!wd.packaged && packagedExists) problems.push("the controller working-directory check was not run on the packaged controller");
   else if (!wd.packaged) accepted.push("win32: the packaged controller working-directory check: not a pass: not yet measurable (no packaged controller release exists yet)");
   else if (!wd.passed) problems.push("the packaged controller working-directory check failed");
+  const a = n.afterSignOut;
+  if (a === undefined) { if (afterSignOutRequired) problems.push("the sign-out / restart check (run-g05.ps1 -Hold, sign out, -AfterSignIn) is not recorded"); }
+  else problems.push(...afterSignOutProblems(a));
+  return problems;
+}
+
+/** The sign-out / restart check's requirements (card A03b), each a separate problem. `profileLeftBeforeSweep` is not judged (either value is a possible safe outcome). */
+export function afterSignOutProblems(a: AfterSignOutEvidence): string[] {
+  const problems: string[] = [];
+  const p = (m: string): void => { problems.push(`sign-out check: ${m}`); };
+  if (!a.held) p("no confined task was seen running before the sign-out (the hold did not start, or its profile SID was not recorded)");
+  if (a.newLogon !== true) p(a.newLogon === null ? "whether the owner signed out (a new logon session) was not recorded" : "the logon session did not change between the hold and the check: no sign-out or restart happened");
+  if (a.taskRunningAfter) p("the held task was still running after the sign-in (or the process list could not be read)");
+  if (a.sweepProblems === null) p("the leftover sweep after the sign-in did not run");
+  else if (a.sweepProblems !== 0) p(`the leftover sweep after the sign-in reported ${a.sweepProblems} problem(s)`);
+  if (a.leftoverAfterSweep === null) p(`the ${RUN_PROFILE_PREFIX}* container profiles left after the sweep were not counted`);
+  else if (a.leftoverAfterSweep !== 0) p(`${a.leftoverAfterSweep} ${RUN_PROFILE_PREFIX}* container profile(s) were left after the sweep`);
+  if (a.grantsAfter === "not-measured") p("the held run's grants were not read back after the sweep");
+  else if (a.grantsAfter !== "clean") p("an entry for the held run's container was still on a granted path after the sweep");
+  if (!a.interruptedRecorded) p("the held run is not recorded as interrupted (or failed): a run the sign-out stopped must never read as a success or as having reached its time limit");
   return problems;
 }
 
@@ -718,7 +786,7 @@ export function assessRelease(reports: readonly ContainmentReport[], options: Ga
         if (r.windows !== undefined) problems.push("the report carries the Windows Sandbox era evidence block (windows), which is not AppContainer evidence and is no longer accepted");
         const n = r.nativeWindows;
         if (n === undefined) problems.push("the native Windows host evidence is missing (launcher release record, elevation, account, session, window station, profiles, grant read-back)");
-        else problems.push(...nativeWindowsProblems(n, r.implementationCommit, accepted, options.packagedControllerExists ?? PACKAGED_CONTROLLER_EXISTS));
+        else problems.push(...nativeWindowsProblems(n, r.implementationCommit, accepted, options.packagedControllerExists ?? PACKAGED_CONTROLLER_EXISTS, options.afterSignOutRequired ?? AFTER_SIGNOUT_REQUIRED));
       } else {
         if (r.windows !== undefined) problems.push("Windows evidence in a non-Windows report");
         if (r.nativeWindows !== undefined) problems.push("native Windows evidence in a non-Windows report");

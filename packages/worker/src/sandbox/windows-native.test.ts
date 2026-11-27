@@ -23,6 +23,9 @@ import {
 import { main as runnerMain, processPorts, readAllStdin } from "./windows-native-runner.js";
 import { channelFileRefusal, isLinkOrJunctionWith, nodeChannelFs, nativeRealHost, parseProcessLines, removeChannelFolderWith, sameChannelFile, type ChannelStat, type FolderOps } from "./windows-native-real.js";
 import { PROBE_SCRIPT, unavailableNative, windowsDefaultBackend, windowsNativeBackend, type WindowsNativeOptions } from "./windows-native.js";
+import { HOLD_SCRIPT, afterSignIn, heldRunOutcome, holdFiles, parseHoldState, startHold, type HoldState } from "./windows-native-signout.js";
+import { AFTER_SIGNOUT_SCHEMA, grantsReadBackOf } from "./containment-windows-native-evidence.js";
+import { afterSignOutProblems } from "./containment.js";
 
 // These tests run on every OS with a simulated Windows host and a simulated launcher: they prove the rules (the command line, what is refused, what is recorded, what is revoked and read back on every path out)
 // but NOT that an AppContainer confines anything. That is the hosted Windows run and the owner's own hardware (see the A03b notes).
@@ -2334,5 +2337,279 @@ describe("A03b per-run container profile, second clean-context review: nothing n
     assert.equal((await runNativeJob(host, next.job, undefined, next.jobDir)).exitCode, 0);
     assert.ok(rewritten, "the rewrite happened between the reading and the removal");
     assert.equal(host.readText(`${CLAIMS}\\dead-3.json`), fresh, "the claim written meanwhile is kept");
+  });
+});
+
+describe("A03b sign-out / restart: the sweep records a run that never wrote its own record as interrupted", () => {
+  /** A run that got as far as its launcher and was then ended from outside (sign-out, restart): the status file, both profile records, the profile and live entries; no run record. */
+  const killedRun = (host: SimHost, id: string): { job: NativeJob; dir: string } => {
+    const { job: made } = jobFor(host);
+    const dir = `${CONTROL}\\jobs\\${id}`;
+    const name = `NimbleNewtRun-${createHash("sha256").update(id).digest("hex").slice(0, 16)}`;
+    const job: NativeJob = { ...made, runId: id, profile: runProfileFor(made.settings, name) };
+    host.mkdirp(dir);
+    host.writeText(jobFile(dir), JSON.stringify(job));
+    markStarted(host, job, dir, { runnerPid: 900, runId: id, startedAt: "2026-11-26T10:00:00.000Z" });
+    for (const g of job.grants) host.entries.set(key(g.path), 1);
+    return { job, dir };
+  };
+  test("after the sweep the run has a record: interrupted, failure kind interrupted, no exit code, the sweep's clean read-back, the profile deleted and gone; it reads clean for the gate's read-back", async () => {
+    const host = new SimHost();
+    const { job, dir } = killedRun(host, "signout-run-0001");
+    const swept = await sweepLeftovers(host, settings());
+    assert.deepEqual([swept.released, swept.problems], [1, []]);
+    assert.equal(host.exists(jobFile(dir)), false);
+    const rec = record(host, job);
+    assert.equal(rec.interrupted, true);
+    assert.equal(rec.failure?.kind, "interrupted");
+    assert.match(rec.failure?.message ?? "", /signed out|restarted/);
+    assert.deepEqual([rec.exitCode, rec.timedOut, rec.readBack, rec.entriesLeft, rec.startedAt], [null, false, "clean", [], "2026-11-26T10:00:00.000Z"]);
+    assert.deepEqual(rec.profile, { name: job.profile.name, sid: simSid(job.profile.name), deleted: true, gone: true });
+    assert.equal(heldRunOutcome(rec), "interrupted");
+    assert.equal(grantsReadBackOf([JSON.stringify(rec)]).state, "clean", "an interrupted run whose leftovers the sweep removed is no grant left behind");
+    assert.deepEqual(hasEntries(host), []);
+  });
+  test("a record the runner wrote itself is never replaced; a run the sweep could not clean gets no record yet (the next sweep tries again)", async () => {
+    const host = new SimHost();
+    const { job } = killedRun(host, "signout-run-0002");
+    const own = JSON.stringify({ runId: job.runId, mode: "native", container: "lpac", startedAt: "x", childStarted: true, exitCode: null, timedOut: false, failure: { kind: "launcher", message: "the launcher gave no answer" }, grants: [], softRefused: [], entriesLeft: [], readBack: "clean" });
+    host.writeText(`${recordsDir(job.settings)}\\${job.runId}.json`, own);
+    await sweepLeftovers(host, settings());
+    assert.equal(host.readText(`${recordsDir(job.settings)}\\${job.runId}.json`), own);
+    assert.equal(heldRunOutcome(record(host, job)), "failed");
+    const stuck = new SimHost();
+    stuck.script = { stubborn: () => true };
+    const k = killedRun(stuck, "signout-run-0003");
+    const swept = await sweepLeftovers(stuck, settings());
+    assert.equal(swept.released, 0);
+    assert.equal(readRecord(stuck, k.job.settings, k.job.runId), undefined);
+  });
+  test("a runner stopped after its clean-up but before its own record (both profile records gone, the status file still there) is recorded as interrupted too", async () => {
+    const host = new SimHost();
+    const { job, dir } = killedRun(host, "signout-run-0004");
+    host.remove(`${profilesDir(job.settings)}\\${job.profile.name}.json`); host.remove(job.profile.record); host.profiles.delete(job.profile.name);
+    for (const g of job.grants) host.entries.set(key(g.path), 0);
+    await sweepLeftovers(host, settings());
+    assert.equal(host.exists(jobFile(dir)), false);
+    const rec = record(host, job);
+    assert.deepEqual([rec.interrupted, rec.failure?.kind, rec.profile], [true, "interrupted", { name: job.profile.name, deleted: false, gone: true }]);
+  });
+  test("how a held run's record reads: only interrupted and failed count as stopped; a time limit or a success never does", () => {
+    const base = { runId: "r", mode: "native", container: "lpac", startedAt: "", childStarted: true, exitCode: 0, timedOut: false, grants: [], softRefused: [], entriesLeft: [], readBack: "clean" } as const;
+    assert.equal(heldRunOutcome(undefined), "none");
+    assert.equal(heldRunOutcome(base), "succeeded");
+    assert.equal(heldRunOutcome({ ...base, timedOut: true }), "timed-out");
+    assert.equal(heldRunOutcome({ ...base, timedOut: true, failure: { kind: "launcher", message: "m" } }), "timed-out");
+    assert.equal(heldRunOutcome({ ...base, failure: { kind: "launcher", message: "m" } }), "failed");
+    assert.equal(heldRunOutcome({ ...base, interrupted: true, failure: { kind: "interrupted", message: "m" } }), "interrupted");
+    assert.equal(heldRunOutcome({ ...base, interrupted: true }), "succeeded", "the flag alone, without the failure, is not the sweep's record");
+  });
+});
+
+describe("A03b sign-out / restart: run-g05.ps1 -Hold and -AfterSignIn (simulated Windows)", () => {
+  const PACKAGES = "C:\\Users\\owner\\AppData\\Local\\Packages";
+  const ROOT = "C:\\Users\\owner\\AppData\\Local\\Temp\\nn-g05hold-a1B2c3";
+  /** The simulated machine with its per-run profile folders under %LOCALAPPDATA%\\Packages (lower case, as Windows keeps the moniker). */
+  class PkgHost extends SimHost {
+    override exists(p: string): boolean { const k = key(p); if (k.startsWith(`${key(PACKAGES)}\\`)) return [...this.profiles].some((n) => key(`${PACKAGES}\\${n}`) === k); return super.exists(p); }
+    override listDir(p: string): string[] { return key(p) === key(PACKAGES) ? [...this.profiles].map((n) => n.toLowerCase()) : super.listDir(p); }
+  }
+  const T0 = "2026-11-26T18:00:00.0000000-05:00";
+  /** The detached runner as Windows would show it after a moment: the backend's records, the launcher's record and profile, the grants applied, the program's marker, three processes. */
+  const runnerStarts = (host: PkgHost, opts: { marker?: boolean } = {}) => (plan: SpawnPlan): number => {
+    const jobDir = plan.env["NIMBLENEWT_NATIVE_JOB"]!;
+    const job = JSON.parse(host.readText(jobFile(jobDir))!) as NativeJob;
+    markStarted(host, job, jobDir, { runnerPid: 900, runId: job.runId, startedAt: new Date(Date.parse(T0) - 1000).toISOString() });
+    for (const g of job.grants) host.entries.set(key(g.path), 1);
+    if (opts.marker !== false) host.writeText(`${ROOT}\\work\\held.txt`, "held 902");
+    host.alive.add(900);
+    host.procs = [{ pid: 900, parent: 50, started: T0 }, { pid: 901, parent: 900, started: T0 }, { pid: 902, parent: 901, started: T0 }, { pid: 77, parent: 1, started: T0 }];
+    return 900;
+  };
+  const hold = (host: PkgHost, extra: { marker?: boolean; minutes?: number } = {}) => startHold({
+    host, launcher: LAUNCHER, controlDir: CONTROL, nodeExecutable: NODE, runnerScript: RUNNER, root: ROOT, spawnRunner: runnerStarts(host, extra), sleep: async () => undefined, waitMs: 5000,
+    // A clock that moves one second per look, so the wait for the marker ends at once in the tests.
+    now: (() => { let t = Date.now(); return () => new Date(t += 1000); })(),
+    ...(extra.minutes === undefined ? {} : { minutes: extra.minutes }),
+  });
+  /** What Windows does at sign-out: every process of the session ends; nothing of the runner's clean-up runs. */
+  const signOut = (host: PkgHost): void => { host.alive.delete(900); host.procs = [{ pid: 77, parent: 1, started: T0 }]; };
+  const check = (host: PkgHost, newLogon: boolean | null = true) => afterSignIn({ host, launcher: LAUNCHER, controlDir: CONTROL, packagesDir: PACKAGES, newLogon });
+  const heldState = (host: PkgHost): HoldState => JSON.parse(host.readText(holdFiles(CONTROL).state)!) as HoldState;
+
+  test("hold, sign out, sign in: the task is gone, its profile was still there, the sweep removes it and its grants, the record says interrupted, and the check holds", async () => {
+    const host = new PkgHost();
+    const h = await hold(host);
+    assert.ok(!("error" in h), JSON.stringify(h));
+    assert.deepEqual(h.problems, []);
+    const st = heldState(host);
+    assert.deepEqual([st.childSeen, st.minutes, st.processes.map((p) => p.pid), st.sid === simSid(st.profileName), st.root], [true, 30, [900, 901, 902], true, ROOT]);
+    assert.equal(st.until, new Date(Date.parse(st.startedAt) + 30 * 60_000).toISOString());
+    // The same path as every run: the backend's own job, the launcher with the hold's time limit, the program run from the read-only node folder, the idle program in the tools folder.
+    const job = JSON.parse(host.readText(jobFile(st.jobDir))!) as NativeJob;
+    assert.equal(job.args[job.args.indexOf("--timeout-ms") + 1], String(30 * 60_000));
+    assert.equal(job.settings.maxRunMs, 30 * 60_000);
+    assert.ok(job.args.includes("--exe") && job.args[job.args.indexOf("--exe") + 1] === `${NODE_DIR}\\node.exe`);
+    assert.equal(host.readText(`${ROOT}\\tools\\hold.mjs`), HOLD_SCRIPT);
+    assert.ok(job.grants.some((g) => key(g.path) === key(`${ROOT}\\work`)) && !job.grants.some((g) => key(g.path).startsWith(key(CONTROL))), "the task's folders, never the control folder");
+    signOut(host);
+    const r = await check(host);
+    assert.ok(!("error" in r), JSON.stringify(r));
+    assert.deepEqual(r.afterSignOut, { held: true, newLogon: true, taskRunningAfter: false, profileLeftBeforeSweep: true, sweepProblems: 0, leftoverAfterSweep: 0, grantsAfter: "clean", interruptedRecorded: true });
+    assert.equal(r.outcome, "interrupted");
+    assert.deepEqual(afterSignOutProblems(r.afterSignOut), []);
+    assert.deepEqual(hasEntries(host), []);
+    assert.equal(host.profiles.size, 0);
+    assert.equal(host.exists(st.jobDir), false);
+    // The file the evidence run reads, and the state retired (the same hold is judged once).
+    assert.deepEqual(JSON.parse(host.readText(holdFiles(CONTROL).result)!), { schema: AFTER_SIGNOUT_SCHEMA, afterSignOut: r.afterSignOut });
+    assert.equal(host.exists(holdFiles(CONTROL).state), false);
+    assert.ok(host.exists(holdFiles(CONTROL).checked));
+    assert.match(JSON.stringify(await check(host)), /no hold is recorded/);
+    // The launcher's check went by the held profile's SID, over every granted path.
+    const checks = host.calls.filter((c) => c.args[0] === "check" && c.args.includes(st.profileName));
+    assert.ok(checks.length > 0 && checks.at(-1)!.args.includes(st.sid!));
+  });
+  test("a restart that reuses the runner's process number is not the held task (a later start time)", async () => {
+    const host = new PkgHost();
+    await hold(host);
+    host.procs = [{ pid: 900, parent: 4, started: new Date(Date.now() + 3_600_000).toISOString() }];
+    const r = await check(host);
+    assert.ok(!("error" in r) && r.afterSignOut.taskRunningAfter === false && r.afterSignOut.interruptedRecorded, JSON.stringify(r));
+  });
+  test("a launcher check answer that leaves out a granted path is not read as clean (the path counts as left)", async () => {
+    const host = new PkgHost();
+    await hold(host);
+    signOut(host);
+    const base = host.run.bind(host);
+    host.run = async (file, args, options) => {
+      const r = await base(file, args, options);
+      if (args[0] !== "check") return r;
+      const lines = r.stdout.trimEnd().split("\n");
+      const o = JSON.parse(lines.at(-1)!) as { grants: unknown[] };
+      o.grants = o.grants.slice(1);
+      return { ...r, stdout: `${[...lines.slice(0, -1), JSON.stringify(o)].join("\n")}\n` };
+    };
+    const r = await check(host);
+    assert.ok(!("error" in r) && r.afterSignOut.grantsAfter === "left", JSON.stringify(r));
+    assert.ok(afterSignOutProblems(r.afterSignOut).some((p) => /still on a granted path/.test(p)));
+  });
+  test("not signed out yet: the task still runs, nothing is swept or revoked, the state stays for the next try, and the check does not hold", async () => {
+    const host = new PkgHost();
+    await hold(host);
+    const r = await check(host, false);
+    assert.ok(!("error" in r));
+    assert.deepEqual(r.afterSignOut, { held: true, newLogon: false, taskRunningAfter: true, profileLeftBeforeSweep: true, sweepProblems: null, leftoverAfterSweep: null, grantsAfter: "not-measured", interruptedRecorded: false });
+    assert.ok(r.running);
+    assert.ok(hasEntries(host).length > 0 && host.profiles.size === 1, "a live run's entries and profile are never touched");
+    assert.ok(host.exists(holdFiles(CONTROL).state));
+    assert.ok(afterSignOutProblems(r.afterSignOut).some((p) => /still running/.test(p)) && afterSignOutProblems(r.afterSignOut).some((p) => /did not change/.test(p)));
+    // A process list that cannot be read counts as running (fail closed).
+    signOut(host);
+    host.procs = undefined;
+    const blind = await check(host);
+    assert.ok(!("error" in blind) && blind.running && blind.afterSignOut.taskRunningAfter);
+  });
+  test("the runner's number still alive while the process list does not show it counts as running (the backend's own rule), and the runner must be in the hold's list for the hold to count", async () => {
+    const host = new PkgHost();
+    await hold(host);
+    host.procs = [{ pid: 77, parent: 1, started: T0 }]; // 900 is still alive (pidAlive) but not listed
+    const r = await check(host);
+    assert.ok(!("error" in r) && r.running && r.afterSignOut.taskRunningAfter, JSON.stringify(r));
+    // The confined program outliving its runner AND its launcher (kill-on-close failed): only the exact match sees it (the backend's rule looks at the runner's children, not further).
+    signOut(host);
+    host.procs = [{ pid: 77, parent: 1, started: T0 }, { pid: 902, parent: 901, started: T0 }];
+    const orphan = await check(host);
+    assert.ok(!("error" in orphan) && orphan.running && orphan.afterSignOut.taskRunningAfter, JSON.stringify(orphan));
+    assert.ok(hasEntries(host).length > 0, "nothing revoked under a program that may still run");
+    // A hold whose runner was not in the process list (only its children were) is not counted as held.
+    const other = new PkgHost();
+    const h = await startHold({
+      host: other, launcher: LAUNCHER, controlDir: CONTROL, nodeExecutable: NODE, runnerScript: RUNNER, root: ROOT, sleep: async () => undefined, waitMs: 5000,
+      spawnRunner: (plan) => { const pid = runnerStarts(other)(plan); other.procs = other.procs!.filter((p) => p.pid !== 900); return pid; },
+    });
+    assert.ok(!("error" in h) && !h.state.childSeen && h.problems.some((p) => /runner is not running/.test(p)), JSON.stringify(h));
+  });
+  test("the hold ran to its time limit before the sign-out: the record says timed out, which is not interrupted", async () => {
+    const host = new PkgHost();
+    await hold(host);
+    const st = heldState(host);
+    // The run ended by itself: its runner cleaned up and wrote its own record (timed out).
+    host.remove(`${st.jobDir}\\status.json`); host.remove(`${profilesDir(st.settings)}\\${st.profileName}.json`); host.remove(runProfileFor(st.settings, st.profileName).record); host.profiles.delete(st.profileName);
+    for (const g of st.grants) host.entries.set(key(g.path), 0);
+    host.writeText(`${recordsDir(st.settings)}\\${st.runId}.json`, JSON.stringify({ runId: st.runId, mode: "native", container: "lpac", startedAt: st.startedAt, childStarted: true, exitCode: null, timedOut: true, grants: [], softRefused: [], entriesLeft: [], readBack: "clean" }));
+    signOut(host);
+    const r = await check(host);
+    assert.ok(!("error" in r));
+    assert.deepEqual([r.outcome, r.afterSignOut.interruptedRecorded, r.afterSignOut.profileLeftBeforeSweep, r.afterSignOut.grantsAfter, r.afterSignOut.leftoverAfterSweep], ["timed-out", false, false, "clean", 0]);
+    assert.ok(afterSignOutProblems(r.afterSignOut).some((p) => /not recorded as interrupted/.test(p)));
+  });
+  test("a runner that outlived its launcher at sign-out and recorded the run as failed counts as stopped (never a success)", async () => {
+    const host = new PkgHost();
+    await hold(host);
+    const st = heldState(host);
+    host.remove(`${st.jobDir}\\status.json`); host.remove(`${profilesDir(st.settings)}\\${st.profileName}.json`); host.remove(runProfileFor(st.settings, st.profileName).record); host.profiles.delete(st.profileName);
+    for (const g of st.grants) host.entries.set(key(g.path), 0);
+    host.writeText(`${recordsDir(st.settings)}\\${st.runId}.json`, JSON.stringify({ runId: st.runId, mode: "native", container: "lpac", startedAt: st.startedAt, childStarted: false, exitCode: null, timedOut: false, failure: { kind: "launcher", message: "the launcher gave no answer (exit null)" }, grants: [], softRefused: [], entriesLeft: [], readBack: "clean" }));
+    signOut(host);
+    const r = await check(host);
+    assert.ok(!("error" in r) && r.outcome === "failed" && r.afterSignOut.interruptedRecorded && afterSignOutProblems(r.afterSignOut).length === 0, JSON.stringify(r));
+  });
+  test("a grant the sweep cannot remove: problems counted, the held paths read back left, the profile left, no interrupted record yet", async () => {
+    const host = new PkgHost();
+    await hold(host);
+    signOut(host);
+    host.script = { stubborn: () => true };
+    const r = await check(host);
+    assert.ok(!("error" in r));
+    assert.ok((r.afterSignOut.sweepProblems ?? 0) > 0 && r.afterSignOut.grantsAfter === "left" && r.afterSignOut.leftoverAfterSweep === 1 && !r.afterSignOut.interruptedRecorded, JSON.stringify(r.afterSignOut));
+    assert.equal(afterSignOutProblems(r.afterSignOut).length, 4);
+  });
+  test("no logon recorded, or the program never seen in its container: the check does not hold", async () => {
+    const host = new PkgHost();
+    const unseen = await hold(host, { marker: false });
+    assert.ok(!("error" in unseen) && !unseen.state.childSeen && unseen.problems.some((p) => /marker/.test(p)));
+    signOut(host);
+    const r = await check(host, null);
+    assert.ok(!("error" in r));
+    assert.deepEqual([r.afterSignOut.held, r.afterSignOut.newLogon], [false, null]);
+    const p = afterSignOutProblems(r.afterSignOut);
+    assert.ok(p.some((x) => /no confined task was seen/.test(x)) && p.some((x) => /was not recorded/.test(x)));
+  });
+  test("-Hold refuses a time limit out of range and a second hold while the first still runs; nothing is started then", async () => {
+    for (const minutes of [0, 31, 1.5, -1]) {
+      const host = new PkgHost();
+      const r = await hold(host, { minutes });
+      assert.ok("error" in r && !r.started && /minutes/.test(r.error), String(minutes));
+      assert.equal(host.exists(holdFiles(CONTROL).state), false);
+    }
+    const host = new PkgHost();
+    await hold(host);
+    const again = await hold(host);
+    assert.ok("error" in again && !again.started && /still running/.test(again.error));
+    // Once the first has ended (signed out), a new hold is allowed and replaces the state.
+    signOut(host);
+    const third = await hold(host);
+    assert.ok(!("error" in third), JSON.stringify(third));
+  });
+  test("a state file that is not this bundle's is refused and nothing is swept: another job folder, another launcher, a malformed run id, a missing grant list, an unknown schema", async () => {
+    const host = new PkgHost();
+    await hold(host);
+    signOut(host);
+    const good = host.readText(holdFiles(CONTROL).state)!;
+    const st = JSON.parse(good) as Record<string, unknown>;
+    const bad: Record<string, unknown>[] = [
+      { ...st, jobDir: "C:\\Elsewhere\\jobs\\x" }, { ...st, settings: { ...(st["settings"] as object), launcher: "C:\\Temp\\nn-launcher.exe" } }, { ...st, runId: "../x" }, { ...st, grants: [] },
+      { ...st, schema: "other/1" }, { ...st, sid: "S-1-5-21-1-2-3-4" }, { ...st, profileName: "NimbleNewtAgent" }, { ...st, processes: "900" },
+    ];
+    for (const b of bad) {
+      host.writeText(holdFiles(CONTROL).state, JSON.stringify(b));
+      const r = await check(host);
+      assert.ok("error" in r, JSON.stringify(b).slice(0, 120));
+      assert.ok(hasEntries(host).length > 0, "nothing was revoked");
+    }
+    assert.ok("error" in parseHoldState("{", CONTROL, LAUNCHER));
+    assert.ok("state" in parseHoldState(good, CONTROL, LAUNCHER));
+    assert.ok("state" in parseHoldState(good, CONTROL.toUpperCase(), LAUNCHER.toLowerCase()), "Windows paths compare without case");
   });
 });
