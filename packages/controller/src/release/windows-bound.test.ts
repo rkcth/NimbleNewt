@@ -39,6 +39,8 @@ interface W {
   win: (o?: Partial<WindowOptions>) => ReleaseWindowService;
   ready: (content: string) => Promise<{ id: string; digest: string }>;
   pointer: () => string | undefined;
+  /** Another activation service on the same store and release root (a hook, the window's clock). */
+  actWith: (o: { hook?: (point: "afterBegin" | "afterVerify" | "afterAnnounce" | "afterSwitch") => void | Promise<void>; clock?: () => string }) => ReleaseActivationService;
   /** v1 current, a window for v2 set, prepared and opened; `o` are the window's options (runningRelease and the like). */
   open: (o?: Partial<WindowOptions>) => Promise<{ windowId: string; v1: string; v2: string; w: ReleaseWindowService }>;
 }
@@ -90,7 +92,9 @@ for (const backend of backends) {
           clock.t = OPENS + MIN;
           return { windowId, v1: v1.id, v2: v2.id, w };
         };
-        await body({ owner, act, clock, told, att, pauses, win, ready, pointer, open });
+        const actWith = (o: { hook?: (point: "afterBegin" | "afterVerify" | "afterAnnounce" | "afterSwitch") => void | Promise<void>; clock?: () => string }): ReleaseActivationService =>
+          ReleaseActivationService.withEpoch(world.storage, projects.epoch, { root, switcher: "pointer", platform: linux, runner: { ...options, ...(o.clock === undefined ? {} : { clock: o.clock }) }, ...(o.hook === undefined ? {} : { hook: o.hook }) });
+        await body({ owner, act, clock, told, att, pauses, win, ready, pointer, actWith, open });
       } finally { await world.close(); unlockAll(join(root, "releases")); rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
     });
   };
@@ -318,6 +322,55 @@ for (const backend of backends) {
     assert.match(g.reason ?? "", /not by this window/);
     assert.equal(c.pointer(), v2);
     assert.deepEqual((await c.act.status(c.owner)).history.filter((h) => h.by === "service:release-window" && h.kind === "rolled_back"), []);
+    assert.equal((await c.pauses.gateState(INST))?.intent, "active");
+  });
+  suite("the window's own undo left open in the journal by an error after the pointer moved is settled from the pointer once it has been open 15 minutes, so the pause does not last until a restart", async (c) => {
+    const { windowId, v1, v2, w } = await c.open();
+    await w.tick();
+    c.clock.t = CLOSES + MIN;
+    // The commit of the window's rollback cannot be written once: the pointer names v1, the record still says v2 with the rollback's journal open.
+    let fail = true;
+    const iso = (): string => new Date(c.clock.t).toISOString();
+    const hooked = c.actWith({ clock: iso, hook: (p) => { if (p === "afterSwitch" && fail) { fail = false; throw new Error("the commit could not be written"); } } });
+    const stuck = c.win({ runningRelease: v1, activation: hooked });
+    await assert.rejects(() => stuck.tick(), /could not be written/);
+    assert.equal(c.pointer(), v1);
+    assert.equal((await c.act.status(c.owner)).journal?.kind, "rollback");
+    // Inside 15 minutes: waited for, nothing written, the pause held.
+    c.clock.t += 15 * MIN - 1;
+    const mid = (await w.get(c.owner, windowId)).revision;
+    await stuck.tick();
+    assert.deepEqual([(await w.get(c.owner, windowId)).revision, (await c.act.status(c.owner)).journal?.kind, (await c.pauses.gateState(INST))?.intent], [mid, "rollback", "pause"]);
+    // At 15 minutes: the journal is settled from the pointer (v1: the rollback happened), and the window ends reverted and gives back its pause.
+    c.clock.t += 1;
+    await stuck.tick();
+    const s = await c.act.status(c.owner);
+    assert.deepEqual([s.journal, s.current?.id], [undefined, v1]);
+    await stuck.tick();
+    const g = await w.get(c.owner, windowId);
+    assert.equal(g.status, "reverted");
+    assert.match(g.reason ?? "", /its switch was undone/);
+    assert.equal((await c.pauses.gateState(INST))?.intent, "active");
+    assert.equal(c.pointer(), v1);
+    void v2;
+  });
+  suite("an undo left open before the pointer moved is closed by the same settling 15 minutes on, and the window tries the undo again as a new command (not refused as an earlier attempt that did not complete)", async (c) => {
+    const { windowId, v1, v2, w } = await c.open();
+    await w.tick();
+    c.clock.t = CLOSES + MIN;
+    let fail = true;
+    const hooked = c.actWith({ clock: () => new Date(c.clock.t).toISOString(), hook: (p) => { if (p === "afterAnnounce" && fail) { fail = false; throw new Error("stopped before the pointer moved"); } } });
+    const stuck = c.win({ runningRelease: v1, activation: hooked });
+    await assert.rejects(() => stuck.tick(), /before the pointer moved/);
+    assert.deepEqual([c.pointer(), (await c.act.status(c.owner)).journal?.kind], [v2, "rollback"]);
+    c.clock.t += 15 * MIN;
+    await stuck.tick();
+    const s = await c.act.status(c.owner);
+    assert.deepEqual([s.journal, s.current?.id, s.history.at(-1)?.kind], [undefined, v2, "aborted"], "settled from the pointer: the switch had not happened");
+    await stuck.tick();
+    const g = await w.get(c.owner, windowId);
+    assert.equal(g.status, "reverted");
+    assert.equal(c.pointer(), v1);
     assert.equal((await c.pauses.gateState(INST))?.intent, "active");
   });
 }

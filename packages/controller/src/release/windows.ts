@@ -39,6 +39,7 @@ import type { ReleaseActivationService } from "./activation.js";
  *   undone with the journalled `release.rollback` back to the release it switched from, and ends `reverted` (the release is not quarantined: it never started). The switch therefore never takes effect at a later,
  *   unrelated start, and the pause and suspensions the window holds end with it instead of lasting until some restart. When the switch cannot be undone (no earlier release, or the rollback is refused) the
  *   window ends `failed` and says plainly that the release runs at the next start unless the owner rolls it back. Enforced only when the embedder says which release this process runs (`runningRelease`).
+ *   An undo whose journal an error left open is settled from the launcher's pointer (the activation's `recover`) once it has been open 15 minutes, so the pause never waits for some restart.
  *
  * The owner is told once for each outcome (a needs-you notice for missed, deferred, failed and reverted; a notice for committed).
  *
@@ -140,7 +141,7 @@ export interface WindowQuiescePort {
 }
 export interface WindowOptions {
   /** `rollback` undoes a window's own switch at its close (without it such a window ends failed, saying the switch stays). */
-  readonly activation: Pick<ReleaseActivationService, "verify" | "activate" | "status" | "rollbackCheck"> & Partial<Pick<ReleaseActivationService, "rollback">>;
+  readonly activation: Pick<ReleaseActivationService, "verify" | "activate" | "status" | "rollbackCheck"> & Partial<Pick<ReleaseActivationService, "rollback" | "recover">>;
   /**
    * The release this process was started from (the launcher's), or `null` when it was not started from a release. With it, an activated window whose release is not running here when the window closes has its
    * switch undone (it would otherwise take effect at whatever later start came). Unset (older embedders): not enforced, and the window waits for the start as in the first slice.
@@ -177,6 +178,8 @@ const errorText = (e: unknown): string => (e instanceof Error ? e.message : Stri
 /** The controller acting on the owner's standing word for one window: owner-level, never a task, and named so the audit shows where it came from. */
 const WINDOW_ACTOR: Principal = { id: "service:release-window", kind: "owner", name: "release-window", grants: [] };
 const INSTALLATION: PauseScope = { kind: "installation", id: "installation" };
+/** How long the window's own undo may stay open in the journal before the window settles it from the launcher's pointer (K02 `recover`): this process's switches are serialised, so one still open by then was left by an error. */
+const STUCK_UNDO_MS = 15 * 60_000;
 /** The start of every freeze reason a window writes: an attempt holds one freeze, so a window lifts a freeze only while it still carries this (a landing or a recipe change may have lifted it and set its own). */
 const freezeTag = (windowId: string): string => `maintenance window ${windowId}:`;
 /** Error text for records the owner (and a release.manage holder) reads: control characters out, secrets marked, and host paths hidden (a backup's failure names its folder). */
@@ -585,7 +588,12 @@ export class ReleaseWindowService {
     const s = await this.#o.activation.status(WINDOW_ACTOR);
     // The window's own undo at its close: its rollback still open in the journal waits; done (the release before is current again) ends the window reverted. Anything else is tried again below.
     if (w.undoingAt !== undefined) {
-      if (s.journal !== undefined) return false;
+      if (s.journal !== undefined) {
+        // The window's own undo left open by an error after its journal opened (a commit that could not be written, say): settled from the pointer as a start would settle it, so the pause does not last until some restart.
+        const j = s.journal;
+        if (this.#o.activation.recover !== undefined && j.kind === "rollback" && j.by === WINDOW_ACTOR.id && j.to.id === w.from && this.#now() - Date.parse(j.startedAt) >= STUCK_UNDO_MS) await this.#o.activation.recover();
+        return false;
+      }
       if (w.from !== undefined && s.current?.id === w.from) return this.#undone(rev, w);
     }
     const failed = s.failedStarts.find((f) => f.id === w.candidateId);
