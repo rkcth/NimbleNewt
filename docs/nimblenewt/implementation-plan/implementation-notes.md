@@ -21847,3 +21847,47 @@ Card not flipped.
 - Deliberate breakages of my own (21, each applied alone to the built JS of `owncode.js`, `dispatcher.js`, `dispatch-compose.js` or `start.js`, run against `owncode.test` and `start-owncode.test`, restored and checked by sha256; script `/tmp/claude-1000/b06-r2/breakages.py`): 19 caught before the added tests, 21 after. The two missed before were the title's whitespace collapse removed and the title cut overflowing a pair.
 
 Card not flipped.
+
+## M05 slice: the open owner inquiries are one bounded list, so the reminder, the Needs-you list and the status view no longer read every floor record (Claude agent, Opus 5.5, 2026-11-27 EST; branch `card-m05b` from main 26899633; card M05 NOT flipped, M00 NOT flipped; task-plan files unchanged; not pushed; no workflow dispatched; no model or network call made, the local model server is offline)
+
+ASSUMPTION: M05 build-ahead of unflipped M00, as recorded for the earlier M05 slices (M00's code is built; it stays open only for the live model runs). Build only.
+
+**Why this item.** Of the offline items the last slice left, the full scans cost the most. `sweep` (the idle-inquiry reminder) runs on every scheduled turn (`tick`), and it read every `meeting-floor` record ever kept. Ended floors are never removed, so the cost of each turn grew with every meeting held, not with the inquiries open. `ownerPending` (API `meeting.floor.needs-you`) and `openInquiries` (the status view's Needs-you list) read them all too. The late-join gap (M04h) changes M04's admission and is a larger slice.
+
+**Slice boundary.**
+- New record `meeting-floor-inquiries` / `installation`: `{ ids }`, the meeting record IDs whose floor has an open owner inquiry, in the order they opened.
+- `#update` (the one place a floor changes) adds the list change to the same write whenever an inquiry opens or ends. That covers the owner's open and end, the owner's end of the meeting, and a meeting closed by other means. A conflict on either record is `stale_revision`, which `#update` already retries. So the list cannot be out of step with the floors.
+- `sweep`, `ownerPending` and `openInquiries` read the list and load only those floors (at most 200 gets). `ownerPending` now lists in the order the inquiries opened, not in floor-ID order. The API shape is unchanged.
+- Bound: `FLOOR_LIMITS.openInquiries` = 200 open at once. One more is refused (`invalid_command`, "end one first"). `openInquiry` checks this before it writes the owner's note or holds a vote, and the write checks again. If the write refuses, a vote this call held is resumed. Ending an inquiry is never refused.
+- A list that does not exist yet (floors kept before this version), or one that cannot be trusted (not an array, over 200, an ID not of meeting-record form, a repeated ID) is built again from the floors. The walk is bounded (`indexPages` = 500 pages of 200), oldest first, and a walk that does not finish refuses (`unavailable`) rather than answer with part of the list. The rebuilt list is stored once, written as the floor's service, so later reads walk nothing. A rebuilt list over 200 is never stored cut short; it is walked again until inquiries end.
+- The reminder drops listed IDs whose floor is gone or has no inquiry (checked again against the floor before the write; the write is revision-guarded), so stale entries cannot fill the bound.
+- No interpreter prompt text and no API summary text were changed. The prompt-room test is unchanged.
+
+ASSUMPTION: 200 open owner inquiries at once is far above use (only the owner opens them). Refusing the 201st is the smallest fail-closed choice. Raising the limit is a constant.
+ASSUMPTION: the list is believed when it is well formed. A well-formed list that leaves out an open inquiry can only come from a direct storage edit, since every inquiry change writes the list in the same write.
+
+**Tests.** `meetings/floor-inquiries.test.ts`, 12 scenarios on all four backends (48 tests):
+- open, replay, end, end again, ended with the meeting, a restart, and owner-only reads;
+- a record finished by other means leaves the list on the next sweep;
+- no floor walk once the list exists (storage `listAggregates` counted for the reminder, the Needs-you list, the status view, opening and ending), and the first read stores an empty list;
+- floors without a list (rebuilt, oldest first; an end or an open with no list keeps the older ones);
+- ten untrusted list bodies, including an own `__proto__` key and an array-like object;
+- the bound: refused before any note or notice, ending never refused, gone IDs dropped;
+- a sweep of another project neither reminds nor drops;
+- concurrent opens and ends, also racing the first build;
+- two opens racing for the last place (exactly one wins);
+- a stale list that already names the floor (listed once);
+- a planted floor with a malformed record ID left out of a rebuild;
+- an open refused at the write (the last place taken after the early check) resumes the vote it held.
+- Runs: the new test and its neighbours (`floor*`, `procedure`, `start-meeting-floor*`, `chat/meeting-controls` on four backends, `chat/prompt-room`): 500 of 500 on Node 22.23.0 and on Node 24.21.0. `tsc --build --force`, `api:docs:write` (no diff), `check:deps`, `licenses:check`, `roadmap:check` and `plan.test` 6/6 pass.
+- 28 deliberate breakages (own script `/tmp/claude-1000/m05b/breakages.py`, built `dist/meetings/floor.js`, each alone against `floor-inquiries.test` on all four backends, restored and checked by SHA-256): 19 of the first 25 caught at first; 26 of 28 after the race, stale-list, malformed-ID and vote-resume tests were added. Not caught, both equivalent in tests that run calls one after another: (1) the re-check of each floor before the reminder drops it from the list, which matters only when an inquiry opens during the sweep (the write is also revision-guarded); (2) `openInquiries` without its `running` filter, because every way a floor ends also clears its inquiry.
+
+**Not done (remaining M05).**
+- Everything that needs live model runs.
+- The production `checkpointOf`, `persona`, `deskNotes` and `budget` ports, and the `work` release and recall.
+- The M04h late-join gap.
+- A console waiting-on view.
+- `tick` still walks up to `tickPages` (10 x 200) floor records each turn to find the running and owing ones. That is bounded, but ended floors use up the pages. A list of running floors, kept the same way, would be the next bound.
+- The reminder's `projectId` filter still loads every listed floor (at most 200).
+- Residual: two opens racing for the last place both pass the early check. The one refused at the write resumes a vote it held itself (tested), but its owner note ("The owner opens an inquiry") stays on the record, which is append-only. Only at exactly 200 open inquiries.
+- Owner chat: no new control. The refusal reaches chat as the operation's error text.
