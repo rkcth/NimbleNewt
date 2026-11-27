@@ -174,7 +174,9 @@ test("the real hand-off locks source: checkout holds whoever started them, claim
     const pending = call("workspace.request", { operation: "refresh", taskId: t1, reason: "base moved" }, "w1");
     await entered;
     const none = await sections(t1, noSee, "h1");
-    assert.match(none["locks"] ?? "", /checkout of .*refresh in progress, started by owner:rob/, none["locks"]);
+    // A recipient that may not see workspace requests is told the checkout is frozen and by which kind of operation, not who started it or the request (card L03j).
+    assert.match(none["locks"] ?? "", /checkout of .*: a workspace operation \(refresh\) is in progress; .*who started it and the request are withheld/, none["locks"]);
+    assert.ok(!(none["locks"] ?? "").includes("owner:rob") && !(none["locks"] ?? "").includes("wsr-"), none["locks"]);
     assert.ok(!(none["locks"] ?? "").includes(res.id) && !(none["locks"] ?? "").includes(duty.id), "a recipient without the rights does not get the IDs");
     assert.match(none["locks"] ?? "", /1 held by the sender's responsibilities \(repository x1\); details withheld/);
     release(); await pending;
