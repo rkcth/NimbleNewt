@@ -224,6 +224,8 @@ export interface DispatcherDeps {
    * in the first prompt of the attempt that follows, when that attempt's agent is the one the task was handed to. Without it the call says nothing about the package.
    */
   readonly handedIn?: (taskId: string) => Promise<{ id: string; phase: HandoffPhase; to: { kind: string; id: string } } | undefined>;
+  /** Card bridge-submissions: the newest code submission of the task by the agent (principal ID), named in the next attempt's hand-off brief. Absent or `undefined`: none is named. */
+  readonly newestCodeOf?: (projectId: string, taskId: string, agentId: string) => Promise<string | undefined>;
   /**
    * The updates side lines of work selected for the task and brought back when they returned (card G09), read with the attempt's own task credential: they go with the order, and the host places each in the task's
    * conversation once. A failure to read them is reported and the attempt starts without them (its next start is given them again).
@@ -2196,7 +2198,7 @@ export class DispatcherService {
           // Whatever was remembered for this attempt (a "kept" from an earlier tick on the old route) is no longer true: a refusal or an error below must not leave it standing.
           this.#routeOk.delete(attemptId);
           let moved: Awaited<ReturnType<NonNullable<DispatcherDeps["routeChange"]>>>;
-          try { moved = await this.#deps.routeChange({ taskId, projectId: task.projectId, attemptId, route: chosen.route, ...(chosen.harness === undefined ? {} : { harness: chosen.harness }), previousRoute: previous, taskChars: (await this.#contentOf(taskId)).length, noteChars: (await this.#handedInNote({ taskId, attemptId, agentId })).length + (await this.#earlierReport({ taskId, attemptId })).length + (await this.#anchorReserve({ taskId, projectId: task.projectId, route: chosen.route, ...(chosen.harness === undefined ? {} : { harness: chosen.harness }) })) }); } catch (error) { this.#options.onError?.(error); return skip("route", `the context for route ${chosen.route} could not be rebuilt yet: ${String((error as Error)?.message ?? error).slice(0, 300)}`); }
+          try { moved = await this.#deps.routeChange({ taskId, projectId: task.projectId, attemptId, route: chosen.route, ...(chosen.harness === undefined ? {} : { harness: chosen.harness }), previousRoute: previous, taskChars: (await this.#contentOf(taskId)).length, noteChars: (await this.#handedInNote({ taskId, attemptId, agentId, projectId: task.projectId })).length + (await this.#earlierReport({ taskId, attemptId })).length + (await this.#anchorReserve({ taskId, projectId: task.projectId, route: chosen.route, ...(chosen.harness === undefined ? {} : { harness: chosen.harness }) })) }); } catch (error) { this.#options.onError?.(error); return skip("route", `the context for route ${chosen.route} could not be rebuilt yet: ${String((error as Error)?.message ?? error).slice(0, 300)}`); }
           if (!moved.ok) return block("route", "dispatch_blocked", moved.reason.slice(0, 800));
           this.#remember(attemptId, cacheKey);
         }
@@ -2998,7 +3000,7 @@ export class DispatcherService {
    * one follows, and the task's open blockers. Each is named by its record and by the operation its agent reads it with, so the call stays bounded however much the earlier attempt left behind — the package
    * itself is never copied into the prompt (its completed work is summarised so it stays the same size across hand-offs, card C07k). Nothing here ever keeps an attempt from starting: a record that cannot be read is simply not named.
    */
-  async #handedInNote(b: Pick<DispatchBody, "taskId" | "attemptId" | "agentId">): Promise<string> {
+  async #handedInNote(b: Pick<DispatchBody, "taskId" | "attemptId" | "agentId"> & Partial<Pick<DispatchBody, "projectId">>): Promise<string> {
     return (await this.#handedIn(b)).text;
   }
 
@@ -3006,14 +3008,15 @@ export class DispatcherService {
    * The paragraph `#handedInNote` writes, with the IDs of the records it names (W12 second review): the goal anchor lists the hand-off package and hand-off note by these IDs, taken from the records here, never found by
    * pattern in the text (that text also quotes blocker summaries, and the first prompt quotes the earlier attempt's own report and notes, where an agent could write anything shaped like an ID or a digest).
    */
-  async #handedIn(b: Pick<DispatchBody, "taskId" | "attemptId" | "agentId">): Promise<{ readonly text: string; readonly ids: readonly string[] }> {
+  async #handedIn(b: Pick<DispatchBody, "taskId" | "attemptId" | "agentId"> & Partial<Pick<DispatchBody, "projectId">>): Promise<{ readonly text: string; readonly ids: readonly string[] }> {
     // Best effort in the plain sense: a read that fails is left out of the paragraph and reported, never guessed at, and never stops the attempt from starting.
     const missing = <T,>(p: Promise<T | undefined>): Promise<T | undefined> => p.catch((error: unknown): undefined => { this.#options.onError?.(error); return undefined; });
     const context = this.#deps.context;
-    const [handedIn, note, blockers] = await Promise.all([
+    const [handedIn, note, blockers, submission] = await Promise.all([
       this.#deps.handedIn === undefined ? Promise.resolve(undefined) : missing(this.#deps.handedIn(b.taskId)),
       context?.latestHandoffFor === undefined ? Promise.resolve(undefined) : missing(context.latestHandoffFor(this.#deps.principal, b.taskId)),
       missing(this.#openBlockersOf(b.taskId)),
+      this.#deps.newestCodeOf === undefined || b.projectId === undefined ? Promise.resolve(undefined) : missing(this.#deps.newestCodeOf(b.projectId, b.taskId, b.agentId)),
     ]);
     // The package is named only to the agent the task was actually handed to by it: that one may read it with `handoff.get` and no one else can, so naming it to anyone else would only mislead.
     const forThisAgent = handedIn !== undefined && handedIn.phase === "transferred" && handedIn.to.kind === "agent" && `agent:${handedIn.to.id}` === b.agentId;
@@ -3023,6 +3026,7 @@ export class DispatcherService {
       taskId: b.taskId,
       ...(forThisAgent ? { handedIn: { id: handedIn.id } } : {}),
       ...(previous === undefined ? {} : { note: { id: previous.id, attemptId: previous.attemptId, source: previous.source } }),
+      ...(submission === undefined ? {} : { submission: { id: submission } }),
       ...(blockers === undefined || blockers.length === 0 ? {} : { blockers }),
     });
     return { text, ids: [...(forThisAgent ? [handedIn.id] : []), ...(previous === undefined ? [] : [previous.id])] };

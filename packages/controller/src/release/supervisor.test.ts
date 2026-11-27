@@ -99,6 +99,8 @@ interface World {
 const POSIX_GROUPS = process.platform === "win32" && "Windows has no process groups or catchable SIGTERM; the supervisor ends the tree with taskkill /T /F (supervisor.ts)";
 
 const alive = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch { return false; } };
+// Killed but not yet reaped by whoever inherited it: process.kill(pid, 0) still succeeds on a zombie (Linux /proc; elsewhere false).
+const zombie = (pid: number): boolean => { try { return readFileSync(`/proc/${pid}/stat`, "utf8").split(") ").pop()!.startsWith("Z"); } catch { return false; } };
 
 /**
  * The bound on the two crash-loop waits below, which see two hangs each: 120 s, and twice that on Windows. On macOS and Linux the case takes about 12 s; a Windows probe (run 44479324035) ran
@@ -453,7 +455,8 @@ test("members of the group that ignore SIGTERM after the leader obeyed it are ki
     const [kid] = w.pidsOf(b, "gpids");
     w.clock.advance(11);
     await w.waitFor("the fall-back", () => w.events.some((e) => e.kind === "started" && e.releaseId === g.id));
-    assert.equal(alive(kid!), false, "the child that ignored SIGTERM was killed with the group");
+    // SIGKILL went out before the fall-back started, but the kernel ends the child and its new parent reaps it a moment later
+    await w.waitFor("the child that ignored SIGTERM to be killed with the group", () => !alive(kid!) || zombie(kid!));
     assert.ok(w.events.some((e) => e.kind === "killed"));
     run.stop();
     await run.done;
@@ -624,10 +627,12 @@ test("a controller that always hangs, or (with firstBeatMs) never beats, ends in
       run.stop();
       await run.done;
       const off = w.start({ heartbeat: false, child: (release) => ({ command: process.execPath, args: [join(release.dir, "controller.js")], env: base }) });
-      await w.waitFor("the second start", () => w.pidsOf(a).length === 2);
+      // the child writes its .pids line before its .env line: wait for the env line, or stop() can end it in between
+      const envLines = (): string[] => { try { return readFileSync(join(w.pids, `${a.id}.env`), "utf8").split("\n").filter(Boolean); } catch { return []; } };
+      await w.waitFor("the second start's environment", () => w.pidsOf(a).length === 2 && envLines().length === 2);
       off.stop();
       await off.done;
-      const files = readFileSync(join(w.pids, `${a.id}.env`), "utf8").split("\n").filter(Boolean);
+      const files = envLines();
       assert.ok(files[0]!.startsWith(join(w.root, "run", "heartbeat-")), "the launcher's own file, not the inherited one");
       assert.equal(files[1], "none", "heartbeat off: no variables at all");
     }),
