@@ -1,4 +1,6 @@
 import { assignmentIdOf } from "../domain/assignment-model.js";
+import { DomainError } from "../domain/errors.js";
+import { TASK_ATTEMPTS_KIND } from "../dispatch/model.js";
 import type { Change, JsonObject } from "../storage/types.js";
 
 /**
@@ -15,6 +17,12 @@ import type { Change, JsonObject } from "../storage/types.js";
  *
  * The scope is the task, not the project: work on one task does not make an agent a contributor of another. Agents are compared by principal ID (`agent:<id>`), which a rename does not change. The owner is never
  * a contributor (the owner cannot submit code), so nothing here changes what the owner may decide.
+ *
+ * - every agent whose attempt of the task LEFT CHANGES in the task's checkout that a later submission staged (the holder gap of the seventh slice): the checkout belongs to the task, so the next attempt starts
+ *   from what the attempt before it left (card P02) and its submission stages all of it. The worker host that holds the checkout tells which attempts left the checkout different from what they were handed
+ *   (`LocalWorkspaces`' handover record, reported with the submit's staging as `leftBy`), with every change the platform made itself (a refresh, re-apply, release, landing) not counted. Those attempts'
+ *   agents are added in the same write as the submission (`leftChangesBy`). A reviewer that changed nothing in the checkout stays independent; one whose test run left files git does not ignore becomes a
+ *   contributor.
  *
  * Storage: one record per task (`task-code-contributors`, keyed by the task ID) lists the submitters, written in the same write as each code submission, so reading it is one record, never a scan. A task whose
  * code was submitted before the record existed is seeded when its next code submission is written (`contributorChange`): from the project's code index, or, when that index does not cover every submission, one
@@ -74,17 +82,64 @@ export const CONTRIBUTOR_SIGNOFF_TEXT = "this agent already contributed code to 
  * The change that adds a code submission's submitter to its task's record, for the same write as the submission (`SubmissionService.record`). `seed` reads the submitters of code recorded before the record existed
  * (called only when there is no record yet); it says whether it read every one.
  */
-export async function contributorChange(runner: Reader, taskId: string, submittedBy: string, seed: () => Promise<{ ids: readonly string[]; complete: boolean }>): Promise<Change[]> {
+export async function contributorChange(runner: Reader, taskId: string, submittedBy: string | readonly string[], seed: () => Promise<{ ids: readonly string[]; complete: boolean }>): Promise<Change[]> {
   const ref = { kind: CONTRIBUTORS, id: taskId };
   const found = await runner.get(CONTRIBUTORS, taskId);
   const had = contributorsOf(found);
   // A record that exists but cannot be read is left alone (a write could not be revision-checked against what it does not understand); readers then add the project's code index.
   if (found !== undefined && had === undefined) return [];
-  const me = principalOf(submittedBy);
-  if (had !== undefined && had.ids.includes(me)) return [];
+  const mine = [...new Set((typeof submittedBy === "string" ? [submittedBy] : submittedBy).map(principalOf))];
+  if (had !== undefined && mine.every((me) => had.ids.includes(me))) return [];
   const start = had ?? await (async (): Promise<ContributorsBody> => { const s = await seed(); return { taskId, ids: [...new Set(s.ids.map(principalOf))].sort().slice(0, CONTRIBUTORS_KEPT), complete: s.complete && new Set(s.ids.map(principalOf)).size <= CONTRIBUTORS_KEPT }; })();
-  const full = start.ids.length >= CONTRIBUTORS_KEPT && !start.ids.includes(me);
-  const next: ContributorsBody = { taskId, ids: full ? start.ids : [...new Set([...start.ids, me])].sort(), complete: start.complete && !full };
+  const ids = new Set(start.ids);
+  let full = false;
+  for (const me of mine) { if (ids.has(me)) continue; if (ids.size >= CONTRIBUTORS_KEPT) full = true; else ids.add(me); }
+  const next: ContributorsBody = { taskId, ids: [...ids].sort(), complete: start.complete && !full };
   if (had !== undefined && next.complete === had.complete && next.ids.length === had.ids.length) return [];
   return [found === undefined ? { type: "create", ref, body: next as unknown as JsonObject } : { type: "update", ref, expectedRevision: found.revision, body: next as unknown as JsonObject }];
+}
+
+/** The most attempts a host's `leftBy` report may name (the worker keeps at most this many, `HANDOVER_LIMITS.attempts`). */
+export const LEFT_BY_LIMIT = 64;
+
+/** The agent (principal ID) that owned an attempt of this task, `null` when its owner is not an agent, `undefined` when there is no such attempt of this task. An owner whose kind cannot be read is taken as an agent. */
+async function ownerOfAttempt(runner: Reader, taskId: string, attemptId: string): Promise<string | null | undefined> {
+  const body = (await runner.get("attempt", attemptId))?.body as { taskId?: unknown; owner?: { kind?: unknown; id?: unknown } } | undefined;
+  if (body === undefined || body === null || body.taskId !== taskId) return undefined;
+  const owner = body.owner;
+  if (typeof owner?.id !== "string" || owner.id === "") return undefined;
+  return typeof owner.kind !== "string" || owner.kind === "agent" ? principalOf(owner.id) : null;
+}
+
+/**
+ * The agents to add to the task's contributors when the attempt `attemptId` submits code (the holder gap, see above): the owners of the attempts the host reported as having left changes in the checkout (`reported`,
+ * the staging's `leftBy`). Fails closed when the host's report is missing, malformed, incomplete, or names an attempt the controller does not know for this task (an older or other host, a damaged record): the
+ * owner of the task's attempt just before this one is added as well, found through the dispatcher's per-task attempt list (`dispatch-task-attempts`). When even that cannot be told (this is not the task's first
+ * attempt, and the list does not show the one before it), the submission is refused (`unavailable`) rather than made without knowing who changed the checkout. A person, role or team owner is never added.
+ */
+export async function leftChangesBy(runner: Reader, taskId: string, attemptId: string, reported: unknown): Promise<string[]> {
+  const out = new Set<string>();
+  const r = reported as { attempts?: unknown; complete?: unknown } | null | undefined;
+  const attempts = r !== null && typeof r === "object" && Array.isArray(r.attempts) && r.attempts.length <= LEFT_BY_LIMIT && r.attempts.every((a) => typeof a === "string" && a.length > 0 && a.length <= 120) ? (r.attempts as string[]) : undefined;
+  let unknown = attempts === undefined || r?.complete !== true;
+  for (const id of new Set(attempts ?? [])) {
+    if (id === attemptId) continue;
+    const owner = await ownerOfAttempt(runner, taskId, id);
+    if (owner === undefined) unknown = true;
+    else if (owner !== null) out.add(owner);
+  }
+  if (!unknown) return [...out];
+  const refuse = (): never => { throw new DomainError("unavailable", "the host could not say which earlier attempts changed the task's checkout, and the attempt before this one could not be found, so the work was not submitted"); };
+  const mine = (await runner.get("attempt", attemptId))?.body as { taskId?: unknown; number?: unknown } | undefined;
+  if (mine === undefined || mine.taskId !== taskId || typeof mine.number !== "number") return refuse();
+  if (mine.number <= 1) return [...out];
+  const listed: unknown = ((await runner.get(TASK_ATTEMPTS_KIND, taskId))?.body as { attempts?: unknown } | undefined)?.attempts;
+  const list: readonly unknown[] = Array.isArray(listed) ? listed : [];
+  const index = list.indexOf(attemptId);
+  const previous = index >= 1 ? list[index - 1] : undefined;
+  if (typeof previous !== "string") return refuse();
+  const before = await ownerOfAttempt(runner, taskId, previous);
+  if (before === undefined) return refuse();
+  if (before !== null) out.add(before);
+  return [...out];
 }
