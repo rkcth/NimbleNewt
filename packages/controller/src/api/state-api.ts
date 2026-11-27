@@ -70,6 +70,7 @@ import type { ImprovementService } from "../standups/improvements.js";
 import type { ObservationService } from "../observations/observations.js";
 import type { LessonService } from "../lessons/lessons.js";
 import type { ExperimentService } from "../experiments/experiments.js";
+import type { AdoptionService } from "../adoptions/adoptions.js";
 import type { OwnCodeService } from "../owncode/owncode.js";
 import type { MeetingRecordService } from "../meetings/record.js";
 import type { MeetingFloorService } from "../meetings/floor.js";
@@ -302,6 +303,7 @@ export interface StateApiDeps {
   readonly observations?: Pick<ObservationService, "submit" | "dispose" | "get" | "open">;
   readonly lessons?: Pick<LessonService, "propose" | "addEvidence" | "decide" | "get" | "current">;
   readonly experiments?: Pick<ExperimentService, "propose" | "pin" | "recordRun" | "raiseBudget" | "conclude" | "withdraw" | "get" | "list">;
+  readonly adoptions?: Pick<AdoptionService, "request" | "approve" | "decline" | "withdraw" | "monitor" | "inForce" | "get" | "list">;
   /** Optional agent work on NimbleNewt's own code (card B06). */
   readonly ownCode?: Pick<OwnCodeService, "settings" | "enable" | "disable" | "request" | "decide" | "withdraw" | "get" | "list">;
   readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep" | "readiness">;
@@ -509,6 +511,7 @@ export class StateApi {
         ...(this.#deps.observations === undefined ? {} : { observations: this.#deps.observations }),
         ...(this.#deps.lessons === undefined ? {} : { lessons: this.#deps.lessons }),
         ...(this.#deps.experiments === undefined ? {} : { experiments: this.#deps.experiments }),
+        ...(this.#deps.adoptions === undefined ? {} : { adoptions: this.#deps.adoptions }),
         ...(this.#deps.ownCode === undefined ? {} : { ownCode: this.#deps.ownCode }),
         ...(this.#deps.watchControl === undefined ? {} : { watchControl: this.#deps.watchControl }),
         ...(this.#deps.standups === undefined ? {} : { standups: this.#deps.standups }),

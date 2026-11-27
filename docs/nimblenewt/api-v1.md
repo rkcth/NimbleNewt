@@ -1658,6 +1658,41 @@ Arguments:
 
 Result: `{ item: { items, next? } }`.
 
+#### `adoption.in-force`
+
+The adoption of a target now in force in a project, if any (what a later use consults); a withdrawn, declined or only asked one is not. A practice is named with its experiment; a tool version is one target per project, whichever experiment adopted it. Needs meeting.read or meeting.manage.
+
+Arguments:
+
+- `projectId`: the project
+- `experimentId` (optional): exp-... (for a practice)
+- `target`: { kind: practice } or { kind: tool, name, version }
+
+Result: `{ item: { adoptionId, experimentId, revision, targetDigest? } | null }`.
+
+#### `adoption.get`
+
+One adoption with its target, review, grant basis, monitoring reports and history, if you may read it (meeting.read, meeting.manage, the owner, or its asker).
+
+Arguments:
+
+- `adoptionId`: adp-...
+
+Result: `{ item }`.
+
+#### `adoption.list`
+
+The adoptions of a project, oldest first, a page at a time (none is deleted); `status` keeps one status. Needs meeting.read or meeting.manage.
+
+Arguments:
+
+- `projectId`: the project
+- `status` (optional): requested, active, declined or withdrawn
+- `afterId` (optional): continue after this adoption
+- `limit` (optional): at most 100
+
+Result: `{ item: { items, next? } }`.
+
 #### `owncode.settings`
 
 Owner only: whether optional agent work on NimbleNewt's own code is enabled (off by default) and which project is the NimbleNewt development project, with the settings' revision and the recent switches.
@@ -6000,6 +6035,71 @@ Arguments:
 - `reason`: words
 
 Result: `{ revision }`.
+
+#### `adoption.request`
+
+Asks to adopt what an experiment the controller judged improved tried (card B05), in the asker's words: `target` is `{ kind: practice }` (the change the experiment tried) or `{ kind: tool, name, version }` (one exact shared toolbox version already published through the toolbox's own review). Whoever may read the experiment asks; nothing is in force until an independent reviewer approves. One open adoption per target.
+
+Arguments:
+
+- `commandId`: required
+- `experimentId`: exp-...
+- `target`: { kind: practice } or { kind: tool, name, version }
+- `reason`: why, in words
+
+Result: `{ id, replayed }`.
+
+#### `adoption.approve`
+
+Approves an asked adoption with the review in words (card B05): the owner, or a manager of the project's meetings who neither proposed the experiment nor asked. A tool also needs the reviewer's own toolbox.manage for the project, and a shared, published, unrevoked version the reviewer can read and did not register or write. Nothing is published, installed or granted.
+
+Arguments:
+
+- `commandId`: required
+- `adoptionId`: adp-...
+- `expectedRevision`: the adoption's revision
+- `review`: the review, in words
+
+Result: `{ revision }`.
+
+#### `adoption.decline`
+
+Declines an asked adoption with a reason (a reviewer who could approve it, or its asker). It stays listed and the target is free for a new request.
+
+Arguments:
+
+- `commandId`: required
+- `adoptionId`: adp-...
+- `expectedRevision`: the adoption's revision
+- `reason`: why
+
+Result: `{ revision }`.
+
+#### `adoption.withdraw`
+
+Withdraws an adoption in force with a reason (the owner, a manager of the project's meetings, or its asker): it is no longer in force, nothing is deleted or undone. Final; adopting again is a new request.
+
+Arguments:
+
+- `commandId`: required
+- `adoptionId`: adp-...
+- `expectedRevision`: the adoption's revision
+- `reason`: why
+
+Result: `{ revision }`.
+
+#### `adoption.monitor`
+
+Reports what an adoption in force does now (its asker, a manager of the project's meetings or the owner): exactly the experiment's pinned metrics. Each is compared with the pinned baseline; a metric worse by more than the pinned maxRegressionPct is a regression and withdraws the adoption in the same write.
+
+Arguments:
+
+- `commandId`: required
+- `adoptionId`: adp-...
+- `metrics`: exactly the experiment's pinned metrics
+- `note` (optional): words
+
+Result: `{ report, status, regressed }`.
 
 #### `owncode.enable`
 

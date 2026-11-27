@@ -70,6 +70,7 @@ import { keptSecretUseText, type KeptSecretUse } from "../setup/kept-secret-uses
 import type { ObservationService } from "../observations/observations.js";
 import type { LessonService } from "../lessons/lessons.js";
 import type { ExperimentService } from "../experiments/experiments.js";
+import type { AdoptionService } from "../adoptions/adoptions.js";
 import {
   BASIS_WORDS, EXECUTION_STATES, executionOf, isOwnerOf, plainDuration, quoted, routeFor, shown, whoText,
   type Cite, type ExecutionFacts, type ExecutionState, type Line, type WorkObservation,
@@ -724,6 +725,8 @@ export interface StatusDeps {
   readonly lessons?: Pick<LessonService, "current">;
   /** Bounded baseline experiments of the project (card B04). Absent: the view is not offered. */
   readonly experiments?: Pick<ExperimentService, "list">;
+  /** Adoptions of improved experiments and their monitoring (card B05), shown in the experiments view. Absent: no adoption lines. */
+  readonly adoptions?: Pick<AdoptionService, "list">;
   /** What retention holds back and why, and its values (card T02c). Absent: the views are not offered. */
   readonly retention?: {
     check(by: Principal, ref: { kind: string; id: string }): Promise<{ readonly retained: boolean; readonly reasons: readonly string[] }>;
@@ -1417,6 +1420,18 @@ export class StatusService {
       const r = e.result;
       const verdict = r === undefined ? "" : ` Verdict: ${r.verdict} (${Object.entries(r.betterPct).sort(([x], [y]) => (x < y ? -1 : 1)).map(([m, v]) => `${shown(m, 30)} ${Math.abs(v as number)}% ${(v as number) < 0 ? "worse" : "better"}`).join(", ") || "no metric"}${r.failedCases.length > 0 ? `; failed cases ${r.failedCases.slice(0, 5).map((x) => shown(x, 40)).join(", ")}` : ""}${r.savings.length === 0 ? "" : `; savings ${r.savings.map((x) => `${shown(x.metric, 30)} ${x.amount}${x.counted ? "" : ` not counted again (${x.duplicateOf})`}`).join(", ")}`}). Finding: ${shown(r.finding, 200)}`;
       out.push(line(`${shown(e.status, 20)}: "${shown(e.title, 120)}": ${shown(e.proposal.change, 200)} Stops: ${shown(e.proposal.stoppingCondition, 120)}. ${budget}.${where}${verdict} [${e.id}, revision ${e.revision}]`, cite("experiment", e.id, e.revision)));
+    }
+    // Card B05: the adoptions of the project's improved experiments (read-only; the same readers as the experiments), 25 at most, shown only when there is one.
+    const adopted = experimentStatus === undefined ? await this.#deps.adoptions?.list(by, checkProjectId(projectId), { limit: 25 }) : undefined;
+    if (adopted !== undefined && adopted.items.length > 0) {
+      out.push(line(`${adopted.items.length}${adopted.next === undefined ? "" : " (and more)"} adoption(s) of improved experiments, oldest first; one is in force only after an independent review, and a monitoring report worse than the pinned baseline withdraws it.`, cite("adoption-index", projectId)));
+      for (const d of adopted.items) {
+        const what = d.target.kind === "practice" ? "the practice it tried" : `tool ${shown(d.target.name, 120)} ${shown(d.target.version, 60)}`;
+        const state = d.status === "requested" ? `asked by ${shown(d.requestedBy, 80)}, waiting for an independent review` : d.status === "active" ? `in force, approved by ${shown(d.approvedBy ?? "", 80)} (grant: ${(d.grantBasis ?? []).map((g) => shown(g, 40)).join(", ")})` : d.status === "declined" ? "declined" : d.withdrawnWhy === "regression" ? "withdrawn: monitoring showed a regression, so it is no longer used" : `withdrawn by ${shown(d.withdrawnBy ?? "", 80)}, no longer used`;
+        const last = d.reports.at(-1);
+        const report = last === undefined ? " No monitoring report yet." : ` ${d.reportCount} monitoring report(s); the last (${last.at}): ${Object.entries(last.betterPct).sort(([x], [y]) => (x < y ? -1 : 1)).map(([m, v]) => `${shown(m, 30)} ${Math.abs(v as number)}% ${(v as number) < 0 ? "worse" : "better"}`).join(", ") || "no metric"} than the baseline${last.regressed.length > 0 ? `; regressed: ${last.regressed.map((m) => shown(m, 30)).join(", ")}` : ""}.`;
+        out.push(line(`Adoption of ${what} from experiment ${d.experimentId}: ${state}.${report} [${d.id}, revision ${d.revision}]`, cite("adoption", d.id, d.revision), cite("experiment", d.experimentId)));
+      }
     }
     return { observedAt: this.#runner.now(), lines: out };
   }
