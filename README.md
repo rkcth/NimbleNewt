@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **313 of 365 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **314 of 365 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -121,7 +121,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Meetings | `▓▓▓▓▓▓▓▓▓▓░░` 87% | 28 of 32 |
 | Tools and skills | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 19 of 19 |
 | Projects, repositories and workspaces | `▓▓▓▓▓▓░░░░░░` 55% | 10 of 18 |
-| Quality: deliverables, QA and defects | `▓▓▓▓▓▓▓░░░░░` 60% | 3 of 5 |
+| Quality: deliverables, QA and defects | `▓▓▓▓▓▓▓▓▓░░░` 80% | 4 of 5 |
 | Balancing delivery and improvement | `░░░░░░░░░░░░` 0% | 0 of 1 |
 | Learning and improvement | `░░░░░░░░░░░░` 0% | 0 of 5 |
 | Backup, updates and operations | `▓▓▓▓▓▓▓▓▓▓░░` 83% | 15 of 18 |
@@ -573,14 +573,14 @@ Repository-independent projects, isolated coding workspaces, non-code and sandbo
 </details>
 
 <details>
-<summary><strong>Quality: deliverables, QA and defects</strong> — ▓▓▓▓▓▓▓░░░░░ 3 of 5</summary>
+<summary><strong>Quality: deliverables, QA and defects</strong> — ▓▓▓▓▓▓▓▓▓░░░ 4 of 5</summary>
 
 Deliverable submission and acceptance, independent QA, documentation impact and defect tracking.
 
 - [x] **Q01** · P31 · Implement deliverable submission and acceptance _(needs S06, U01, P03, S10)_
 - [x] **Q01b** · P32 · Record submission kinds by role _(needs Q01, H11b)_
 - [x] **Q02** · P32 · Implement independent QA and dependency-bound evidence _(needs Q01, A06, C03, H05, C08)_
-- [ ] **Q03** · P33 · Implement documentation impact and release evidence links _(needs Q02, C02)_
+- [x] **Q03** · P33 · Implement documentation impact and release evidence links _(needs Q02, C02)_
 - [ ] **Q04** · P33 · Implement defect tracking, review cycles and overrides _(needs Q02, C08)_
 
 </details>
