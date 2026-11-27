@@ -21048,3 +21048,45 @@ Merged origin/main e9a76804 first (clean, no conflicts).
 - Remote hosts cannot pass a `changedTests` check: the wire does not carry the list.
 - Landings do not expand the check.
 - The done note can list up to 50 clauses of 100 characters each (about 6,000 characters in the first message).
+
+### W09 second slice, first review (Claude agent, Opus 5.5, 2026-11-27 EST; card W09 NOT flipped; not pushed; no network, model or workflow)
+
+origin/main had not moved (34e45aec is the merge base), so there was nothing to merge.
+
+**Problems found and fixed.**
+- (High) **A test file's name could change how the check ran.** The host appends the built test paths to the check's command, as they are. So a file of the change named `--test-name-pattern=zzz.test.js` reached `node --test` as an option: it filtered out every test, and a failing test of the change exited 0. This was measured locally with node 22.
+  - Patterns had the same effect, because `node --test` expands its arguments as globs. With `g/[x].test.js`, the agent's own test, and a passing `g/x.test.js`, only the second one ran.
+  - `./` gives no way out: node's runner drops it and spawns the child with the bare option, which then waits on its input. `--` gives none either: `node --test --` waits on its input.
+  - Fix: `clause-tests.ts runnableName`. A path that starts with `-`, or holds any of `* ? [ ] { } ( ) ! \`, has no built file, so it is never appended. The done then fails closed, and the dispatcher's line now says why.
+  - A dash after a folder (`a/--b.test.js`) is a path to node, and stays.
+- (Medium) **A test that does not run could map a clause.** `.skip` and `.todo` names counted, and so did a test whose options object skips it (`{ skip: true }`, `{ todo: "..." }`, a reason text). So did a call on a line that starts as a comment (`//`, `/*` or a doc comment's `*`). Now none of them counts. A `false`, `0`, `null`, `undefined` or empty option still counts.
+  - The options and the line's start are read on bounded slices (300 characters after, 200 before), so the scan stays linear on a megabyte of hostile text.
+  - When a file declares no name that counts, the plan's gap line says that a skipped or todo test does not count.
+- **Weak tests strengthened** (each first survived a breakage):
+  - `sameTests` comparing the built file and the count.
+  - The dispatcher refusing more test files than one check runs as failed, not unknown.
+  - The start note listing all 50 clauses.
+  - A link whose target text reads as a test call giving no names.
+
+**Checked and found sound.**
+- The changed tests run through the same `checks.run` path as any contract check: the attempt's sandbox launcher (bubblewrap, no network), the owner's and the contract's limits, the timeout, the output bound and a fresh home and scratch. The command is argv, not a shell.
+  - Test names and PLAN.md are read from git blobs, never from the file system. The built file is only looked up, without following a link.
+  - `ls-tree` uses `--literal-pathspecs` and `--`. Paths come NUL-separated, and git never lists `..`.
+- A refused or unknown done counts toward the go-ons. The agent's own later contract change does not count (`#doneContract`). A remote host's report is rebuilt field by field, so it cannot supply a list.
+- 22,248 is exactly the largest fixed part `windowCanStartTask(36864, ...)` admits (22,249 is refused).
+- No bench `doneTests` file is held out or changed between its task's base and solution.
+- api-v1.md changes only the `contract.set` checks text and the floor figure.
+
+**Deliberate breakages (own, different from the implementer's 24).** 21 breakages of the built files, each restored by sha256. 19 were caught.
+- Neutral: the `.d.ts` exclusion in `isTestFile`, which is redundant, because the test-file pattern already cannot match `x.test.d.ts`.
+- Neutral: the clip's room for its dots. The longest single gap line found was 863 characters, under the 880 bound, so the clip is a backstop.
+
+**Runs** (one at a time through the test slot, the sandbox required, the offline guard, TMPDIR /tmp/claude-1000/w09s2-r1). The files: controller dispatch/*, planning/*, remote/*, context/*, api/start-route-change and chat/prompt-room; worker workspace/* and host/*; integration fixed-part-budget, w06-completion-rules, c06b-cache-stability, h12e-pi-cache, w05-done-verify and c07g-route-view; pi-adapter completion-rules and prompt-cache; scripts/pi-eval/*.test.mjs and scripts/w09-*.test.mjs (172 files).
+- Node 22.23.0: 3,895 tests, 3,893 passing, 0 failing, 2 Windows-only skips.
+- Node 24.21.0: the same.
+- `npm ci --ignore-scripts --offline`, `tsc --build --force`, api:docs:write (no change), check:deps, licenses:check and roadmap:check are clean, and plan.test passes 6 of 6.
+
+**Residual (not fixed).**
+- Tests inside a skipped `describe`, a `t.skip()` inside the body, a call after code on a comment line longer than 200 characters, and a block comment's inner lines that do not start with `*` still count. The check stays file- and name-level, as the slice says.
+- A stale built file, one not rebuilt after its source changed, runs if no build check comes before.
+- Other runners' option syntax is covered only by the leading-dash rule.

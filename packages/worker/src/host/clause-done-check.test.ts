@@ -52,6 +52,13 @@ test("a pass is not taken when the files differ after the run or cannot be liste
   got = await r.verify("a", scope, ask);
   assert.equal(got.checks[1]!.state, "not-run");
   assert.match(got.checks[1]!.reason ?? "", /could not be listed again/);
+  // First review: the same paths with another built file, or with another count beyond the listed ones, are different files too.
+  for (const changed of [{ ...one, files: [{ ...one.files[0]!, built: "dist/other.test.js" }] }, { ...one, files: [{ ...one.files[0]!, built: null }] }, { ...one, count: 2 }]) {
+    r = rig([one, changed]);
+    got = await r.verify("a", scope, ask);
+    assert.equal(got.checks[1]!.state, "not-run", JSON.stringify(changed));
+    assert.match(got.checks[1]!.reason ?? "", /different after they ran/);
+  }
   r = rig([one, other], (run) => (run[0] === "node" ? { state: "failed", exitCode: 1 } : { state: "passed", exitCode: 0 }));
   got = await r.verify("a", scope, ask);
   assert.equal(got.checks[1]!.state, "failed");

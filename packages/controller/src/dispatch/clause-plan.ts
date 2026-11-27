@@ -86,7 +86,7 @@ export function clausePlanProblem(criteria: readonly string[], report: ChangedTe
     if (v.kind === "missing") problems.push(`${c} has no step`);
     else if (v.kind === "unticked") problems.push(`${c}: its step is not ticked`);
     else if (v.kind === "no-file") problems.push(`${c}: its step names no test file of your change (they are ${report.files.slice(0, 4).map((f) => quoted(f.path, 120)).join(", ")}${report.files.length > 4 ? ` and ${report.files.length - 4} more` : ""})`);
-    else problems.push(`${c}: its step names ${quoted(v.file, 120)} but none of its tests by name in quotes${v.titles.length === 0 ? " (no test name was found in that file)" : ` (it declares ${v.titles.slice(0, 3).map((t) => quoted(t, 80)).join(", ")}${v.titles.length > 3 ? ` and ${v.titles.length - 3} more` : ""})`}`);
+    else problems.push(`${c}: its step names ${quoted(v.file, 120)} but none of its tests by name in quotes${v.titles.length === 0 ? " (no test name was found in that file; a skipped or todo test does not count)" : ` (it declares ${v.titles.slice(0, 3).map((t) => quoted(t, 80)).join(", ")}${v.titles.length > 3 ? ` and ${v.titles.length - 3} more` : ""})`}`);
   }
   if (failing === 0) return undefined;
   // Whole problems are dropped (and counted) until the line fits, so a cut never falls inside one; the cut below is the last resort for a single long one.

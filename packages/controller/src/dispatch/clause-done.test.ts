@@ -63,7 +63,7 @@ for (const backend of backends) {
       assert.equal(verdicts[0]!.state, "failed");
       assert.match(messages[0]!, /1\. Check "the tests your change adds" runs the test files your change adds or changes, and it adds or changes none \(a file named \*\.test\.\* or \*\.spec\.\*\): write tests for what the task asks and end again\./);
       assert.match(messages[0]!, /2\. The contract has 2 clause\(s\) \(C1 to C2\) and your change adds or changes no test file/);
-      assert.match(messages[1]!, /1\. Check "the tests your change adds" runs the built test files of your change, and 1 had no built file after the checks before it ran \(a TypeScript test under src\/ runs from dist\/\): "src\/chat\/commands\.test\.ts"\./);
+      assert.match(messages[1]!, /1\. Check "the tests your change adds" runs the built test files of your change, and 1 had no built file it can run after the checks before it ran \(a TypeScript test under src\/ runs from dist\/; a path that starts with - or holds any of .{15,30} is not run\): "src\/chat\/commands\.test\.ts"\./);
       assert.match(messages[2]!, /1\. Check "the tests your change adds" failed: it exited with code 1\. The end of its output \(quoted\): "not ok 1 - every cut offset # fail 1"\./, "the failing output goes back to the agent, bounded");
       assert.match(messages[3]!, /1\. PLAN\.md does not map 1 of the contract's 2 clause\(s\) to a test of your change: C2 \("A label is exactly quotedText\(label\)"\): its step is not ticked\./);
       // Each refusal counts toward the task's go-ons (W03, two): the first two say what to do, from the third the go-ons are used up (the attempt then ends blocked, never succeeded).
@@ -103,6 +103,25 @@ for (const backend of backends) {
     } finally { await store.close(); }
   });
 }
+
+test("first review: a change with more test files than one check runs is refused as failed (not unknown), and the start note lists every clause up to 50", async () => {
+  const store = await backends[0]!.open();
+  try {
+    const w = await buildWorld(store.storage);
+    const ann = await w.agent("ann", workGrants(w.project, []));
+    const { taskId } = await w.task("many", ann);
+    const fifty = Array.from({ length: 50 }, (_, i) => `clause number ${i + 1}`);
+    await contract(w, taskId, fifty);
+    const files = Array.from({ length: 50 }, (_, i) => ({ path: `src/t${String(i).padStart(2, "0")}.test.ts`, built: `dist/t${String(i).padStart(2, "0")}.test.js`, titles: ["x"] }));
+    w.worker.verify = async () => report({ tests: { count: 51, files, plan: { text: "" } }, run: { name: "the tests your change adds", state: "not-run", reason: "the change's test files cannot be run as they are" } });
+    let content = "";
+    const verdicts: DoneVerdict[] = [];
+    await turn(w, async (attemptId, c) => { content = c; verdicts.push(await w.dispatcher.verifyDone(w.dispatcherPrincipal, attemptId, { key: "k1" })); });
+    assert.equal(verdicts[0]!.state, "failed");
+    if (verdicts[0]!.state === "failed") assert.match(verdicts[0]!.message, /1\. Check "the tests your change adds" runs the test files your change adds or changes, and it has 51 of them, more than the 50 one check runs\./);
+    assert.ok(content.includes('C50 "clause number 50".') && content.includes("The contract has 50 clause(s)"), content.slice(-600));
+  } finally { await store.close(); }
+});
 
 test("the contract takes changedTests as true on one check at most; false, another value or a second one is refused; a landing's checks keep it", async () => {
   const store = await backends[0]!.open();

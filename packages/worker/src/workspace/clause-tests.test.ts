@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { GitBridge, LocalWorkspaces } from "./index.js";
-import { CLAUSE_TEST_LIMITS, builtCandidate, cutWhole, isTestFile, testTitles } from "./clause-tests.js";
+import { CLAUSE_TEST_LIMITS, builtCandidate, cutWhole, isTestFile, runnableName, testTitles } from "./clause-tests.js";
 
 // Card W09 second slice: the host side of the done check of the tests an agent's change adds or changes.
 const hasGit = (() => { try { execFileSync("git", ["--version"], { stdio: "ignore" }); return true; } catch { return false; } })();
@@ -28,7 +28,41 @@ test("the built file a test runs from: a JavaScript test itself, a TypeScript on
   assert.equal(builtCandidate("x.test.py"), undefined);
 });
 
-test("test names as written: test, it, describe, suite (and .only, .skip, .todo), in three quote styles, no repeats, in order; not a method or a near name", () => {
+test("first review: a path a test runner would read as an option or a pattern has no built file, so it is never appended to the check's command", () => {
+  for (const no of ["--test-name-pattern=zzz.test.js", "-x.test.js", "--x/src/a.test.ts", "-/a.test.mjs", "g/[x].test.js", "g/*.test.js", "g/?.test.js", "g/{a,b}.test.js", "g/!(a).test.js", "g/@(a).test.js", "g/a\\b.test.js", "src/{a}.test.ts"]) {
+    assert.equal(builtCandidate(no), undefined, no);
+    assert.equal(runnableName(no), false, no);
+  }
+  for (const yes of ["a/--b.test.js", "a/-b.test.js", "a b/c d.test.js", "a/b-c.test.js", "src/x.test.ts", "a/b=c.test.js", "a/b,c.test.js", "a/'q'.test.js", "a/b+c.test.js"]) assert.equal(runnableName(yes), true, yes);
+  assert.equal(builtCandidate("a/--b.test.js"), "a/--b.test.js", "a dash after a folder is a path to node --test, not an option");
+});
+
+test("first review: a skipped or todo test declares no name a clause can be mapped to (.skip, .todo, an options object that skips it) or a call on a line that starts as a comment; one whose option is off counts", () => {
+  const text = [
+    `test.skip("skipped", () => {}); it.todo("later"); describe.skip("whole group", () => {});`,
+    `test("opt skip", { skip: true }, () => {}); test('opt todo', { todo: "soon" }, () => {}); it("opt quoted", { "skip": 1 }, () => {});`,
+    `test("skip reason", { timeout: 10, skip: "not on this host" }, () => {});`,
+    `test("off", { skip: false }, () => {}); test("off too", { todo: 0, skip: undefined }, () => {}); test("empty reason", { skip: "" }, () => {});`,
+    `test("only kept", { only: true }, () => {}); test("a timeout", { timeout: 5 }, () => {}); test("named skipper", { skipper: true }, () => {});`,
+    `test("skipped", () => {});`,
+    `// test("commented out", () => {});`,
+    `  /* it("in a block comment", () => {}); */`,
+    `   * test("in a doc comment", () => {});`,
+    `\r// test("after a carriage return", () => {});`,
+    `const u = "a"; test("after code on the line", () => {});`,
+  ].join("\n");
+  assert.deepEqual(testTitles(text), ["off", "off too", "empty reason", "only kept", "a timeout", "named skipper", "skipped", "after code on the line"]);
+  assert.deepEqual(testTitles(`// test("first line, commented", () => {});\ntest("kept", () => {});`), ["kept"], "a comment on the first line");
+  assert.deepEqual(testTitles(`${"x".repeat(300)} // test("far along a long line", () => {});`), ["far along a long line"], "a long line's start is not looked at (bounded)");
+  // Bounded on hostile text: many calls with long option objects, none closed; and many calls on one long line.
+  for (const hostile of [`test("a", {${" skip".repeat(60)}`.repeat(Math.ceil((1024 * 1024) / 320)), `${" ".repeat(150)}test("a")`.repeat(Math.ceil((1024 * 1024) / 160))]) {
+    const t0 = performance.now();
+    testTitles(hostile);
+    assert.ok(performance.now() - t0 < 2000, `${Math.round(performance.now() - t0)} ms`);
+  }
+});
+
+test("test names as written: test, it, describe, suite (and .only; not .skip or .todo), in three quote styles, no repeats, in order; not a method or a near name", () => {
   const text = [
     `test("a long name is cut between whole characters and whole escapes", () => {});`,
     `  it('says \\'no\\' plainly', async () => {});`,
@@ -38,7 +72,7 @@ test("test names as written: test, it, describe, suite (and .only, .skip, .todo)
     `obj.test("not a test call"); contest("no"); attest("no"); $test("no"); testing("no");`,
     `test(name, () => {}); test(\`\`, () => {});`,
   ].join("\n");
-  assert.deepEqual(testTitles(text), ["a long name is cut between whole characters and whole escapes", "says \\'no\\' plainly", "a template ${x} name", "only one", "skipped", "later"]);
+  assert.deepEqual(testTitles(text), ["a long name is cut between whole characters and whole escapes", "says \\'no\\' plainly", "a template ${x} name", "only one"]);
 });
 
 test("test names are bounded: at most the limit, each cut between whole characters (a surrogate pair is never split)", () => {
@@ -134,6 +168,20 @@ test("changedTests lists the test files the change adds or changes (not deleted,
     await writeFile(join(c, "src", "big.test.ts"), `test("too big", () => {});\n${" ".repeat(CLAUSE_TEST_LIMITS.fileBytes)}`);
     const odd = await w.ws.changedTests(scope);
     assert.deepEqual(odd?.files.filter((f) => f.path === "src/link.test.ts" || f.path === "src/big.test.ts"), [{ path: "src/big.test.ts", built: null, titles: [] }, { path: "src/link.test.ts", built: null, titles: [] }]);
+    // First review: a link whose target text reads as a test call gives no names either (the link's blob is its target, never read as a file).
+    await symlink(`test("named in a link target", () => {})`, join(c, "src", "target.test.ts"));
+    assert.deepEqual((await w.ws.changedTests(scope))?.files.find((f) => f.path === "src/target.test.ts"), { path: "src/target.test.ts", built: null, titles: [] });
+    // First review: a test file whose name a runner reads as an option or a pattern is listed but has no built file (it is never appended), and a passing file the pattern would pick is not run in its place.
+    await writeFile(join(c, "--test-name-pattern=zzz.test.js"), `test("hides the rest", () => {});\n`);
+    await mkdir(join(c, "g"));
+    await writeFile(join(c, "g", "[x].test.js"), `test("the real one", () => {});\n`);
+    await writeFile(join(c, "g", "x.test.js"), `test("a stand-in", () => {});\n`);
+    const named = await w.ws.changedTests(scope);
+    assert.deepEqual(named?.files.filter((f) => !f.path.startsWith("src/") && !f.path.startsWith("scripts/")), [
+      { path: "--test-name-pattern=zzz.test.js", built: null, titles: ["hides the rest"] },
+      { path: "g/[x].test.js", built: null, titles: ["the real one"] },
+      { path: "g/x.test.js", built: "g/x.test.js", titles: ["a stand-in"] },
+    ]);
     // Reading changes nothing in the checkout.
     assert.equal(execFileSync("git", ["--git-dir", made.gitDir, "--work-tree", c, "status", "--porcelain", "--", "src/a.ts"], { encoding: "utf8" }).trim(), "M src/a.ts");
   } finally { await w.done(); }

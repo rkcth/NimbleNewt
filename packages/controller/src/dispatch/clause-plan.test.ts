@@ -59,7 +59,7 @@ test("no plan, no test file, a file with no names found: one line that says so",
   assert.match(clausePlanProblem(criteria, { count: 1, files, plan: { why: "there is no PLAN.md at the top of your checkout" } })!, /^The contract has 3 clause\(s\) \(C1 to C3\) and your PLAN\.md could not be read \("there is no PLAN\.md at the top of your checkout"\)/);
   assert.match(clausePlanProblem(criteria, report(GOOD, []))!, /^The contract has 3 clause\(s\) \(C1 to C3\) and your change adds or changes no test file/);
   const nameless = [{ path: "src/x.test.ts", built: "dist/x.test.js", titles: [] }];
-  assert.ok(clausePlanProblem(["c"], report("- [x] C1: src/x.test.ts \"t\"", nameless))!.includes("(no test name was found in that file)"));
+  assert.ok(clausePlanProblem(["c"], report("- [x] C1: src/x.test.ts \"t\"", nameless))!.includes("(no test name was found in that file; a skipped or todo test does not count)"));
 });
 
 test("hostile text is quoted once and bounded: clause words, paths and names with controls or a credential shape never reach the line raw, and the line stays within its bound at every size", () => {
