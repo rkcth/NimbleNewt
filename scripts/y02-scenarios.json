@@ -44,7 +44,8 @@
           "needs POSIX permissions and a non-root user",
           "symbolic links need privileges on Windows",
           "POSIX permissions",
-          "POSIX paths"
+          "POSIX paths",
+          "the simulated container is POSIX-shaped*"
         ]
       },
       "minTests": 45
