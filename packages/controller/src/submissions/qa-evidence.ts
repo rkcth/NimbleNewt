@@ -12,7 +12,7 @@ import type { Change, ControllerStorage, JsonObject } from "../storage/types.js"
 import { CONTRACT_WORK_FIELDS } from "./acceptance.js";
 import type { RolesOf, SubmissionBody } from "./submissions.js";
 import { overriddenFor } from "./review-citation.js";
-import { CONTRIBUTORS, principalOf, taskContributors } from "./contributors.js";
+import { CONTRIBUTORS, contributorsOf, principalOf, taskContributors } from "./contributors.js";
 import { dependencyChanges, dependencyChangesNow, dependencyChangeText, readDependencyBasis, type DependencyChange, type DependencyMemo } from "./dependency-basis.js";
 
 /** The four results a QA check can have (card Q02). They are kept apart: only `passed` passes; `failed`, `blocked` (could not be run: an environment or a dependency was missing) and `not-run` each fail the gate and are counted separately. */
@@ -928,8 +928,8 @@ export class QaEvidenceService {
 
   /**
    * The gate with the records its verdict was read from (card Q03): the task's evidence index, the contract and the decision reliance when they exist, and each independent record of the submission with
-   * the decisions it cites, and each re-check of the submission. A write that checks each at the revision read cannot be made on a verdict that changed meanwhile (new or invalidated evidence, a settled
-   * re-check, a changed contract, a superseded decision).
+   * the decisions it cites, and each re-check of the submission, and the task's contributor record (card Q04; with the project's code index when that record is missing or incomplete). A write that checks each
+   * at the revision read cannot be made on a verdict that changed meanwhile (new or invalidated evidence, a settled re-check, a changed contract, a superseded decision, a new contributor).
    * Not bound: a contract or a reliance that does not exist yet (the storage has no guard for absence) and the contract versions (never rewritten).
    */
   async gateBound(by: Principal, submissionIdValue: string): Promise<{ gate: QaGate; reads: readonly QaGateRead[] }> {
@@ -952,6 +952,11 @@ export class QaEvidenceService {
     // Bound like the evidence (second review): a write that relies on this gate (a document verified against this code) is refused when a code submission of the task changed its contributors in between.
     const contributorRecord = await this.#runner.get(CONTRIBUTORS, taskId);
     if (contributorRecord !== undefined) reads.push({ kind: CONTRIBUTORS, id: taskId, revision: contributorRecord.revision });
+    // A task whose record is missing (code from before it existed), unreadable or incomplete is read with the project's code index as well, which every code submission rewrites: bound too.
+    if (contributorsOf(contributorRecord)?.complete !== true) {
+      const codeIndex = await this.#runner.get("code-submission-index", task.projectId);
+      if (codeIndex !== undefined) reads.push({ kind: "code-submission-index", id: task.projectId, revision: codeIndex.revision });
+    }
     const byContributors: string[] = [];
     const contributed = new Set<string>();
     const usable: (QaEvidenceBody & { id: string })[] = [];

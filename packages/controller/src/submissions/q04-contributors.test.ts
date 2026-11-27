@@ -165,6 +165,8 @@ for (const backend of backends) {
       };
       await plantIndex([{ taskId: task, id: old, at: body.submittedAt, by: ann.id }]);
       assert.equal((await taskContributors(runner, project, task)).has(ann.id), true, "found through the project's code index");
+      const bound = (await QaEvidenceService.withEpoch(world.storage, projects.epoch, { rolesOf }, options).gateBound(owner, old)).reads;
+      assert.ok(bound.some((r) => r.kind === "code-submission-index" && r.id === project), "with no record, a write relying on the gate is bound to the code index it read contributors from");
       // An incomplete index that does not name Ann: Bob's next code submission seeds the task's record from one bounded scan of the table, which finds Ann's old code.
       await plantIndex([]);
       const subs = SubmissionService.withEpoch(world.storage, projects.epoch, rolesOf, options);
@@ -177,10 +179,13 @@ for (const backend of backends) {
       // A scan that cannot reach the end of the table marks the record incomplete, and readers then add the project's code index too.
       const t2 = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "T2" })).id;
       const tiny = SubmissionService.withEpoch(world.storage, projects.epoch, rolesOf, { ...options, waitingScan: { pageSize: 1, reads: 1 } });
-      await tiny.record(bob, { commandId: cid("code"), taskId: t2, kind: "code", role: "author", base: BASE, tree: tree(9), patchId: patch(9) });
+      const v2 = (await tiny.record(bob, { commandId: cid("code"), taskId: t2, kind: "code", role: "author", base: BASE, tree: tree(9), patchId: patch(9) })).id;
       assert.equal(((await runner.get(CONTRIBUTORS, t2))?.body as { complete?: boolean }).complete, false);
       await plantIndex([{ taskId: t2, id: old, at: body.submittedAt, by: ann.id }]);
       assert.equal((await taskContributors(runner, project, t2)).has(ann.id), true, "an incomplete record is read with the code index");
+      const reads2 = (await qa.gateBound(owner, v2)).reads;
+      assert.ok(reads2.some((r) => r.kind === "code-submission-index" && r.id === project) && reads2.some((r) => r.kind === CONTRIBUTORS && r.id === t2), "an incomplete record binds the code index as well");
+      assert.ok(!(await qa.gateBound(owner, v)).reads.some((r) => r.kind === "code-submission-index"), "a complete record does not");
       // The code index is read for this task only: an entry of another task of the project does not make its agent a contributor here.
       const cy = await agent("cy", ["qa"]);
       await plantIndex([{ taskId: task, id: old, at: body.submittedAt, by: cy.id }]);
