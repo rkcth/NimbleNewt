@@ -55,7 +55,7 @@ interface Ctx {
   a: string; storage: ControllerStorage; runner: CommandRunner;
   exps(): ExperimentService; adoptions(): AdoptionService;
   /** An experiment of project A proposed by dev, pinned by mgr, run twice and concluded `improved` by mgr. */
-  improved(proposer?: Principal): Promise<string>;
+  improved(proposer?: Principal, affectedKey?: string): Promise<string>;
   ask(experimentId: string, target?: Record<string, unknown>, by?: Principal): Promise<string>;
   takeBack(id: string, by?: Principal): Promise<void>;
   propose(by?: Principal): Promise<string>;
@@ -94,8 +94,8 @@ for (const backend of backends) {
         const runner = new CommandRunner(world.storage, epoch, options);
         const ctx: Ctx = {
           owner, mgr, mgr2, dev, dev2, reader, reader2, eve, a, storage: world.storage, runner, exps, adoptions,
-          improved: async (proposer = dev) => {
-            const id = (await exps().propose(proposer, { commandId: cid("x"), projectId: a, title: "Checklist prompt", proposal: PROPOSAL, affectedKey: `reviews ${n}` } as never)).id;
+          improved: async (proposer = dev, affectedKey = `reviews ${n}`) => {
+            const id = (await exps().propose(proposer, { commandId: cid("x"), projectId: a, title: "Checklist prompt", proposal: PROPOSAL, affectedKey } as never)).id;
             await exps().pin(mgr, { commandId: cid("p"), experimentId: id, expectedRevision: (await exps().get(owner, id))!.revision, criteria: CRITERIA } as never);
             for (let i = 0; i < 2; i++) await exps().recordRun(proposer === dev ? dev : owner, { commandId: cid("r"), experimentId: id, environment: { agentId: dev.id, revision: 1, observed: { "nimblenewt.guard": GUARD }, disposable: true }, cost: 1, metrics: GOOD, cases: [{ id: "c1", passed: true }] } as never);
             await exps().conclude(mgr, { commandId: cid("c"), experimentId: id, expectedRevision: (await exps().get(owner, id))!.revision, finding: "read the runs" });
@@ -254,6 +254,8 @@ for (const backend of backends) {
     for (const id of Object.keys(openNow)) assert.ok((ix["ids"] as string[]).includes(id), "an open experiment never leaves the list");
     assert.equal((await c.exps().get(c.reader, done))?.result?.verdict, "improved");
     assert.equal((await c.exps().list(c.reader, c.a, { limit: 1 }))!.archived, 1);
+    await c.exps().withdraw(c.dev, { commandId: cid("w"), experimentId: fresh, expectedRevision: (await c.exps().get(c.owner, fresh))!.revision, reason: "later" });
+    assert.equal((await c.index("experiment-index")).body["archived"], 1, "a withdrawal keeps the archived count");
     const adopted = await c.ask(done);
     assert.equal((await c.adoptions().get(c.owner, adopted))?.experimentId, done);
     assert.equal(await c.exps().get(c.eve, done), undefined, "no existence oracle for an archived experiment");
@@ -288,5 +290,90 @@ for (const backend of backends) {
     assert.equal((await c.exps().list(c.reader, c.a))!.archived, undefined);
     await c.propose(c.dev2);
     assert.equal((await c.index("experiment-index")).body["archived"], 1, "the damaged count is read as 0, and the proposal moves one more ended experiment out of the full list");
+  });
+
+  suite("adoptions: an adoption in force at the head of a full list never leaves it and is still consulted, monitored and withdrawn; one withdrawn by a regression is ended and may then leave; a damaged waiting map is rebuilt", async (c) => {
+    const exp = await c.improved();
+    const live = await c.ask(exp);
+    await c.adoptions().approve(c.mgr2, { commandId: cid("ap"), adoptionId: live, expectedRevision: (await c.adoptions().get(c.owner, live))!.revision, review: "the runs agree" });
+    const cur = (await c.index("adoption-index")).body;
+    // The in-force one is listed first, then 299 ended ones: the next request moves out the first ENDED one, not the one in force.
+    const old = fakeIds("adp", 299);
+    await c.setIndex("adoption-index", { ...cur, ids: [live, ...old] });
+    const t1 = await c.ask(exp, tool("toolbox.a"), c.reader2);
+    let ix = (await c.index("adoption-index")).body;
+    assert.deepEqual([(ix["ids"] as string[])[0], (ix["ids"] as string[]).includes(old[0]!), (ix["ids"] as string[]).length, ix["archived"]], [live, false, 300, 1]);
+    assert.equal((await c.adoptions().list(c.reader, c.a, { limit: 1 }))!.archived, 1);
+    assert.equal((await c.adoptions().inForce(c.reader, { projectId: c.a, experimentId: exp, target: PRACTICE }))?.adoptionId, live);
+    // Monitored; a regression withdraws it (ended), frees its open place, and the next full-list request may then move it out.
+    const report = await c.adoptions().monitor(c.mgr, { commandId: cid("m"), adoptionId: live, metrics: { timeToAcceptedSeconds: 200, reworkCount: 4, adoptionCount: 5 } });
+    assert.equal(report.status, "withdrawn");
+    ix = (await c.index("adoption-index")).body;
+    assert.equal(Object.values(ix["open"] as Record<string, string>).includes(live), false);
+    assert.equal(await c.adoptions().inForce(c.reader, { projectId: c.a, experimentId: exp, target: PRACTICE }), undefined);
+    await c.ask(exp, tool("toolbox.b"), c.reader2);
+    ix = (await c.index("adoption-index")).body;
+    assert.deepEqual([(ix["ids"] as string[]).includes(live), ix["archived"]], [false, 2]);
+    assert.equal((await c.adoptions().get(c.reader, live))?.status, "withdrawn", "archived, still readable by ID");
+    // A waiting map that is not a map (an array, a damaged store) is rebuilt from the records, not read as none waiting.
+    for (const t of ["toolbox.c", "toolbox.d", "toolbox.e"]) await c.ask(exp, tool(t), c.reader2);
+    await c.setIndex("adoption-index", { ...(await c.index("adoption-index")).body, waiting: [] });
+    await refuses("unavailable", () => c.ask(exp, tool("toolbox.f"), c.reader2), /5 adoption requests waiting/);
+    // An in-force adoption is still withdrawn by a manager after its list moved on.
+    const live2 = await c.ask(exp, PRACTICE);
+    await c.adoptions().approve(c.mgr2, { commandId: cid("ap"), adoptionId: live2, expectedRevision: (await c.adoptions().get(c.owner, live2))!.revision, review: "again" });
+    await c.setIndex("adoption-index", { ...(await c.index("adoption-index")).body, ids: [live2, ...fakeIds("adp", 299)] });
+    await c.ask(exp, tool("toolbox.g"));
+    assert.equal(((await c.index("adoption-index")).body["ids"] as string[])[0], live2);
+    await c.adoptions().withdraw(c.mgr, { commandId: cid("w"), adoptionId: live2, expectedRevision: (await c.adoptions().get(c.owner, live2))!.revision, reason: "done" });
+    assert.equal((await c.adoptions().get(c.owner, live2))?.status, "withdrawn");
+  });
+
+  suite("experiments: a paused experiment never leaves a full list; an archived improvement's savings stay counted; an older index longer than the window counts the unread IDs as open", async (c) => {
+    // Paused: its budget (3 runs) is used up. It is open, so a full list moves out the ended one after it, not it.
+    const paused = await c.propose();
+    await c.exps().pin(c.mgr, { commandId: cid("p"), experimentId: paused, expectedRevision: (await c.exps().get(c.owner, paused))!.revision, criteria: CRITERIA } as never);
+    for (let i = 0; i < 3; i++) await c.exps().recordRun(c.dev, { commandId: cid("r"), experimentId: paused, environment: { agentId: c.dev.id, revision: 1, observed: { "nimblenewt.guard": GUARD }, disposable: true }, cost: 1, metrics: GOOD, cases: [{ id: "c1", passed: true }] } as never);
+    assert.equal((await c.exps().get(c.owner, paused))?.status, "paused");
+    // An older index (no open map) is rebuilt from the records: a paused experiment counts as open.
+    await c.setIndex("experiment-index", { ids: [paused], claims: {} });
+    await c.propose(c.dev2);
+    assert.equal(((await c.index("experiment-index")).body["open"] as Record<string, string>)[paused], c.dev.id, "a paused experiment is open when an older index is rebuilt");
+    const done = await c.improved(c.dev2, "shared work");
+    let ix = (await c.index("experiment-index")).body;
+    const claimed = Object.entries(ix["claims"] as Record<string, string>).filter(([, v]) => v === done).map(([k]) => k);
+    assert.ok(claimed.length > 0, "the improvement claimed its savings");
+    await c.setIndex("experiment-index", { ...ix, ids: [paused, done, ...fakeIds("exp", 298)] });
+    await c.propose(c.dev2);
+    ix = (await c.index("experiment-index")).body;
+    assert.deepEqual([(ix["ids"] as string[])[0], (ix["ids"] as string[]).includes(done), ix["archived"]], [paused, false, 1]);
+    // The archived improvement keeps its claims: a later improvement over the same metric and work is recorded as not counted and names it.
+    for (const k of claimed) assert.equal((ix["claims"] as Record<string, string>)[k], done);
+    const later = await c.improved(c.dev2, "shared work");
+    const savings = (await c.exps().get(c.owner, later))?.result?.savings ?? [];
+    assert.equal((await c.index("experiment-index")).body["archived"], 2, "each full-list proposal moved one out; the pin and conclusion in between kept the count");
+    assert.ok(savings.length > 0 && savings.every((s) => !s.counted && s.duplicateOf === done), JSON.stringify(savings));
+    // The paused one is still raised, run and concluded by its ID.
+    await c.exps().raiseBudget(c.mgr, { commandId: cid("b"), experimentId: paused, expectedRevision: (await c.exps().get(c.owner, paused))!.revision, maxRuns: 4, maxCost: 40, reason: "one more" } as never);
+    assert.equal((await c.exps().get(c.owner, paused))?.status, "running");
+    // An older index (no open map) longer than the window: the IDs before the last 300 are not read and count as open, so none of them leaves the list.
+    // (301 listed: the running one first, outside the last 300; then 298 unreadable IDs, which count as open; then the two concluded ones, which leave.)
+    await c.setIndex("experiment-index", { ids: [paused, ...fakeIds("exp", 298), done, later], claims: {} });
+    const fresh = await c.propose(c.dev2);
+    ix = (await c.index("experiment-index")).body;
+    assert.deepEqual([(ix["ids"] as string[])[0], (ix["ids"] as string[]).length, (ix["ids"] as string[]).at(-1), ix["archived"], (ix["open"] as Record<string, string>)[paused]], [paused, 300, fresh, 2, ""]);
+    // The paused-then-running one counted as open in the rebuilt index, the ended ones are not.
+    await c.setIndex("experiment-index", { ids: [paused, done, later], claims: {} });
+    await c.propose(c.dev2);
+    ix = (await c.index("experiment-index")).body;
+    assert.deepEqual([(ix["open"] as Record<string, string>)[paused], (ix["open"] as Record<string, string>)[done], (ix["open"] as Record<string, string>)[later]], [c.dev.id, undefined, undefined]);
+    assert.equal((ix["waiting"] as Record<string, string>)[paused], undefined, "a running experiment does not wait for criteria");
+    // An index with the open map but no waiting map (a damaged store) is rebuilt too: the waiting proposal is found from its record.
+    const { waiting: _w, ...partial } = ix;
+    void _w;
+    await c.setIndex("experiment-index", partial);
+    await c.propose(c.dev2);
+    const w = (await c.index("experiment-index")).body["waiting"] as Record<string, string>;
+    assert.equal(Object.values(w).filter((x) => x === c.dev2.id).length, 2);
   });
 }

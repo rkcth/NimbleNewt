@@ -183,7 +183,7 @@ export class AdoptionService {
     return { revision: result.revision };
   }
 
-  /** Declines an asked adoption with a reason (a reviewer who could approve it, or its asker taking it back). It stays listed and the target is free for a new request. */
+  /** Declines an asked adoption with a reason (a reviewer who could approve it, or its asker taking it back). The target is free for a new request; the adoption is kept and stays listed until newer ones move it out (archived). */
   async decline(by: Principal, command: NoActor & { adoptionId: string; expectedRevision: number; reason: string }): Promise<{ revision: number }> {
     return this.#close(by, command, "adoption.decline", "requested", "declined");
   }
@@ -390,8 +390,9 @@ export class AdoptionService {
     const b = found?.body as unknown as IndexBody | undefined;
     if (found === undefined || b === undefined) return { ids: [], open: {}, waiting: {}, archived: 0, revision: 0 };
     const archived = typeof b.archived === "number" && Number.isSafeInteger(b.archived) && b.archived >= 0 ? b.archived : 0;
-    if (!writing || (b.waiting !== undefined && b.waiting !== null && typeof b.waiting === "object")) return { ids: b.ids, open: b.open, waiting: b.waiting ?? {}, archived, revision: found.revision };
-    // An index written before the retention slice: the asked adoptions are found among the open ones (at most ADOPTION_LIMITS.open reads), and written with the next change of the index.
+    const isMap = (m: unknown): m is Record<string, string> => m !== null && typeof m === "object" && !Array.isArray(m);
+    if (!writing || isMap(b.waiting)) return { ids: b.ids, open: b.open, waiting: isMap(b.waiting) ? b.waiting : {}, archived, revision: found.revision };
+    // An index written before the retention slice (or a damaged waiting map): the asked adoptions are found among the open ones (at most ADOPTION_LIMITS.open reads), and written with the next change of the index.
     const waiting: Record<string, string> = {};
     for (const openId of Object.values(b.open).slice(0, ADOPTION_LIMITS.open)) {
       const a = (await this.#runner.get("adoption", openId))?.body as unknown as AdoptionBody | undefined;

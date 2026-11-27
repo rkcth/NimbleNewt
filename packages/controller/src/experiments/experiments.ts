@@ -494,7 +494,10 @@ export class ExperimentService {
     // counts as open (it is never moved out of the list and takes a place in the limit), so a damaged record makes the rule stricter, not looser.
     const open: Record<string, string> = {};
     const waiting: Record<string, string> = {};
-    for (const listed of b.ids.slice(-EXPERIMENT_LIMITS.listed)) {
+    // A list longer than the window (no older controller wrote one; only a damaged store): the IDs before the window are not read and count as open too, so none of them can leave the list.
+    const unreadCount = Math.max(0, b.ids.length - EXPERIMENT_LIMITS.listed);
+    for (const unread of b.ids.slice(0, unreadCount)) open[unread] = "";
+    for (const listed of b.ids.slice(unreadCount)) {
       const e = (await this.#runner.get("experiment", listed))?.body as unknown as ExperimentBody | undefined;
       const proposer = typeof e?.proposedBy === "string" ? e.proposedBy : "";
       if (e === undefined || !ENDED.includes(e.status)) open[listed] = proposer;
