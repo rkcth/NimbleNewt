@@ -6,12 +6,15 @@ import type { Change, JsonObject } from "../storage/types.js";
  * code review and the review policy's choice of reviewer (card Q02 review: the settle rule of `qa-review-policy.ts`, whose definition this is):
  *
  * - every agent that submitted CODE on the task, in any earlier or later version and whatever became of it (approved, asked for changes, rejected, replaced by a newer version: each submitted version is work in
- *   the task's tree), and
- * - the agent that holds the task now (its assignment's owner): it is the one making the next version.
+ *   the task's tree).
  *
- * The scope is the task, not the project: work on one task does not make an agent a contributor of another. Agents are compared by principal ID (`agent:<id>`), which a rename does not change; an agent the task
- * was moved away from stays a contributor only by the code it submitted (holding the task once, without submitting, is not a contribution once it no longer holds it). The owner is never a contributor (the owner
- * cannot submit code), so nothing here changes what the owner may decide.
+ * Holding the task is not by itself a contribution (second review of the seventh slice): a local reviewer, QA or director worker reviews a task's code in an attempt of that very task (the owner transfers the task
+ * to it for the review, and the tool bridge records its review on its own task only, card Q01b), so counting the holder would refuse every such review. An agent that holds the task and submits code becomes a
+ * contributor by that submission, and everything it approved or passed before stops counting when read. Only the review policy's choice of reviewer (`withHolder`) also leaves out the agent holding the task now,
+ * as it did before this card: that agent is busy with the task.
+ *
+ * The scope is the task, not the project: work on one task does not make an agent a contributor of another. Agents are compared by principal ID (`agent:<id>`), which a rename does not change. The owner is never
+ * a contributor (the owner cannot submit code), so nothing here changes what the owner may decide.
  *
  * Storage: one record per task (`task-code-contributors`, keyed by the task ID) lists the submitters, written in the same write as each code submission, so reading it is one record, never a scan. A task whose
  * code was submitted before the record existed is seeded when its next code submission is written (`contributorChange`): from the project's code index, or, when that index does not cover every submission, one
@@ -42,24 +45,29 @@ async function indexed(runner: Reader, projectId: string, taskId: string): Promi
 }
 
 /**
- * Everyone that contributed to the task (see above), as principal IDs: the submitters of its code and the agent that holds it now, with `also` (submitters the caller already knows, such as the submitter of the
- * submission in question, or a scan's) added. Reads at most three records (the task's contributor record, the project's code index when the record is missing or incomplete, and the task's assignment).
+ * Everyone that contributed to the task (see above), as principal IDs: the submitters of its code, with `also` (submitters the caller already knows, such as the submitter of the submission in question, or a
+ * scan's) added, and with `withHolder` the agent that holds the task now as well (the review policy's choice of reviewer only). Reads at most three records (the task's contributor record, the project's code
+ * index when the record is missing or incomplete, and, with `withHolder`, the task's assignment).
  */
-export async function taskContributors(runner: Reader, projectId: string, taskId: string, also: readonly string[] = []): Promise<ReadonlySet<string>> {
+export async function taskContributors(runner: Reader, projectId: string, taskId: string, also: readonly string[] = [], options: { readonly withHolder?: boolean } = {}): Promise<ReadonlySet<string>> {
   const out = new Set(also.map(principalOf));
   const record = contributorsOf(await runner.get(CONTRIBUTORS, taskId));
   for (const id of record?.ids ?? []) out.add(principalOf(id));
   if (record === undefined || !record.complete) for (const id of await indexed(runner, projectId, taskId)) out.add(principalOf(id));
+  if (options.withHolder !== true) return out;
   // Only an agent owner holds the task as an agent (`isAgentOwner`): a person, role or team owner with the same name is someone else. An owner whose kind cannot be read is taken as an agent (fail closed).
   const held = ((await runner.get("assignment", assignmentIdOf(taskId)))?.body as { owner?: { kind?: unknown; id?: unknown } } | undefined)?.owner;
   if (typeof held?.id === "string" && held.id !== "" && (typeof held.kind !== "string" || held.kind === "agent")) out.add(principalOf(held.id));
   return out;
 }
 
-/** The plain reason given when a contributor's approval or evidence does not count (the owner may read it). */
-export const CONTRIBUTOR_APPROVAL_TEXT = "this agent already contributed code to this task, so it cannot approve it; another reviewer has to";
+/**
+ * The plain reason given when a contributor's approval does not count (the owner reads it in the status and the landing gate). It says the owner's way out too (second review: when every reviewer agent of the
+ * project contributed, no agent can approve and the owner does not record reviews): add a reviewer agent, or take review out of the project's required landing checks (`integration.set`, by chat as well).
+ */
+export const CONTRIBUTOR_APPROVAL_TEXT = "this agent already contributed code to this task, so it cannot approve it; another reviewer has to (with none left, the owner adds a reviewer agent or drops review from the required checks)";
 /** The same, for a director's sign-off approving the task's code. */
-export const CONTRIBUTOR_SIGNOFF_TEXT = "this agent already contributed code to this task, so it cannot sign it off; another director has to";
+export const CONTRIBUTOR_SIGNOFF_TEXT = "this agent already contributed code to this task, so it cannot sign it off; another director has to (with none left, the owner adds one or drops the director check from the required checks)";
 
 /**
  * The change that adds a code submission's submitter to its task's record, for the same write as the submission (`SubmissionService.record`). `seed` reads the submitters of code recorded before the record existed

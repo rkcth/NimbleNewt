@@ -11,8 +11,8 @@ import type { JsonObject } from "../storage/types.js";
 import { CONTRIBUTORS, CONTRIBUTORS_KEPT, contributorChange, taskContributors } from "./contributors.js";
 import { QaEvidenceService, SubmissionService, landingDirectorGate, type SubmissionBody } from "./index.js";
 
-// Card Q04, clause 4: "a QA agent that commits a fix becomes a contributor and cannot approve it". A contributor of a task is every agent that submitted code on it (any version, whatever became of it) and the
-// agent that holds it now (`contributors.ts`, the review policy's own definition). Its QA evidence is a self-check, never counted, and its approval of the task's code is refused (and, read later, does not count).
+// Card Q04, clause 4: "a QA agent that commits a fix becomes a contributor and cannot approve it". A contributor of a task is every agent that submitted code on it (any version, whatever became of it)
+// (`contributors.ts`; holding the task to review it is not a contribution, only the review policy's choice of reviewer also leaves the holder out). Its QA evidence is a self-check, never counted, and its approval of the task's code is refused (and, read later, does not count).
 
 after(stopServer);
 
@@ -111,17 +111,25 @@ for (const backend of backends) {
       await review(ann, other, u1, "approve");
       assert.equal((await subs.approvalOf(u1))?.approvedBy, ann.id);
 
-      // 9. The agent holding the task now is a contributor (the review policy's definition), named by its bare ID as assignments do; once the task moved away it is not (it submitted nothing).
+      // 9. Holding the task is not a contribution (second review): a local reviewer reviews in an attempt of the task itself (the owner transfers the task to it, card Q01b), so its evidence is independent
+      // and its approval counts. Only the review policy's choice of reviewer (`withHolder`) also leaves the holder out. Once the holder submits code, what it approved and passed before stops counting.
       const dee = await agent("dee", ["qa", "reviewer"]);
       const plant = async (kind: string, id: string, body: object): Promise<void> => {
         const found = await runner.get(kind, id);
         await runner.command("test.plant", { commandId: cid("plant"), actor: owner.id }, async () => ({ payload: { kind, id, n: cid("x") }, build: async () => ({ ref: { kind, id }, creates: found === undefined, changes: [found === undefined ? { type: "create" as const, ref: { kind, id }, body: body as JsonObject } : { type: "update" as const, ref: { kind, id }, expectedRevision: found.revision, body: body as JsonObject }], detail: {} }) }));
       };
       await plant("assignment", assignmentIdOf(other), { taskId: other, owner: { id: "dee" } });
-      assert.equal((await evidence(dee, u1)).source, "self", "the holder's evidence is a self-check");
-      await refuses("forbidden", () => review(dee, other, u1, "approve"), CONTRIBUTED);
-      await plant("assignment", assignmentIdOf(other), { taskId: other, owner: { id: "bob" } });
-      assert.equal((await evidence(dee, u1)).source, "independent", "no longer holding it and having submitted nothing, it is not a contributor");
+      assert.equal((await evidence(dee, u1)).source, "independent", "the holder that submitted nothing checks independently");
+      assert.equal((await taskContributors(runner, project, other)).has(dee.id), false);
+      assert.equal((await taskContributors(runner, project, other, [], { withHolder: true })).has(dee.id), true, "the review policy's pick still leaves the holder out");
+      await review(dee, other, u1, "approve");
+      assert.equal((await subs.approvalOf(u1))?.approvedBy, dee.id, "the holder's review approval counts");
+      roles.set(dee.id, ["author", "qa", "reviewer"]);
+      await code(dee, other, 9);
+      const after9 = await subs.approvalOf(u1);
+      assert.equal(after9?.approved, false, "once the holder submits code, its earlier approval stops counting");
+      assert.match(after9?.reason ?? "", CONTRIBUTED);
+      assert.match(after9?.reason ?? "", /with none left, the owner adds a reviewer agent or drops review from the required checks/, "the owner is told its way out");
     } finally { await world.close(); }
   });
 
@@ -191,6 +199,12 @@ for (const backend of backends) {
       roles.set(eve.id, ["author"]);
       await subs.record(eve, { commandId: cid("code"), taskId: p2new, kind: "code", role: "author", base: BASE, tree: tree(10), patchId: patch(10) });
       assert.equal(((await runner.get("code-submission-index", p2))?.body as { contributorsRecorded?: boolean }).contributorsRecorded, undefined, "seeded over older code: not marked");
+      // Second review: the seed is the task's own. The scan found Ann's old code of another task of P2 and left it out; the next new task is seeded from P2's complete index, again for its own task only.
+      assert.deepEqual((await runner.get(CONTRIBUTORS, p2new))?.body, { taskId: p2new, ids: [eve.id], complete: true }, "a seed scan reads this task's code only");
+      const p2third = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: p2, title: "Third" })).id;
+      assert.equal(((await runner.get("code-submission-index", p2))?.body as { complete?: boolean }).complete, true);
+      await subs.record(eve, { commandId: cid("code"), taskId: p2third, kind: "code", role: "author", base: BASE, tree: tree(11), patchId: patch(11) });
+      assert.deepEqual((await runner.get(CONTRIBUTORS, p2third))?.body, { taskId: p2third, ids: [eve.id], complete: true }, "a seed from the index reads this task's entries only");
     } finally { await world.close(); }
   });
 
@@ -237,10 +251,12 @@ for (const backend of backends) {
       assert.equal(g1.verdict, "failed", "a later contributor's failure is not dropped");
       assert.ok(g1.reasons.includes("check_failed"), g1.reasons.join(","));
       assert.deepEqual(g1.byContributors, [failing.id]);
+      assert.ok((await qa.gateBound(owner, v1)).reads.some((r) => r.kind === CONTRIBUTORS && r.id === task), "a write relying on the gate is bound to who contributed");
       // 3. His sign-off of v1, given before he contributed, does not count now (plain words), and a new approving sign-off is refused; a decline is still taken.
       const a1 = await subs.approvalOf(v1);
       assert.equal(a1?.director, undefined);
       assert.match(a1?.directorNotCounted?.reason ?? "", /already contributed code to this task, so it cannot sign it off/);
+      assert.match(a1?.directorNotCounted?.reason ?? "", /with none left, the owner adds one or drops the director check from the required checks/, "the owner is told its way out");
       const view = await landingDirectorGate(subs)(v1);
       assert.equal(view?.signoff, undefined);
       assert.match(view?.notCounted ?? "", /cannot sign it off; another director has to/, "the landing gate's reader is told why");
@@ -261,7 +277,7 @@ for (const backend of backends) {
       await code(bob, t4, 5);
       assert.deepEqual((await runner.get(CONTRIBUTORS, t4))?.body, { taskId: t4, ids: [bob.id], complete: true }, "no scan, and nothing missed");
 
-      // 5. Only an agent owner holds the task as an agent: a person or role owner with Dan's name is someone else; an agent owner (bare or principal ID) is Dan.
+      // 5. For the review policy's pick (`withHolder`), only an agent owner holds the task as an agent: a person or role owner with Dan's name is someone else; an agent owner (bare or principal ID) is Dan.
       const plant = async (body: object): Promise<void> => {
         const id = assignmentIdOf(t2);
         const found = await runner.get("assignment", id);
@@ -269,17 +285,68 @@ for (const backend of backends) {
       };
       for (const kind of ["person", "role", "team"]) {
         await plant({ taskId: t2, owner: { kind, id: "dan" } });
-        assert.equal((await taskContributors(runner, project, t2)).has(dan.id), false, `a ${kind} owner named dan is not the agent dan`);
+        assert.equal((await taskContributors(runner, project, t2, [], { withHolder: true })).has(dan.id), false, `a ${kind} owner named dan is not the agent dan`);
       }
       for (const id of ["dan", dan.id]) {
         await plant({ taskId: t2, owner: { kind: "agent", id } });
-        assert.equal((await taskContributors(runner, project, t2)).has(dan.id), true, `an agent owner ${id}`);
+        assert.equal((await taskContributors(runner, project, t2, [], { withHolder: true })).has(dan.id), true, `an agent owner ${id}`);
+        assert.equal((await taskContributors(runner, project, t2)).has(dan.id), false, `holding is not a contribution where approvals and evidence are counted (${id})`);
       }
 
       // 6. Two agents submit code on one new task at the same moment: the write that lost is built again, so neither is lost from the task's record.
       const t5 = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "T5" })).id;
       await Promise.all([code(bob, t5, 6), code(cal, t5, 7)]);
       assert.deepEqual(((await runner.get(CONTRIBUTORS, t5))?.body as { ids?: string[] }).ids, [bob.id, cal.id].sort());
+    } finally { await world.close(); }
+  });
+
+  test(`${backend.name}: a source that later contributed is not counted towards the sources a check needs, and an approval carried over by an unchanged patch stops counting when its reviewer contributes (card Q04 second review)`, async () => {
+    const world = await backend.open();
+    try {
+      const projects = await ProjectService.open(world.storage, { holder: "c1", ...options });
+      const principals = PrincipalService.withEpoch(world.storage, projects.epoch, options);
+      const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
+      const project = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "P" })).id;
+      const task = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "T" })).id;
+      const roles = new Map<string, string[]>();
+      const agent = async (nm: string, held: string[]): Promise<Principal> => {
+        await principals.enroll(owner, { commandId: cid("e"), kind: "agent", name: nm, grants: [{ action: "task.read", project }] });
+        const p = await principals.authenticate((await principals.issueCredential(owner, `agent:${nm}`)).token);
+        roles.set(p.id, held);
+        return p;
+      };
+      const rolesOf = async (id: string): Promise<readonly string[]> => roles.get(id) ?? [];
+      const subs = SubmissionService.withEpoch(world.storage, projects.epoch, rolesOf, options);
+      // The project's review policy asks for two independent sources per check.
+      const qa = QaEvidenceService.withEpoch(world.storage, projects.epoch, { rolesOf, policy: async () => ({ requiredChecks: [], independentSources: 2 }) }, options);
+      const bob = await agent("bob", ["author"]);
+      const ann = await agent("ann", ["author", "qa", "reviewer"]);
+      const cal = await agent("cal", ["qa", "reviewer"]);
+      const dan = await agent("dan", ["qa", "reviewer"]);
+      const code = async (by: Principal, k: number, p = k, base = BASE): Promise<string> => (await subs.record(by, { commandId: cid("code"), taskId: task, kind: "code", role: "author", base, tree: tree(k), patchId: patch(p) })).id;
+      const evidence = (by: Principal, submissionId: string) => qa.record(by, { commandId: cid("qae"), submissionId, criteriaRevision: 0, environment: "linux", observedAt: "2026-11-26T09:00:00.000Z", checks: [{ name: "unit", result: "passed" }] });
+
+      // 1. Cal and Ann (both independent then) pass "unit" on Bob's v1: two sources, the gate passes. Ann also approves v1.
+      const v1 = await code(bob, 1);
+      await evidence(cal, v1);
+      await evidence(ann, v1);
+      assert.equal((await qa.gate(owner, v1)).verdict, "passed");
+      await subs.record(ann, { commandId: cid("rev"), taskId: task, kind: "review", role: "reviewer", subject: v1, verdict: "approve" });
+      // 2. Bob rebases: the same patch on another base carries Ann's approval over (card Q02).
+      const v1b = await code(bob, 2, 1, "d".repeat(40));
+      assert.deepEqual([(await subs.approvalOf(v1b))?.approved, (await subs.approvalOf(v1b))?.carriedFrom], [true, v1]);
+      // 3. Ann submits code on the task: her pass is no longer a source (one source left: fewer than two), and her approval, carried or not, no longer counts.
+      await code(ann, 3);
+      const g = await qa.gate(owner, v1);
+      assert.equal(g.verdict, "failed");
+      assert.ok(g.reasons.includes("fewer_sources"), g.reasons.join(","));
+      assert.deepEqual(g.shortfalls, [{ check: "unit", sources: 1 }]);
+      const carried = await subs.approvalOf(v1b);
+      assert.equal(carried?.approved, false, "a carried approval by a later contributor does not count");
+      assert.match(carried?.reason ?? "", CONTRIBUTED);
+      // 4. Dan, who never contributed, adds the second source: the gate passes again.
+      await evidence(dan, v1);
+      assert.equal((await qa.gate(owner, v1)).verdict, "passed");
     } finally { await world.close(); }
   });
 }

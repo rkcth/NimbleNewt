@@ -565,7 +565,7 @@ export class QaReviewService {
 
   /** Eligible reviewers for a task, least loaded first (`prefer`, the reviewer whose approval stopped counting, first when still eligible): never the submitters of its code, never the agent that holds it now. */
   async #pick(projectId: string, taskId: string, info: { submittedBy: string; contributors: readonly string[] }, load: ReadonlyMap<string, number>, reviewers: (worker: string) => Promise<readonly string[]>, prefer?: string): Promise<string | undefined> {
-    const excluded = await taskContributors(this.#runner, projectId, taskId, [...info.contributors, info.submittedBy]);
+    const excluded = await taskContributors(this.#runner, projectId, taskId, [...info.contributors, info.submittedBy], { withHolder: true });
     const pool = (await reviewers(info.submittedBy)).filter((r) => !excluded.has(principalOf(r)));
     pool.sort((a, b) => (load.get(a) ?? 0) - (load.get(b) ?? 0) || (a < b ? -1 : a > b ? 1 : 0));
     return prefer !== undefined && pool.includes(prefer) ? prefer : pool[0];
@@ -574,18 +574,19 @@ export class QaReviewService {
   async #stillEligible(r: QaReviewRequestBody, info: { submittedBy: string; contributors: readonly string[] }, reviewers: (worker: string) => Promise<readonly string[]>): Promise<boolean> {
     if (r.assignee === undefined) return false;
     const pool = await reviewers(info.submittedBy);
-    const excluded = await taskContributors(this.#runner, r.projectId, r.taskId, [...info.contributors, info.submittedBy]);
+    const excluded = await taskContributors(this.#runner, r.projectId, r.taskId, [...info.contributors, info.submittedBy], { withHolder: true });
     return pool.includes(r.assignee) && !excluded.has(principalOf(r.assignee));
   }
 
   /**
    * Independent QA evidence recorded on the request's submission after the request was made, by someone who did not work on the task (not a submitter of its code, not the agent that holds it now: the one
-   * definition of `contributors.ts`, card Q04): its ID. Evidence by a contributor does not count for the QA gate either (card Q04), so it never settles the request.
+   * definition of `contributors.ts` with `withHolder`, card Q04): its ID. Evidence by a submitter does not count for the QA gate either (card Q04), so it never settles the request; evidence by the agent holding
+   * the task counts for the gate as before, but it is not the independent review the policy asked for, so the request stays open for its reviewer.
    */
   async #independentEvidence(r: Pick<QaReviewRequestBody, "projectId" | "taskId" | "submissionId" | "createdAt">, info: { submittedBy: string; contributors: readonly string[] } | undefined): Promise<string | undefined> {
     const ids = ((await this.#runner.get("qa-evidence-index", r.taskId))?.body as unknown as { ids?: string[] } | undefined)?.ids ?? [];
     const submitter = ((await this.#runner.get("submission", r.submissionId))?.body as { submittedBy?: string } | undefined)?.submittedBy;
-    const excluded = await taskContributors(this.#runner, r.projectId, r.taskId, [...(info?.contributors ?? []), ...(info === undefined ? [] : [info.submittedBy]), ...(submitter === undefined ? [] : [submitter])]);
+    const excluded = await taskContributors(this.#runner, r.projectId, r.taskId, [...(info?.contributors ?? []), ...(info === undefined ? [] : [info.submittedBy]), ...(submitter === undefined ? [] : [submitter])], { withHolder: true });
     for (const id of [...ids].reverse().slice(0, 100)) {
       const e = (await this.#runner.get("qa-evidence", id))?.body as unknown as QaEvidenceBody | undefined;
       if (e !== undefined && e.submissionId === r.submissionId && e.source === "independent" && e.recordedAt >= r.createdAt && !excluded.has(principalOf(e.recordedBy))) return id;

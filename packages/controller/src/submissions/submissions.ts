@@ -496,7 +496,7 @@ export class SubmissionService {
           citeChecks = [...read.changes];
           body = { ...body, decisionVersions: read.versions };
         }
-        // Card Q04: an agent that contributed code to the task (any version of it, or holds it now) cannot approve it, as the author of the version cannot. Checked here, after the runner looked for a repeat, so a
+        // Card Q04: an agent that contributed code to the task (any version of it) cannot approve it, as the author of the version cannot. Checked here, after the runner looked for a repeat, so a
         // repeat of an approval recorded before still answers with that record. The task's contributor record is checked by the write, so a code submission of the reviewer at the same moment builds this again.
         // The same holds for a director's sign-off approving code (the director's own landing approval): a decline only holds the work back and is still taken.
         let contributorCheck: Change[] = [];
@@ -895,7 +895,7 @@ export class SubmissionService {
     const signoffNotCounted = lastSignoff !== undefined && lastSignoff.decision === "approve" && await contributes(lastSignoff.by);
     const base = { submissionId, ...(carriedFrom === undefined ? {} : { carriedFrom }), taskId: found.taskId, projectId: found.projectId, base: found.base, tree: found.tree, ...(found.patchId === undefined ? {} : { patchId: found.patchId }), submittedBy: found.submittedBy, submittedAt: found.submittedAt, ...(Array.isArray(found.evidence) && found.evidence.length > 0 ? { evidence: found.evidence } : {}), ...(lastSignoff === undefined ? {} : signoffNotCounted ? { directorNotCounted: { by: lastSignoff.by, signoffId: lastSignoff.id, reason: `the sign-off by ${lastSignoff.by} does not count: ${CONTRIBUTOR_SIGNOFF_TEXT}` } } : { director: { newest: lastSignoff.decision, by: lastSignoff.by, signoffId: lastSignoff.id } }) };
     if (newest !== undefined && ownCarried && newest.verdict === "approve") return { ...base, approved: false, reason: `the approval that would carry over from ${carriedFrom} was given by this submission's own submitter; another reviewer has to approve it` };
-    // Card Q04: an approval by an agent that contributed code to the task (any version, or holds it now) does not count, read now from the task's current contributors (so an approval recorded before this rule, or
+    // Card Q04: an approval by an agent that contributed code to the task (any version) does not count, read now from the task's current contributors (so an approval recorded before this rule, or
     // by an agent that contributed after it approved, does not count either). It reads as waiting for review: another reviewer has to approve it.
     if (newest !== undefined && newest.verdict === "approve" && await contributes(newest.by)) {
       return { ...base, approved: false, reason: `the approval by ${newest.by} does not count: ${CONTRIBUTOR_APPROVAL_TEXT}` };

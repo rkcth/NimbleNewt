@@ -306,7 +306,7 @@ export class LandingGate {
     try { a = await this.#deps.approvalOf(call.submissionId); g = await this.#deps.directorGate(call.submissionId); } catch (error) { return no("not_run", `the director sign-off could not be read: ${errorText(error)}`); }
     if (a === undefined || a.taskId !== call.taskId || before === undefined) return no("not_run", `${call.submissionId} is not a code submission of this task`);
     if (g === undefined || g.submissionId !== call.submissionId || g.taskId !== call.taskId || g.tree !== a.tree) return no("not_run", `the director sign-off of ${call.submissionId} could not be read for the tree it names`);
-    if (g.signoff === undefined && typeof g.notCounted === "string") return no("not_run", `no director sign-off of ${call.submissionId} counts yet: ${g.notCounted}`);
+    if (g.signoff === undefined && typeof g.notCounted === "string") return no("not_run", `no director sign-off counts yet: ${g.notCounted}`);
     if (g.signoff === undefined) return no("not_run", `no director has signed off on ${call.submissionId} yet`);
     if (g.signoff.newest !== "approve") return no("fail", `the newest director sign-off of ${call.submissionId} (by ${String(g.signoff.by)}) declines it`);
     const computed = typeof report.reviewedPatchId === "string" && PATCH.test(report.reviewedPatchId) && a.base === before.base && a.tree === before.tree ? report.reviewedPatchId : undefined;

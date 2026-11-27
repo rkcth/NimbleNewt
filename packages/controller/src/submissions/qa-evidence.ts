@@ -12,7 +12,7 @@ import type { Change, ControllerStorage, JsonObject } from "../storage/types.js"
 import { CONTRACT_WORK_FIELDS } from "./acceptance.js";
 import type { RolesOf, SubmissionBody } from "./submissions.js";
 import { overriddenFor } from "./review-citation.js";
-import { principalOf, taskContributors } from "./contributors.js";
+import { CONTRIBUTORS, principalOf, taskContributors } from "./contributors.js";
 import { dependencyChanges, dependencyChangesNow, dependencyChangeText, readDependencyBasis, type DependencyChange, type DependencyMemo } from "./dependency-basis.js";
 
 /** The four results a QA check can have (card Q02). They are kept apart: only `passed` passes; `failed`, `blocked` (could not be run: an environment or a dependency was missing) and `not-run` each fail the gate and are counted separately. */
@@ -38,7 +38,7 @@ export interface QaEvidenceBody {
   readonly submissionId: string;
   readonly tree: string;
   /**
-   * `self` when the author of the submission, or another contributor of the task (card Q04: an agent that submitted any version of the task's code, or holds the task now), recorded it (a self-check: kept,
+   * `self` when the author of the submission, or another contributor of the task (card Q04: an agent that submitted any version of the task's code), recorded it (a self-check: kept,
    * never counted by the gate); `independent` for the owner or a qa or reviewer agent that did not contribute. Kept as recorded; the gate also leaves out "independent" evidence of an agent that is a contributor when the gate is read.
    */
   readonly source: "self" | "independent";
@@ -116,7 +116,7 @@ export interface QaGate {
   readonly sourcesNeeded?: number;
   readonly shortfalls?: readonly { readonly check: string; readonly sources: number }[];
   /**
-   * Card Q04: evidence on this submission recorded as independent by an agent that contributed code to the task (submitted any version of it, or holds it now), read at the time of the gate. Its passes are not
+   * Card Q04: evidence on this submission recorded as independent by an agent that contributed code to the task (submitted any version of it), read at the time of the gate. Its passes are not
    * counted (a contributor cannot pass its own fix); what it found failed, blocked or not run still counts. Absent when there is none.
    */
   readonly byContributors?: readonly string[];
@@ -368,7 +368,7 @@ export class QaEvidenceService {
         }
         if (task.state === "cancelled") throw new DomainError("invalid_command", "the task is cancelled");
         if (ms > Date.parse(this.#runner.now()) + QA_LIMITS.skewMs) bad("observedAt", "is in the future");
-        // Card Q04: an agent that contributed code to the task (submitted any version of it, or holds it now; `contributors.ts`) records a self-check, never independent evidence: it cannot pass its own fix.
+        // Card Q04: an agent that contributed code to the task (submitted any version of it; `contributors.ts`) records a self-check, never independent evidence: it cannot pass its own fix.
         const self = by.id === sub.submittedBy || (by.kind === "agent" && (await taskContributors(this.#runner, task.projectId, taskId, [sub.submittedBy])).has(principalOf(by.id)));
         if (by.kind === "agent" && !self) {
           const roles = await this.#ports.rolesOf(by.id, { projectId: task.projectId, taskId }, by);
@@ -949,6 +949,9 @@ export class QaEvidenceService {
     const carriedUsed = new Set<string>();
     // Card Q04: who contributed to the task, read now (`contributors.ts`): independent evidence recorded by one of them (before the rule existed, or by an agent that contributed after it recorded) is not counted.
     const contributors = await taskContributors(this.#runner, task.projectId, taskId, [sub.submittedBy]);
+    // Bound like the evidence (second review): a write that relies on this gate (a document verified against this code) is refused when a code submission of the task changed its contributors in between.
+    const contributorRecord = await this.#runner.get(CONTRIBUTORS, taskId);
+    if (contributorRecord !== undefined) reads.push({ kind: CONTRIBUTORS, id: taskId, revision: contributorRecord.revision });
     const byContributors: string[] = [];
     const contributed = new Set<string>();
     const usable: (QaEvidenceBody & { id: string })[] = [];
