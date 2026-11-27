@@ -172,7 +172,7 @@ export interface StandupOptions extends RunnerOptions {
   readonly scanPages?: number;
 }
 
-export const STANDUP_LIMITS = { section: 25, statements: 10, statement: 500, coverageMax: 168, coverageDefault: 24, prepareDefault: 60, durationDefault: 30, retries: 8, page: 100, priorities: 5, agendaPage: 50, ownerLines: 25, ownerAnswers: 5, activeScan: 2000, perProject: 200 } as const;
+export const STANDUP_LIMITS = { section: 25, outcomeShare: 20, statements: 10, statement: 500, coverageMax: 168, coverageDefault: 24, prepareDefault: 60, durationDefault: 30, retries: 8, page: 100, priorities: 5, agendaPage: 50, ownerLines: 25, ownerAnswers: 5, activeScan: 2000, perProject: 200 } as const;
 
 /**
  * One stand-up of a project, as the stand-ups status answer tells it (card M03h): the schedule as it stands, and the two meetings the owner asks about — the one coming up next and the last one this stand-up made. Everything on these lines
@@ -1055,11 +1055,15 @@ export class StandupService {
     // A kept told line is never the one cut (it came from a stored brief, so there are at most as many as the limit): other advice lines that grew since give way, in order, and wait for the next brief.
     // Then an outcome waiting to be told (B03 second slice, second review): open questions the agent asked (up to ten per task) come first in the section and stay open, so with them first in the cut an
     // agent with many open questions was never told an outcome in any brief. Outcomes are kept oldest first; the lines keep their order in the brief.
-    const outcomeLine = (e: BriefEntry): boolean => e.cites.length === 1 && (e.cites[0]!.kind === "lesson" || e.cites[0]!.kind === "improvement-item");
+    // Re-check: outcomes (told lines included) take at most STANDUP_LIMITS.outcomeShare places while other advice waits, so a backlog of outcomes (up to 1000 lessons) does not cut every open question and the
+    // waiting-messages line for many meetings in turn; room the other lines leave is still used by outcomes.
+    const isOutcome = (e: BriefEntry): boolean => e.cites.length === 1 && (e.cites[0]!.kind === "lesson" || e.cites[0]!.kind === "improvement-item");
     for (const s of BRIEF_SECTIONS) if (sections[s].length > STANDUP_LIMITS.section) {
       more[s] = sections[s].length - STANDUP_LIMITS.section;
       const keep = new Set<BriefEntry>();
-      const ranked = s === "advice" ? [...sections[s].filter((e) => toldLines.has(e)), ...sections[s].filter((e) => !toldLines.has(e) && outcomeLine(e)), ...sections[s].filter((e) => !toldLines.has(e) && !outcomeLine(e))] : sections[s];
+      const outcomes = sections[s].filter((e) => !toldLines.has(e) && isOutcome(e));
+      const first = Math.max(0, STANDUP_LIMITS.outcomeShare - toldLines.size);
+      const ranked = s === "advice" ? [...sections[s].filter((e) => toldLines.has(e)), ...outcomes.slice(0, first), ...sections[s].filter((e) => !toldLines.has(e) && !isOutcome(e)), ...outcomes.slice(first)] : sections[s];
       for (const e of ranked) { if (keep.size >= STANDUP_LIMITS.section) break; keep.add(e); }
       sections[s] = sections[s].filter((e) => keep.has(e));
     }

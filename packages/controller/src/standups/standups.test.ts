@@ -918,7 +918,8 @@ for (const backend of backends) {
     assert.deepEqual(A2.advice.filter((e) => e.cites[0]!.id === L || e.cites[0]!.id === I).map((e) => e.cites[0]!.id).sort(), [I, L]);
     assert.equal(A2.advice.length, 25);
     assert.deepEqual(told, []);
-    // Then 25 newer outcomes wait (more than there is room for beside the two told lines): the told lines stay, the oldest 23 new ones are carried and told, the last two are cut and not marked; no question is left.
+    // Then 25 newer outcomes wait (more than there is room for beside the two told lines): the told lines stay, outcomes take at most 20 places (re-check: so a backlog does not cut every open question),
+    // so the oldest 18 new ones are carried and told, the other 7 are cut and not marked, and the first 5 questions keep their places.
     const later: string[] = [];
     for (let i = 0; i < 25; i++) { const id = `lsn-${"b".repeat(18)}${String.fromCharCode(97 + Math.floor(i / 26))}${String.fromCharCode(97 + (i % 26))}`; later.push(id); await c.put("lesson", id, lessonBody(id, `Later lesson ${i}`)); }
     await update("lesson-index", c.a, { ids: [L, ...later] });
@@ -928,23 +929,39 @@ for (const backend of backends) {
     const full = (await c.standups.briefs(c.owner, w.occ)).find((b) => b.agent === c.pA) as unknown as BriefBody;
     assert.equal(full.advice.length, 25);
     assert.deepEqual(full.advice.filter((e) => e.cites.some((x) => x.id === L || x.id === I)).map((e) => e.cites[0]!.id).sort(), [I, L], "a told line is never the one cut");
-    assert.deepEqual(full.advice.filter((e) => later.includes(e.cites[0]!.id)).map((e) => e.cites[0]!.id), later.slice(0, 23));
-    assert.equal(full.advice.filter((e) => e.cites[0]!.kind === "inquiry").length, 0);
-    assert.ok((full.more.advice ?? 0) >= 27, JSON.stringify(full.more));
-    assert.deepEqual(told.sort(), later.slice(0, 23).sort(), "the two cut-off outcomes are not marked told");
-    // Prepared again for this meeting, all 25 lines are told lines, so nothing new fits and nothing is marked; the two cut off are told in the next meeting's brief.
-    for (const id of later.slice(0, 23)) await update("lesson", id, { outcomePending: false });
+    assert.deepEqual(full.advice.filter((e) => later.includes(e.cites[0]!.id)).map((e) => e.cites[0]!.id), later.slice(0, 18));
+    const openQs = [...asked, w.inquiry].filter((q) => q !== answered).sort();
+    assert.deepEqual(full.advice.filter((e) => e.cites[0]!.kind === "inquiry").map((e) => e.cites[0]!.id), openQs.slice(0, 5), "five places stay for the agent's other advice");
+    assert.equal(full.more.advice, 2 + 25 + openQs.length - 25, JSON.stringify(full.more));
+    assert.deepEqual(told.sort(), later.slice(0, 18).sort(), "the seven cut-off outcomes are not marked told");
+    // Prepared again for this meeting, the 20 told lines hold the outcomes' share, so nothing new is carried or marked (the 5 questions stay); the seven cut off are told in the next meeting's brief.
+    for (const id of later.slice(0, 18)) await update("lesson", id, { outcomePending: false });
     told.length = 0;
     at("2026-10-21T05:40:00.000Z");
     await make().prepare(c.host, w.occ);
     const same = (await c.standups.briefs(c.owner, w.occ)).find((b) => b.agent === c.pA) as unknown as BriefBody;
     assert.equal(same.advice.length, 25);
+    assert.equal(same.advice.filter((e) => e.cites[0]!.kind === "inquiry").length, 5);
     assert.deepEqual(told, []);
     const next = await c.occurrenceAt("2026-10-22T07:00:00.000Z");
     await make().prepare(c.host, next);
-    assert.deepEqual(told.sort(), later.slice(23).sort());
+    assert.deepEqual(told.sort(), later.slice(18).sort());
     const nextA = (await c.standups.briefs(c.owner, next)).find((b) => b.agent === c.pA) as unknown as BriefBody;
-    assert.deepEqual(nextA.advice.filter((e) => e.cites[0]!.kind === "lesson").map((e) => e.cites[0]!.id), later.slice(23), "the next meeting's brief carries only what is still untold");
+    assert.deepEqual(nextA.advice.filter((e) => e.cites[0]!.kind === "lesson").map((e) => e.cites[0]!.id), later.slice(18), "the next meeting's brief carries only what is still untold");
+    assert.equal(nextA.advice.filter((e) => e.cites[0]!.kind === "inquiry").length, 18);
+    // Room the other advice does not use is still the outcomes': with only two questions open, 23 of 25 newer outcomes are carried and told.
+    for (const id of later.slice(18)) await update("lesson", id, { outcomePending: false });
+    for (const q of openQs.slice(2)) await update("inquiry", q, { state: "answered" });
+    const third: string[] = [];
+    for (let i = 0; i < 25; i++) { const id = `lsn-${"c".repeat(18)}${String.fromCharCode(97 + Math.floor(i / 26))}${String.fromCharCode(97 + (i % 26))}`; third.push(id); await c.put("lesson", id, lessonBody(id, `Third lesson ${i}`)); }
+    await update("lesson-index", c.a, { ids: [L, ...later, ...third] });
+    told.length = 0;
+    const after = await c.occurrenceAt("2026-10-23T07:00:00.000Z");
+    await make().prepare(c.host, after);
+    const afterA = (await c.standups.briefs(c.owner, after)).find((b) => b.agent === c.pA) as unknown as BriefBody;
+    assert.deepEqual(afterA.advice.map((e) => e.cites[0]!.id), [...openQs.slice(0, 2), ...third.slice(0, 23)]);
+    assert.equal(afterA.more.advice, 2);
+    assert.deepEqual(told.sort(), third.slice(0, 23).sort());
   });
 
   suite("a full list of waiting outcomes never blocks a state change: the outcome goes on an overflow list, is listed again when there is room, is mentioned on the next agenda, and one that fits nowhere is marked", async (c) => {
