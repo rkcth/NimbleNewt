@@ -85,6 +85,8 @@ export interface Borrow {
   readonly reviewBy: string;
   readonly by: string;
   readonly endedAt?: string;
+  /** The command that ended it early (that command's derived `brw-` ID), so a repeat of that command answers with this borrow even after later ones ended. */
+  readonly endedBy?: string;
   /** How many production attempts it let in that would otherwise have been held for waiting improvement work (for the owner's review). */
   readonly taken?: number;
 }

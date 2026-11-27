@@ -360,7 +360,11 @@ export class AdmissionService {
       const until = instant(command.until, "until");
       const reviewBy = instant(command.reviewBy, "reviewBy");
       if (reviewBy < until || Date.parse(reviewBy) - Date.parse(until) > BORROW_REVIEW_DAYS * 24 * HOUR_MS) invalid("reviewBy", `must be on or after until and at most ${BORROW_REVIEW_DAYS} days after it`);
-      payload = { reason: redactText(reason), places, ...(project === undefined ? {} : { project }), until, reviewBy };
+      // Hiding a credential can make the text longer ("https://u:p@h" is kept as "https://u:[redacted]@h"); what is kept must still be what the stored-record check accepts, or every later
+      // admission decision would read the record as damaged.
+      const kept = redactText(reason);
+      if (kept.length > 300) invalid("reason", `must be 1 to 300 characters as kept: with what looks like a credential hidden it is ${kept.length}; leave the credential out`);
+      payload = { reason: kept, places, ...(project === undefined ? {} : { project }), until, reviewBy };
     }
     const scoped = scopedCommandId(by.id, command.commandId);
     const newId = derivedId("brw", scoped);
@@ -374,7 +378,7 @@ export class AdmissionService {
         const current = borrowAt(borrows, now);
         if (ending) {
           if (current === undefined) throw new DomainError("invalid_command", "no emergency borrow of the improvement reserve is in force now, so there is nothing to end", { field: "end" });
-          const next: AdmissionState = { ...state, borrows: borrows.map((b) => (b.id === current.id ? { ...b, endedAt: now } : b)) };
+          const next: AdmissionState = { ...state, borrows: borrows.map((b) => (b.id === current.id ? { ...b, endedAt: now, endedBy: newId } : b)) };
           return this.#built(loaded.revision, await this.#promote(next), { borrow: current.id, ended: true });
         }
         const p = payload as { reason: string; places: number; project?: string; until: string; reviewBy: string };
@@ -396,7 +400,7 @@ export class AdmissionService {
     })));
     const after = this.#borrows((await this.#load()).state);
     // The borrow this command started, or (ending) the one it ended: on a repeat the same one, from the record.
-    const mine = ending ? [...after].reverse().find((b) => b.endedAt !== undefined) : after.find((b) => b.id === newId);
+    const mine = ending ? after.find((b) => b.endedBy === newId) : after.find((b) => b.id === newId);
     if (mine === undefined) throw new DomainError("integrity", "the emergency borrow this command recorded is no longer in the admission record");
     const rest = after[after.length - 1]?.id === mine.id ? borrowRestUntil(after) : undefined;
     return { borrowId: mine.id, ended: ending, until: borrowEnd(mine), reviewBy: mine.reviewBy, ...(rest === undefined ? {} : { againFrom: rest }), revision: result.revision, replayed: result.replayed };
@@ -651,7 +655,7 @@ export class AdmissionService {
         && Number.isSafeInteger(r["places"]) && (r["places"] as number) >= 1 && (r["places"] as number) <= LIMIT_BOUNDS.productive[1]
         && (r["project"] === undefined || (typeof r["project"] === "string" && LABEL.test(r["project"]))) && typeof r["by"] === "string"
         && time(r["from"]) && time(r["until"]) && time(r["reviewBy"]) && (r["from"] as string) < (r["until"] as string) && (r["reviewBy"] as string) >= (r["until"] as string)
-        && (r["endedAt"] === undefined || time(r["endedAt"])) && (r["taken"] === undefined || (Number.isSafeInteger(r["taken"]) && (r["taken"] as number) >= 0))
+        && (r["endedAt"] === undefined || time(r["endedAt"])) && (r["endedBy"] === undefined || (r["endedAt"] !== undefined && typeof r["endedBy"] === "string" && BORROW_ID.test(r["endedBy"]))) &&(r["taken"] === undefined || (Number.isSafeInteger(r["taken"]) && (r["taken"] as number) >= 0))
         && (r["from"] as string) >= previous;
       if (!ok) return damaged();
       previous = r["from"] as string;

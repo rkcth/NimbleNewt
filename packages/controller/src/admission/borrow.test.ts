@@ -199,6 +199,15 @@ for (const backend of backends) {
     await release(hurry.id, again);
     assert.equal((await again.where(pc.id)).state, "running", "the borrowed place came back to improvement work when its attempt ended");
     assert.equal((await again.where(late.id)).state, "waiting");
+    // After the rest a second borrow lets the late work in: only the borrow in force counts it, the first one's tally is history.
+    clock.now = at(T0, 12);
+    const pc2 = await c.ask("PC", { host: "host:h2" }, again);
+    const second = await c.lend({}, again);
+    await release(pc.id, again);
+    assert.equal((await again.where(late.id)).state, "running");
+    assert.equal((await again.where(pc2.id)).state, "waiting");
+    const tallies = ((await again.snapshot()).borrows ?? []).map((b) => [b.id, b.taken ?? 0]);
+    assert.deepEqual(tallies, [[made.borrowId, 1], [second.borrowId, 1]]);
   });
 
   suite("repeated urgency cannot remove the floor: one borrow at a time, never extended; after it ends the floor stands as long as it was lent; ending early counts the real length; each refusal names the way out", async (c) => {
@@ -221,6 +230,13 @@ for (const backend of backends) {
     // The record keeps a bounded list.
     const kept = (await admission.snapshot()).borrows ?? [];
     assert.ok(kept.length === 2 && kept.length <= BORROWS_KEPT);
+    // Past the bound the oldest are dropped, never kept as a list the record check reads as damaged: borrows ended the moment they start need no rest, so many fit in one instant.
+    clock.now = at(T0, 200);
+    for (let i = 0; i < BORROWS_KEPT; i++) { await c.lend(); await c.lend(END); }
+    const trimmed = (await admission.snapshot()).borrows ?? [];
+    assert.equal(trimmed.length, BORROWS_KEPT);
+    assert.ok(!trimmed.some((b) => b.id === first.borrowId), "the oldest went first");
+    assert.equal((await c.ask("P")).state, "running", "admission goes on");
   });
 
   suite("the direction must be explicit and bounded: reason, places, expiry and review date checked; no reserve or more places than it keeps is refused; an unknown project is refused; only the owner", async (c) => {
@@ -254,12 +270,29 @@ for (const backend of backends) {
     await refuses("invalid_command", () => L({ hours: 3 }));
     await refuses("forbidden", () => c.admission.borrow(agent, { commandId: cid("b"), reason: "r", places: 1, until: at(T0, 1), reviewBy: at(T0, 2) }));
     await refuses("forbidden", () => c.admission.borrow({ ...owner, taskScope: { taskId: "task-x", projectId: c.garden } }, { commandId: cid("b"), reason: "r", places: 1, until: at(T0, 1), reviewBy: at(T0, 2) }));
+    // Inputs that should be refused from every other kind of principal, ending included: only the owner's own direction borrows.
+    for (const kind of ["client", "service", "host", "agent"] as const) {
+      await refuses("forbidden", () => c.admission.borrow({ ...owner, kind, id: `${kind}:x` }, { commandId: cid("b"), reason: "r", places: 1, until: at(T0, 1), reviewBy: at(T0, 2) }));
+      await refuses("forbidden", () => c.admission.borrow({ ...owner, kind, id: `${kind}:x` }, { commandId: cid("b"), end: true }));
+    }
     // A time with an offset is the same instant in UTC.
     const ok = await L({ reason: "the release is due tonight; key sk-abcdefghijklmnopqrstuvwx", until: "2026-11-27T12:00:00-05:00", reviewBy: "2026-11-30T09:00:00-05:00" });
     assert.deepEqual([ok.until, ok.reviewBy], ["2026-11-27T17:00:00.000Z", "2026-11-30T14:00:00.000Z"]);
     // A credential pasted into the reason is never kept.
     assert.equal((await c.admission.snapshot()).borrows?.[0]?.reason, "the release is due tonight; key [redacted]");
     assert.equal(clock.now, T0);
+  });
+
+  suite("a reason that grows past 300 characters when a credential in it is hidden is refused, never stored as a record the admission check reads as damaged", async (c) => {
+    const { allocate, owner } = c;
+    await allocate({ "workClass.pcFloor": 25, "workClass.pcCeiling": 50 });
+    // "https://u:p@h" (13 characters) is kept as "https://u:[redacted]@h" (22): 21 of them fit in 300 as written (293) and do not once hidden.
+    const grows = Array.from({ length: 21 }, () => "https://u:p@h").join(" ");
+    assert.ok(grows.length <= 300);
+    await refuses("invalid_command", () => c.lend({ reason: grows }), /^reason: .*300 characters/);
+    assert.equal((await c.admission.snapshot()).borrows, undefined, "nothing was recorded");
+    assert.equal((await c.ask("P")).state, "running", "admission goes on");
+    assert.equal((await c.admission.balance(owner)).borrowProblem, undefined);
   });
 
   suite("exactly once: a repeated command ID answers with the same borrow and writes nothing; another direction under the same ID is a conflict; two controllers borrowing at once start only one", async (c) => {
@@ -271,11 +304,19 @@ for (const backend of backends) {
     assert.deepEqual([repeat.borrowId, repeat.replayed, first.replayed], [first.borrowId, true, false]);
     assert.equal((await admission.snapshot()).revision, revision);
     await refuses("command_conflict", () => c.lend({ places: 1, reason: "something else" }, admission, "same"));
-    await c.lend({ end: true, reason: undefined, places: undefined, until: undefined, reviewBy: undefined }, admission, "end-1");
+    const END = { end: true, reason: undefined, places: undefined, until: undefined, reviewBy: undefined };
+    const ended1 = await c.lend(END, admission, "end-1");
+    assert.equal(ended1.borrowId, first.borrowId);
     c.clock.now = at(T0, 1);
     const settled = await Promise.allSettled([c.lend({}, admission, "race-a"), c.lend({}, reopen(), "race-b")]);
     // The first borrow lasted no time at all (ended at T0), so the rest is over at once; exactly one of the two racing borrows starts.
     assert.equal(settled.filter((s) => s.status === "fulfilled").length, 1, JSON.stringify(settled.map((s) => s.status === "rejected" ? String(s.reason) : "ok")));
+    const raced = settled.find((s) => s.status === "fulfilled")!.value.borrowId;
+    // The later borrow is ended by another command; repeating the first end still answers with the borrow it ended, not the newest ended one.
+    c.clock.now = at(T0, 2);
+    assert.equal((await c.lend(END, admission, "end-2")).borrowId, raced);
+    const repeatEnd = await c.lend(END, reopen(), "end-1");
+    assert.deepEqual([repeatEnd.borrowId, repeatEnd.replayed, repeatEnd.until, repeatEnd.againFrom], [first.borrowId, true, T0, undefined]);
     // Repeated again after later borrows: still the borrow that command started, not the newest.
     const late = await c.lend({ until: at(T0, 6), reviewBy: at(T0, 30) }, reopen(), "same");
     assert.deepEqual([late.borrowId, late.replayed, late.againFrom], [first.borrowId, true, undefined]);
@@ -285,6 +326,9 @@ for (const backend of backends) {
     const { admission, owner, release, allocate } = c;
     await allocate({ "workClass.pcFloor": 25, "workClass.pcCeiling": 50 });
     const running = await c.ask("P");
+    const others = [await c.ask("P"), await c.ask("P"), await c.ask("P")];
+    const waiting = await c.ask("P");
+    assert.deepEqual([...others.map((o) => o.state), waiting.state], ["running", "running", "running", "waiting"]);
     await c.lend();
     // Damage the record the way only an outside writer could: a borrow with no reason.
     const stored = await admission.snapshot();
@@ -294,13 +338,21 @@ for (const backend of backends) {
     await refuses("integrity", () => c.ask("P"), /emergency borrows stored in the admission record are damaged/);
     const view = await admission.balance(owner);
     assert.match(view.borrowProblem ?? "", /cannot be read, so nothing new is admitted until they are repaired/);
+    // The waiting request is told it is the borrows that are damaged, not the owner's allocation.
+    const told = await admission.where(waiting.id);
+    assert.ok(told.state === "waiting" && /emergency borrows stored in the admission record are damaged, nothing new starts until they are repaired/.test(told.balanceReason ?? ""), JSON.stringify(told));
     await release(running.id);
-    assert.equal((await admission.snapshot()).running.length, 0, "release still works");
+    const after = await admission.snapshot();
+    assert.deepEqual([after.running.length, after.queue.map((e) => e.id)], [3, [waiting.id]], "release still works; the freed place is not given out on damaged borrows");
     // Other shapes `borrow` never writes are damage too: a review date before the expiry, and borrows out of order.
     const b = stored.borrows![0]!;
     const shapes: Record<string, unknown[]> = {
       "review-before-expiry": [{ ...b, reviewBy: b.from }],
       "out-of-order": [{ ...b, id: "brw-aaaaaaaaaaaaaaaaaaaa", from: at(b.from, 1) }, b],
+      "more-than-kept": Array.from({ length: BORROWS_KEPT + 1 }, () => b),
+      "no-borrower": [(({ by: _by, ...rest }) => rest)(b)],
+      "ended-by-without-end": [{ ...b, endedBy: "brw-aaaaaaaaaaaaaaaaaaaa" }],
+      "ended-by-not-an-id": [{ ...b, endedAt: at(b.from, 1), endedBy: "end-1" }],
     };
     for (const [tag, borrows] of Object.entries(shapes)) {
       const { revision: _rv, ...now } = await admission.snapshot(); void _rv;
