@@ -21637,3 +21637,57 @@ ASSUMPTION: three tries, then one owner notice. The owner can always ask again; 
 - 25 deliberate breakages of my own (built `dist`, each applied alone, reference store and SQLite, restored and checked by SHA-256). 21 were caught at first and 23 after the tests above. Not caught: (1) dropping the try limit from the scheduled turn's filter, which is the twin of the implementer's uncaught breakage; (2) making the try counter's update unconditional. Each is a guard that matters only when two calls race, because the other guard, or the one-at-a-time order of the calls, covers it. No test that runs the calls one after another can reach it.
 - ASSUMPTION: whoever may ask for the follow-ups (`meeting.manage`, or the floor's service when the meeting ends) also has the floor give them to their owners, without `assignment.manage`. This matches how the tasks were already created (without `task.create`) and the card's "owned follow-up task". The owners are fixed by the record, and the tasks stay proposed.
 - Residual: a floor that ended before this slice has no `followUpsAt`, so the scheduled turn makes its follow-ups once. There is no installation yet, so this is accepted.
+
+## P10b second slice: the owner sees why approved work waits when no integrator can land it (Claude agent, Opus 5.5, 2026-11-27 EST; branch `card-p10b2` from main 8fbe49a6; card P10b NOT flipped and stays planned; task-plan files unchanged; not pushed; no workflow dispatched; no model or network call made)
+
+Blockers P10, H03, A10b and R05 are implemented, so no build-ahead was needed. The first slice (`integrator.pool.next`) is on main.
+
+**Why this clause first.** The notes of the first slice list four remaining items. Item 1 (wake a free integrator through H03 admission with a reserved landing place and an R05 budget reservation) and item 3 (its saturation test) need a new admission class: today H03 admits only `productive` attempts in production, and its `control` places are for inquiries and reviews. That changes the admission record, the owner's quotas view and chat, so it is several slices on its own. Item 2 (fresh A10b credential and harness context per take) needs a woken integrator run, so it follows item 1. Item 4 (a read-only reason for the owner) stands on its own now, against the pool's capacity: the integrators. So this slice is item 4, the card's fourth clause "when no capacity is left, work waits with a visible reason", for the integrator side.
+
+**Slice boundary.**
+- `IntegratorCapacity.of(projectId, branch)` (`landing/integrator-capacity.ts`) is new and read-only. It writes nothing and wakes nobody. It answers one of:
+  - `held`: an active agent holds the branch's live lease, with until when. A live hold of an agent that is no longer active is not capacity in use (the lease door ends it at the next take), as the pool judges it.
+  - `free`: nobody active holds the branch, and at least one integrator of the project holds no lease of a project it serves. Counts of free and busy integrators.
+  - `busy`: every integrator of the project already holds a lease (one project at a time). No capacity is left.
+  - `nobody`: no active agent has the exact right `integration.lease` on the project (a grant for every project counts). No capacity exists.
+  - `unknown`: the leases could not all be read, so nobody is said to be free or busy (fail closed).
+- The integrators are judged by the pool's own rule. `servesProject` is now exported from `integrator-pool.ts` and the pool uses it, so the two cannot disagree. A hold on a project where the agent's right was taken away does not make it busy, as in the pool's free check.
+- `IntegratorLeaseService.liveLeases()` is new: one bounded walk of every live lease (50 pages of 200), with `partial`.
+- `activeAgentIds(storage)` is new: a bounded walk of the principal records (`CAPACITY_LIMITS`: 10 pages of 200, at most 500 active agents). A walk that stops early is said as `partial`. Each agent is then read as it stands now with `PrincipalService.current`, so grants given through the grant service count. An answer for another ID or another kind is not counted.
+- The owner's existing `landing_queue` status view shows one line right after the queue's first line. It appears only to the owner (not with a task credential), only for the landing branch's queue, only when approved work is in it, and not while the first place is a reservation waiting for work (nothing lands there anyway; the view already says so). The lines are:
+  - held: "Integrator X holds the integrator lease of this branch until T and lands its queue."
+  - free: "No integrator holds this branch's lease now; N integrator(s) that may land on this project hold no lease, so one of them takes this queue when it asks the pool (integrator.pool.next), which gives the queue whose first place has waited longest first; M others are busy with a lease already."
+  - busy: "No capacity is left to land this queue: all N integrators that may land on this project already hold an integrator lease (one project at a time), so the approved work waits until one releases its lease or the lease runs out; giving another agent the right integration.lease on this project adds capacity."
+  - nobody: "No capacity is left to land this queue: no active agent has the right integration.lease on this project, so the approved work waits until an agent is given that right (or the owner takes the lease for a named agent with integrator.lease.acquire)."
+  - unknown: "Who can land this queue is not known now: ...; no integrator is assumed free." A `DomainError` from the read is shown this way, without its text. Any other error is thrown.
+  - A partial agent walk adds "(not every agent record was read, so there may be more integrators than counted)". The holder's name is shown through `shown` (one line, bounded, escaped).
+- Wired in `api/start.ts` (`landingCapacity` in the status dependencies).
+
+**Owner controls and chat.** No new control and no interpreter prompt text. The view's `about` text in `STATUS_KINDS` is unchanged, so the prompt is still 156,553 of 156,560. The owner already reaches the view by free-form chat ("why is nothing landing?" gives `landing_queue`), as the composed test shows. No operation changed, so `api-v1.md` has no diff.
+
+**ASSUMPTION lines.**
+- ASSUMPTION: the capacity line is the owner's only. An integrator of the project may read the queue, but the line counts integrators and their holds on other projects, which the pool never tells an agent. The integrator's side is the pool's `none` reason.
+- ASSUMPTION: "capacity" in this slice means integrators: one project at a time per integrator, as the first slice decided. Admission and budget capacity come with item 1, and their reason belongs on this same line then.
+- ASSUMPTION: the line is not shown while the first place is a reservation waiting for its task's work. The view already explains that nothing lands then, and saying who could land would mislead.
+
+**Tests.**
+- `landing/integrator-capacity-p10b.test.ts`: 3 tests on each of the four backends (reference, SQLite, SQLite on a worker thread, PostgreSQL), 12 in all.
+  - The answers in sequence: nobody (agents with other rights, or with the right on another project, do not count), free, held after a pool take, busy, more capacity from a second integrator and from a grant for every project, a right taken away while holding (the hold is still `held`, and the agent is not busy, matching the pool), a disabled holder (not capacity in use), expiry, another branch, and no writes.
+  - Bounds and failing closed: the walk's agent and page limits (partial), inactive and non-agent records, a partial walk's counts, unreadable leases (`unknown`, no agent read), a principal answer for another ID or kind, a task-scoped answer, a failing read thrown, a hold whose principal is missing, a hold of another project making an integrator busy.
+  - `liveLeases`: every holder and project, expiry, and the page bound.
+- `status/status-landing-capacity.test.ts`: 1 test on each of the four backends. Every line word for word, the partial note, a hostile holder name, a refused read without its text, another error thrown. Not shown to an integrator, to the owner's task credential, off the landing branch, with an empty queue, with a reserved first place waiting for work, or without the dependency (and the reader is not asked then). Shown for a record without a front mark. The line comes right after the queue's first line.
+- `api/start-p10b-capacity.test.ts`: the composed controller over `status.ask` and chat. Nobody, then free, held after a pool take, busy for the other project, an integrator's own read without the line, a second integrator adding capacity, and a disabled holder.
+- 28 deliberate breakages, each applied alone to the built `dist` (`integrator-capacity.js`, `status.js`, `integrator-lease.js`, `integrator-pool.js`, `start.js`), run, then restored and checked by sha256 (script `/tmp/claude-1000/p10b2/breakages.py`). First run: 25 caught. Not caught at first: (1) the held check matching the project but not the branch, (2) counting any live hold as busy whether or not the agent still has the right there, and (3) dropping the view's "approved work in the queue" condition (a queue with only a reservation and no front mark). Three test steps were added for them (another branch of a held project; a hold where the right was taken away, judged against another queue; a reservation alone). With those: 28 of 28.
+
+- Node 22 and 24: 601 of 601 each (landing, start-p10*, api, chat-gaps, start-status, gaps1, prompt-room, retirement, guide-commands, status-landing-*). tsc --build --force; api:docs:write no diff; check:deps, licenses:check, roadmap:check; plan.test 6/6.
+
+**Limits stated (follow-ups, not hidden).**
+- Read when the owner asks, not kept. The answer can be out of date the moment after it is read, like every status line.
+- At most 500 active agents and 2,000 principal records are read per view (said as partial past that). Each agent is read once per view. Leases are read in one walk of at most 10,000 records; past that the line says "not known".
+- Nothing wakes a free integrator yet (item 1). The "free" line says the queue is taken when an integrator asks the pool. That is true today, and item 1 must change this wording when it adds the wake.
+- Admission and budget reasons are not part of the line (item 1).
+
+**What remains of P10b, in the card's order.**
+1. "Another is woken through admission and budget, with reserved capacity": the controller wakes a free integrator when a landing branch has approved work and no live lease. This needs H03 admission with a place reserved for landing (a new class, or a share of the `control` places) and an R05 budget reservation. The capacity line then also says when the wake waits for admission or budget.
+2. "Credentials and context are fresh per project (no data crosses between projects, test)": at a pool take, the A10b task credential for the project's task and a fresh harness context per project, with a no-cross-project test.
+3. "A full queue of author attempts does not starve landing": the admission reservation from item 1, with a saturation test.

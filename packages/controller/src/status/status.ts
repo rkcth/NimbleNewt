@@ -48,6 +48,7 @@ import type { QaReviewService } from "../submissions/qa-review-policy.js";
 import { docReasonText, docVerifyCode, type DocObligationService } from "../submissions/doc-obligations.js";
 import { claimFlagText } from "../submissions/doc-claims.js";
 import type { LandingQueueOps } from "../landing/queue-ops.js";
+import type { CapacityAnswer } from "../landing/integrator-capacity.js";
 import type { LandingPage } from "../workspace-ops/workspace-ops.js";
 import type { IntegrationPolicyService } from "../policy/integration-policy.js";
 import type { SubmissionService } from "../submissions/submissions.js";
@@ -905,6 +906,8 @@ export interface StatusDeps {
   readonly submissionRelease?: { commit(submissionId: string): Promise<{ readonly commitId: string; readonly at: string; readonly permitted?: boolean } | undefined>; open(taskId: string): Promise<{ readonly operation: string; readonly at: string } | undefined>; automatic?(submissionId: string, reviewId: string): Promise<{ readonly state: string; readonly at: string; readonly finishedAt?: string; readonly summary?: string; readonly hostAnswer?: boolean } | undefined> };
   /** The landing queues of a project's branches (card P10). Absent: the `landing_queue` view says landing queues are not kept here. */
   readonly landingQueue?: Pick<LandingQueueOps, "list">;
+  /** Who can land a project's landing branch now (card P10b: when no capacity is left, work waits with a visible reason), shown to the owner in the `landing_queue` view. Absent: no such line. */
+  readonly landingCapacity?: (projectId: string, branch: string) => Promise<CapacityAnswer>;
   /** A project's landing settings (card P09), read with the settings reader's own rule (owner only). Absent: the `landing_settings` view says they are not kept here. */
   readonly integration?: Pick<IntegrationPolicyService, "get">;
   /** The owner's simulation scopes (card P07): the `simulations` view. Absent: the view says scopes are not kept here. */
@@ -2773,6 +2776,8 @@ export class StatusService {
     else if (q.items.length === 0 && q.reservations.length === 0) lines.push(line(`The landing queue of ${which} is empty.`, cite("project", projectId)));
     else {
       lines.push(line(`The landing queue of ${which} holds ${q.items.length} approved submission(s), oldest first; the first lands next.`, cite("project", projectId)));
+      // Card P10b (fourth clause): who lands this queue, or why its approved work waits when no capacity is left. Owner only, since it counts integrators and their holds on other projects; read-only, so no new control.
+      if (this.#deps.landingCapacity !== undefined && by.kind === "owner" && by.taskScope === undefined && q.branch === q.landingBranch && q.items.length > 0 && q.front?.waitingForApproval !== true) lines.push(await this.#capacityLine(projectId, q.branch));
       for (const e of q.items.slice(0, 30)) lines.push(line(`${e.position}. Task ${e.taskId}: submission ${e.submissionId} by ${shown(e.author, 80)}, queued ${e.queuedAt} by ${shown(e.queuedBy, 80)}${e.replaced === undefined ? "" : ` (took the place of ${e.replaced})`}${e.reserved === true ? "; its place is reserved" : ""}${e.held === undefined ? "" : `; it does not land now: ${shown(e.held, 300)}`}.`, cite("task", e.taskId), cite("project", projectId)));
       if (q.items.length > 30) lines.push(line(`${q.items.length - 30} more are not shown here (landing.queue.list has them all).`, cite("project", projectId)));
       // Reserved places (card P10): a task whose author reached the refresh-round cap keeps its turn; while its place is first and it has no approved submission, nothing else lands.
@@ -2821,6 +2826,22 @@ export class StatusService {
     if (q.others.length > 20) lines.push(line(`${q.others.length - 20} more branches with queued work are not shown here.`, cite("project", projectId)));
     if (q.partial === true) lines.push(line("Not every landing queue was read, so other branches may hold queued work too.", cite("project", projectId)));
     return { observedAt: at, lines };
+  }
+
+  /** The owner's line on who can land a landing branch's queue now (card P10b). A refusal of the read is said as not known (nothing is said to be free); any other failure is thrown. */
+  async #capacityLine(projectId: string, branch: string): Promise<Line> {
+    const c = cite("project", projectId);
+    let a: CapacityAnswer;
+    try { a = await this.#deps.landingCapacity!(projectId, branch); } catch (error) { if (!(error instanceof DomainError)) throw error; a = { state: "unknown", reason: "it could not be read" }; }
+    const more = (partial: boolean): string => (partial ? " (not every agent record was read, so there may be more integrators than counted)" : "");
+    const n = (k: number, one: string, many: string): string => `${k} ${k === 1 ? one : many}`;
+    switch (a.state) {
+      case "held": return line(`Integrator ${shown(a.holder, 80)} holds the integrator lease of this branch until ${shown(a.expiresAt, 30)} and lands its queue.`, c);
+      case "free": return line(`No integrator holds this branch's lease now; ${n(a.free, "integrator that may land on this project holds", "integrators that may land on this project hold")} no lease, so one of them takes this queue when it asks the pool (integrator.pool.next), which gives the queue whose first place has waited longest first${a.busy === 0 ? "" : `; ${n(a.busy, "other is", "others are")} busy with a lease already`}${more(a.partial)}.`, c);
+      case "busy": return line(`No capacity is left to land this queue: ${a.busy === 1 ? "the one integrator" : `all ${a.busy} integrators`} that may land on this project already ${a.busy === 1 ? "holds" : "hold"} an integrator lease (one project at a time), so the approved work waits until one releases its lease or the lease runs out; giving another agent the right integration.lease on this project adds capacity${more(a.partial)}.`, c);
+      case "nobody": return line(`No capacity is left to land this queue: no active agent has the right integration.lease on this project, so the approved work waits until an agent is given that right (or the owner takes the lease for a named agent with integrator.lease.acquire)${more(a.partial)}.`, c);
+      case "unknown": return line(`Who can land this queue is not known now: ${shown(a.reason, 120)}; no integrator is assumed free.`, c);
+    }
   }
 
   /**

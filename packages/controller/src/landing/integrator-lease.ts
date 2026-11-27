@@ -200,6 +200,25 @@ export class IntegratorLeaseService {
     return { leases: out, partial: true };
   }
 
+  /**
+   * Every live lease of any project and holder (card P10b: who of the pool is busy, for the owner's view of a landing queue), in record order. The same bounded walk as `heldBy` (pages of 200, at most `pages`);
+   * `partial` says it stopped before the end, so a caller judging who is free by it fails closed.
+   */
+  async liveLeases(pages = 50): Promise<{ leases: IntegratorLease[]; partial: boolean }> {
+    const out: IntegratorLease[] = [];
+    let after: string | undefined;
+    for (let page = 0; page < pages; page++) {
+      const batch = await this.#runner.list(KIND, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const r of batch) {
+        const b = r.body as unknown as IntegratorLeaseBody;
+        if (this.#live(b)) out.push({ ...b, leaseId: r.id, revision: r.revision, live: true });
+      }
+      if (batch.length < 200) return { leases: out, partial: false };
+      after = batch[batch.length - 1]!.id;
+    }
+    return { leases: out, partial: true };
+  }
+
   /** The live leases held for a task (by whoever holds them now), from the task's index. */
   async forTask(taskId: string): Promise<IntegratorLease[]> {
     const ids = ((await this.#runner.get(TASK_INDEX, checkTaskId(taskId)))?.body as unknown as { leases?: unknown } | undefined)?.leases;
