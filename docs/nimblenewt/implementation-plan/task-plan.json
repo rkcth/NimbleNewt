@@ -9511,12 +9511,31 @@
       ],
       "deliverable": "User/developer documentation obligations and traceability",
       "acceptance_and_verification": "Behavior change links required doc updates to tested artifact; no unsupported marketing capability claims; doc obligations record owner, applicable version, implementation references and validation status and stale or unverified docs are flagged; the impact check creates assigned update tasks; a release change flags linked docs, support guidance and promotional assets; amended 2026-10-28: the docs role submits a document change (Q01b)",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "ada377aa",
+          "f10bba33",
+          "791d81a2",
+          "3abf7a10",
+          "ec37aac5",
+          "bf18535b",
+          "1aa9a500",
+          "07626ec3",
+          "0dc8ebbd"
+        ],
+        "ci_runs": [
+          "45912941971"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "A documentation obligation records its kind (document, support guidance, promotional asset), audience, owner (an agent that may read the project's tasks), applicable version, implementing tasks and validation state (unverified, verified, stale, with reasons); unverified and stale documents are flagged in the docs and task_docs views and by chat, and the P09 landing gate refuses a task whose documents are not verified against its code. Verification binds a docs-role document change (Q01b) to, per implementing task, a code submission and tree whose QA gate passes. A behaviour change (QA evidence recorded or invalidated, or a manual impact check) and a release (a release candidate naming its project and version, or a manual release check) flag the linked documents of every kind and open one update task per subject, ready and assigned to the document's owner; repeats and crashes between the steps open nothing twice, and the owner is told when verified documents go stale. Claims must name a capability of the project's register (the controller's own labels plus owner or director ratings); verification reads the document change's stored text and refuses an unlabelled mention of an experimental or unsupported capability, and a lower rating flags documents verified under the higher one. Limits: the text scan matches the register's names only (no synonyms or paraphrase, simple word-window negation), reads plain text, Markdown and HTML only (images, video, audio, PDF and Office files are checked on their declared claims), and runs only at verification; a version is exact text; unverified documents do not gate a release or a task's done (only a landing); no bridge tools for the docs agent (it uses the state API); the D01 guide's documentation step is D01's."
+      }
     },
     {
       "id": "Q04",
@@ -10881,14 +10900,23 @@
           "d77127ec",
           "460a3e52",
           "5a4649a2",
-          "1a6c90c9"
+          "1a6c90c9",
+          "a297b36f",
+          "ef5e5bef",
+          "91849c9c",
+          "22f985b2",
+          "393990ce",
+          "06f68f3a",
+          "57e7909b",
+          "0c10cfb5",
+          "b43d7594"
         ],
         "ci_runs": [
-          "45803960092"
+          "45912941971"
         ],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
-        "note": "The agent tool work.end {submit, result, note, message} is checked at once, writes one durable ending intent and freezes the attempt; the controller completes the ending once (settle through the dispatcher, hung calls cut with a reason, stage on the host that holds the checkout, open a code submission, tell, finish), resumed once after a restart and joined when repeated. An owner stop wins and an emergency stop drops the intent with nothing staged; a killed write call turns submit into a plain end with a typed release_failed runtime_hold blocker; a submit on a stale base whose changed files overlap the landing branch is refused with the head commit and the files (checked at request, after the settle and again after staging); a plain end is never refused. Limits: a remote host does not answer submitView or stage (no wire protocol yet), so a submit from a remote host fails closed as submit_unavailable with a blocker, and only a composer's or the local host's stage submits; no product code composes LocalWorker (H12t); the staged tree still carries PLAN.md (H12o); P08/P09 recompute tree and patch at landing. Follow-ups, not clauses here."
+        "note": "The agent tool work.end {submit, result, note, message} is checked at once, writes one durable ending intent and freezes the attempt; the controller completes the ending once (settle through the dispatcher, hung calls cut with a reason, stage on the host that holds the checkout, open a code submission, tell, finish), resumed once after a restart and joined when repeated. An owner stop wins and an emergency stop drops the intent with nothing staged; a killed write call turns submit into a plain end with a typed release_failed runtime_hold blocker; a submit on a stale base whose changed files overlap the landing branch is refused with the head commit and the files (checked at request, after the settle and again after staging); a plain end is never refused. The product launcher's local worker host (scripts/local-host.mjs) answers the submit's view and staging, asking the P02 admission again, so a submit there opens a code submission. Limits: a remote host does not answer submitView or stage (no wire protocol yet), so a submit from a remote host fails closed as unavailable; the staged tree still carries PLAN.md (the open W05/H12o decision); the tree and patch ID are not re-checked at landing time (a landing-side follow-up, not a clause of this card or of P08's text); a checkout's turn has no time limit of its own. Follow-ups, not clauses here."
       }
     },
     {

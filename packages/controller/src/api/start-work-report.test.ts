@@ -18,6 +18,9 @@ import { startController, type Controller, type StartOptions } from "./index.js"
 // Card W10 through the composed controller: an agent keeps running notes through the state API with its task credential, an ending without a report is refused with them, a done is questioned by a second agent on the
 // routed, metered client (its routes from the routing table's safety-supervisor list, its tokens under the daily cap on the controller's own calls), and the owner reads the report through the state API and by chat in their
 // own words. At the cap no call is made and the report says the done was not questioned.
+// The daily cap counts tokens per UTC day on the system clock, so the test holds Date at one mid-day instant: on the real clock a run that crossed 00:00 UTC counted
+// the second call on the next day (50, not 100; CI run 45912941971 on macOS) and the cap set afterwards stood against a new day's empty count.
+const MIDDAY = Date.parse("2026-11-26T12:00:00.000Z");
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
 const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
 const TABLE = {
@@ -40,7 +43,8 @@ const stores: Store[] = [
 ];
 
 for (const store of stores) {
-  test(`${store.name}: notes, a refused end without a report, a done questioned by a second agent on the routed and metered client, and the report read by the owner through the state API and by chat; at the daily cap no call is made (card W10)`, async () => {
+  test(`${store.name}: notes, a refused end without a report, a done questioned by a second agent on the routed and metered client, and the report read by the owner through the state API and by chat; at the daily cap no call is made (card W10)`, async (ctx) => {
+    ctx.mock.timers.enable({ apis: ["Date"], now: MIDDAY });
     const db = await store.open();
     const asked: { route: string; system: string; user: string }[] = [];
     const replies = [JSON.stringify({ verdict: "questions", questions: ["Which beds were watered, and how do you know?"] }), JSON.stringify({ verdict: "supported" })];
