@@ -5914,13 +5914,13 @@ Result: `{ revision, seal }`.
 
 #### `experiment.run`
 
-The proposer (or a judge) reports one run of a running experiment: the disposable environment it used, the cost, exactly the pinned metrics and exactly the pinned cases (passed or not). A run that uses up the budget pauses the experiment; a paused one refuses more runs.
+The proposer (or a judge) reports one run of a running experiment: the disposable environment it used (the A08 environment revision it was built from, the reporter's own unless the owner reports, and the protected-extension digests the host found there; the controller checks them with A08's integrity check and refuses the run otherwise), the cost, exactly the pinned metrics and exactly the pinned cases (passed or not). A run that uses up the budget pauses the experiment; a paused one refuses more runs.
 
 Arguments:
 
 - `commandId`: required
 - `experimentId`: exp-...
-- `environment`: { ref, disposable: true }
+- `environment`: { agentId, revision, observed: { extension: "sha256:..." }, disposable: true }
 - `cost`: number
 - `metrics`: the pinned metrics
 - `cases`: [{ id, passed }]
