@@ -15,10 +15,19 @@ export const CLAUSE_QUESTION_LIMITS = { clauses: 50, lines: 400, line: 1_000, qu
 const CLAUSE_NAME = /(?<![A-Za-z0-9_])[Cc](\d{1,3})(?![A-Za-z0-9_])/g;
 /** Quoted text that can be a test name: straight double, typographic double or back quotes (single quotes are left out: an apostrophe cannot be told from a quote). Each style is read on its own; each body excludes its closing quote. */
 const QUOTES: readonly RegExp[] = [/"([^"\r\n]{1,200})"/g, /\u201c([^\u201d\r\n]{1,200})\u201d/g, /`([^`\r\n]{1,200})`/g];
-/** A passing run result outside the quotes: `ok`, `pass`, `passed`, `passes`, `passing` as whole words. */
-const PASSING = /(?<![A-Za-z])(?:ok|pass(?:ed|es|ing)?)(?![A-Za-z])/i;
-/** A failing one: `not ok`, or `fail` (failed, fails, failing, failure) not followed by a count of 0 (`fail 0`, `failed: 0`). */
-const FAILING = /(?<![A-Za-z])not[ \t]+ok(?![A-Za-z])|(?<![A-Za-z])fail(?:ed|s|ing|ures?)?(?![A-Za-z])(?![ \t]{0,3}[:=]?[ \t]{0,3}0(?![0-9]))/i;
+/** A passing run result outside the quotes: `ok`, `pass`, `passed`, `passes`, `passing` as whole words, or a check mark (node's spec reporter prints `✔`). */
+const PASSING = /(?<![A-Za-z])(?:ok|pass(?:ed|es|ing)?)(?![A-Za-z])|[\u2713\u2714\u2705]/i;
+/**
+ * A failing one: `not ok`, a cross mark (`✖`, `✗`), or `fail` (failed, fails, failing, failure) with no count of 0 or negation next to it: `fail 0`, `failed: 0`, `0 failed`, `4 pass / 0 fail`, `no failures`, `none failed` and
+ * `nothing failed` are not failures (first review: the common "3 passed, 0 failed" and "no failures" were read as failing and the clause asked about again).
+ */
+const FAILING = /(?<![A-Za-z])not[ \t]+ok(?![A-Za-z])|[\u2716\u2717\u2718\u274c]|(?<!(?:(?<![0-9.])0|(?<![A-Za-z])(?:no|zero|none|nothing))[ \t]{1,3})(?<![A-Za-z])fail(?:ed|s|ing|ures?)?(?![A-Za-z])(?![ \t]{0,3}[:=]?[ \t]{0,3}0(?![0-9]))/i;
+/**
+ * A file name outside the quotes (`src/fail-safe.test.ts`, `c2.test.mjs`, `lib\ok.js`): a word with a path separator or an extension. It is set aside before the result and the clause names are read, so a file named `fail-safe`
+ * is not a failing result and `src/c2.test.ts` does not name C2 (first review). A word of clause names only (`C1/C2`) is kept.
+ */
+const FILE_NAME = /[A-Za-z0-9_.\\/-]*(?:[\\/][A-Za-z0-9_.\\/-]*|\.[A-Za-z][A-Za-z0-9]{0,7}(?![A-Za-z0-9]))/g;
+const CLAUSES_ONLY = /^(?:[Cc]\d{1,3}[\\/-]?)+$/;
 
 /** The words of a text as compared: lower case, white space folded, at most `match` characters. */
 const words = (text: string): string => text.toLowerCase().replace(/\s+/g, " ").trim().slice(0, CLAUSE_QUESTION_LIMITS.match);
@@ -32,6 +41,7 @@ function testedOn(raw: string, count: number): number[] {
     let taken = 0;
     rest = rest.replace(style, () => { if (taken >= CLAUSE_QUESTION_LIMITS.quotesPerLine) return " "; taken++; names++; return " "; });
   }
+  rest = rest.replace(FILE_NAME, (w) => (CLAUSES_ONLY.test(w) ? w : " "));
   if (names === 0 || !PASSING.test(rest) || FAILING.test(rest)) return [];
   const out: number[] = [];
   for (const m of rest.matchAll(CLAUSE_NAME)) {

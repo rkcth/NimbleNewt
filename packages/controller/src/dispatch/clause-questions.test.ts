@@ -24,6 +24,22 @@ test("W09 third slice: a report line shows a clause tested when it names C<n>, a
   assert.deepEqual(sorted(shownTested('C1 "x" passed', 0)), [], "a task without clauses has none");
 });
 
+test("W09 third slice, first review: a count of 0 or a negation next to a failing word, a file name that holds a result word or a clause name, and check marks are read as a reader would", () => {
+  const shown = (line: string, n = 3): number[] => sorted(shownTested(line, n));
+  // Shown tested: the usual summaries with no failure, a failing word only in a file name, a check mark.
+  for (const line of [
+    'C1: src/quote.test.ts "cuts" 3 passed, 0 failed', 'C1 "cuts" passed, no failures', 'C1 "cuts" ok (0 failures)', 'C1 "cuts" ok, tests: 4 pass / 0 fail', 'C1 "cuts" pass; none failed', 'C1 "cuts" pass; nothing failed', 'C1 "cuts" passed, zero failing',
+    'C1 | src/fail-safe.test.ts | "cuts" | pass |', 'C1: test/fail_closed.test.mjs "cuts" ok', 'C1: lib\\fail.test.js "cuts" ok', 'C1: ✔ "cuts" (1.2ms)', '| C1 | `cuts` | ✓ |',
+  ]) assert.deepEqual(shown(line), [1], line);
+  // Still failing: a count other than 0, a 0 that is part of a number, a cross mark, a negation that is part of a word.
+  for (const line of ['C1 "cuts" ok, 10 failed', 'C1 "cuts" ok, 2 failed', 'C1 "cuts" ok, 1.0 failed', 'C1 "cuts" ok ✖ 1', 'C1 "cuts" ok ✗', 'C1 "cuts" ok; piano failed', 'C1 "cuts" failed.', 'C1 "cuts" ok, fail 1']) assert.deepEqual(shown(line), [], line);
+  // A clause name inside a file name is not a clause name; one written with a slash between clause names is.
+  assert.deepEqual(shown('C1: src/c2.test.ts "cuts" ok'), [1]);
+  assert.deepEqual(shown('src/c2.test.ts "cuts" ok'), []);
+  assert.deepEqual(shown('C1/C3: "cuts" ok'), [1, 3]);
+  assert.deepEqual(shown('C1. "cuts" passed.'), [1], "a full stop after the name or the result is not a file name");
+});
+
 test("W09 third slice: a question asks about a clause it names or whose own words it holds; only answered questions count; the clauses left keep the contract's order", () => {
   assert.deepEqual(askedIn("C2: what does an empty input give?", CRITERIA), [2]);
   assert.deepEqual(askedIn("Which test shows that An  Empty input gives an empty list?", CRITERIA), [2], "white space and letter case folded");

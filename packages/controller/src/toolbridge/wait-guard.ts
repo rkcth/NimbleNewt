@@ -64,5 +64,6 @@ export function leadingSleepSeconds(command: string): number | undefined {
 export function waitRefusal(command: string): string | undefined {
   const s = leadingSleepSeconds(command);
   if (s === undefined || s <= WAIT_GUARD.maxSleepSeconds) return undefined;
-  return `a command that waits ${Number.isFinite(s) ? `${Math.round(s)} s` : "without end"} (more than ${WAIT_GUARD.maxSleepSeconds} s) is not run: run the test files you named directly (for example node --test followed by the file) and read their result; once the build and those tests pass, end with work-end`;
+  // Rounded up, so a refused wait is never named as 60 s or less (first review: `sleep 60.4` read "waits 60 s (more than 60 s)").
+  return `a command that waits ${Number.isFinite(s) ? `${Math.ceil(s)} s` : "without end"} (more than ${WAIT_GUARD.maxSleepSeconds} s) is not run: run the test files you named directly (for example node --test followed by the file) and read their result; once the build and those tests pass, end with work-end`;
 }

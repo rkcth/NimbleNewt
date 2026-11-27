@@ -35,6 +35,10 @@ test("W09 third slice: only a wait of more than 60 s is refused, and the refusal
   for (const ok of ["sleep 60", "sleep 59.9", "sleep 1m", "sleep 30 30", "sleep 0", "npm test", "node --test dist/a.test.js"]) assert.equal(waitRefusal(ok), undefined, ok);
   assert.equal(waitRefusal("sleep 60.5"), "a command that waits 61 s (more than 60 s) is not run: run the test files you named directly (for example node --test followed by the file) and read their result; once the build and those tests pass, end with work-end");
   assert.match(waitRefusal("sleep 61")!, /^a command that waits 61 s /);
+  // First review: a wait just over the limit is named rounded up, never as the limit itself.
+  assert.match(waitRefusal("sleep 60.4")!, /^a command that waits 61 s /);
+  assert.match(waitRefusal("sleep 60.0001")!, /^a command that waits 61 s /);
+  assert.equal(waitRefusal("sleep 60.0"), undefined);
   assert.match(waitRefusal("sleep 1m 1")!, /waits 61 s/);
   assert.match(waitRefusal("sleep 420 && npm test")!, /waits 420 s/);
   assert.match(waitRefusal("sleep infinity")!, /waits without end/);
