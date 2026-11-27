@@ -39,7 +39,9 @@ test("a meeting's invitation reaches the inbox of every invited agent and nudges
 test("a scheduled meeting is made five minutes before it starts by default, and the meeting.leadMinutes setting changes that (card M01d)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-lead-"));
   const day = 86_400_000;
-  const dayAt = (offsetDays: number, hhmm: string): number => Date.parse(`${new Date(Date.now() + offsetDays * day).toISOString().slice(0, 10)}T${hhmm}:00.000Z`);
+  // The days are counted from one reading of the clock: read again at each use, a run that crossed 00:00 UTC moved the dispatcher's times a day past the schedule.
+  const base = Date.now();
+  const dayAt = (offsetDays: number, hhmm: string): number => Date.parse(`${new Date(base + offsetDays * day).toISOString().slice(0, 10)}T${hhmm}:00.000Z`);
   let now = Date.now();
   const c = await startController({
     storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],

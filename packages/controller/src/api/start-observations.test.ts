@@ -11,7 +11,10 @@ const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
 const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
 
 // Card B02 in the composed controller: a failed review and a denied request become observations by themselves, an agent's retelling of the same review joins it, the owner reads them, and a restart counts nothing twice.
-test("a failed review and a denied request are observed by the running controller, an agent's retelling joins, the owner sees one each, and after a restart nothing is counted twice (card B02)", async () => {
+test("a failed review and a denied request are observed by the running controller, an agent's retelling joins, the owner sees one each, and after a restart nothing is counted twice (card B02)", async (ctx) => {
+  // The observation rate is counted per UTC hour on the system clock, so Date is held at one instant: on the real clock a run that crossed an hour counted
+  // the two observations in two hours (1 or 0, not 2).
+  ctx.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-11-26T12:30:00.000Z") });
   const d = mkdtempSync(join(tmpdir(), "nn-obs-"));
   const open = () => startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI] });
   let c = await open();
