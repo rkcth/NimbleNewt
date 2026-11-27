@@ -370,3 +370,49 @@ test("a controller fenced by a promotion can no longer stage a backup restore on
     assert.equal(existsSync(join(data, PENDING_FILE)), false, "no restore is recorded for the next start");
   } finally { gone(dir); }
 });
+
+test("two successors named in a row: after the second promotion the first successor is refused, whether it never started or was already running; the first never comes back by restarting (K05 second review)", async () => {
+  const dir = tmp();
+  try {
+    const s = new MemoryStorage();
+    const blobs = await FileBlobStore.open({ directory: join(dir, "blobs") });
+    const art = await ArtifactService.open(s, blobs, { holder: "ctl-a", ...fast });
+    await art.publish({ commandId: cid("one"), actor: "rob", name: "one", files: [file("a.txt", "alpha")] });
+    const m = join(dir, "m");
+    await writeFencedRecoveryManifest({ storage: s, epoch: await s.currentEpoch(), directory: m, now });
+    // 1. B is named and never starts; C is named over it: B is refused, C allowed, and the first fence's replaced controller (A) still cannot be named
+    await promoteController({ storage: s, manifestDirectory: m, blobs, successor: "ctl-b", promotionId: "p1", now });
+    await assert.rejects(promoteController({ storage: s, manifestDirectory: m, blobs, successor: "ctl-a", promotionId: "p1a", now }), refused(false, /own holder name/));
+    const c = await promoteController({ storage: s, manifestDirectory: m, blobs, successor: "ctl-c", promotionId: "p2", now });
+    assert.equal(c.fencedHolder, "ctl-a", "the second fence still replaces A (B never held the store)");
+    const e = await s.currentEpoch();
+    await assert.rejects(assertStartAllowed(s, "ctl-b", e), /named ctl-c .*this controller starts as ctl-b/);
+    await assert.rejects(assertStartAllowed(s, "ctl-a", e), /may not use this store/);
+    await assertStartAllowed(s, "ctl-c", e);
+    // 2. C starts and runs; D is named over it: the running C is fenced (its writes refused) and refused at restart
+    const cRun = await ArtifactService.open(s, blobs, { holder: "ctl-c", ...fast });
+    await cRun.publish({ commandId: cid("c"), actor: "rob", name: "c", files: [file("c.txt", "gamma")] });
+    await writeFencedRecoveryManifest({ storage: s, epoch: await s.currentEpoch(), directory: m, now });
+    const d = await promoteController({ storage: s, manifestDirectory: m, blobs, successor: "ctl-d", promotionId: "p3", now });
+    assert.equal(d.fencedHolder, "ctl-c");
+    await assert.rejects(cRun.publish({ commandId: cid("c2"), actor: "rob", name: "c2", files: [file("d.txt", "delta")] }), stale);
+    const e2 = await s.currentEpoch();
+    for (const old of ["ctl-a", "ctl-b", "ctl-c"]) await assert.rejects(assertStartAllowed(s, old, e2), /may not use this store/, old);
+    await assertStartAllowed(s, "ctl-d", e2);
+  } finally { gone(dir); }
+});
+
+test("the fence holder takes only plain names: colons, newlines, spaces, unicode and over-long names are left out of it, and nothing they carry can be read back as a promotion id, epoch or holder (K05 second review)", () => {
+  for (const h of ["a:b", "a\nb", "a b", "ctlé", "‮ctl", "x".repeat(81), ":", "a:9:ctl-b", "-a", ".a", ""]) {
+    const f = fenceHolder("p1", 4, h);
+    assert.equal(f, "promotion-fence:p1:4", JSON.stringify(h));
+    assert.deepEqual(parseFenceHolder(f), { promotionId: "p1", fencedEpoch: 4, fencedHolder: null });
+  }
+  assert.deepEqual(parseFenceHolder(fenceHolder("p1", 4, "x".repeat(80))), { promotionId: "p1", fencedEpoch: 4, fencedHolder: "x".repeat(80) });
+  // the earlier form, without a holder, still parses
+  assert.deepEqual(parseFenceHolder("promotion-fence:k05s:12"), { promotionId: "k05s", fencedEpoch: 12, fencedHolder: null });
+  for (const h of ["promotion-fence:p1:4:ctl\n", "promotion-fence:p1:4:ctlé", "promotion-fence:p1:4:ctl:x", "promotion-fence:p1:04", "promotion-fence:p1:4 ", " promotion-fence:p1:4", "PROMOTION-FENCE:p1:4", "promotion-fence:" + "p".repeat(49) + ":4", "promotion-fence:p.1:4"]) {
+    assert.equal(parseFenceHolder(h), undefined, JSON.stringify(h));
+  }
+  assert.deepEqual(parseFenceHolder("promotion-fence:p1:4:ctl"), { promotionId: "p1", fencedEpoch: 4, fencedHolder: "ctl" });
+});

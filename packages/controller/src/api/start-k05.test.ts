@@ -111,3 +111,41 @@ test("a controller fenced by a promotion can neither move its database nor resto
     assert.equal(await holder(), fence, "the promotion's holder still holds the store");
   } finally { await a.close().catch(() => undefined); rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); }
 });
+
+test("a restore the old controller staged BEFORE the fence is not swapped in at its restart: the fence and the promotion stay, and the successor starts on the data it had (K05 second review)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-k05r-"));
+  const dbPath = join(d, "c.sqlite"), manifests = join(d, "recovery");
+  const lines: string[] = [];
+  const base = { storage: { kind: "sqlite", path: dbPath }, argv: [], env: {}, print: (l: string) => { lines.push(l); }, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer(), manual: true },
+    recovery: { manifestDirectory: manifests, everyMs: 60_000, now: () => new Date("2026-11-27T12:00:00.000Z") }, backup: { directory: join(d, "backups") } };
+  const a = await startController(base as never);
+  let b: Awaited<ReturnType<typeof startController>> | undefined;
+  try {
+    const boot = await a.services.principals.bootstrapOwner({ name: "rob" });
+    const call = async (c: typeof a, op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    assert.equal((await call(a, "project.create", { name: "Garden" }, "p1")).ok, true);
+    await a.dispatch!.driver.runOnce();
+    const name = (await call(a, "backup.now", {}, "b1")).result.item.name as string;
+    assert.equal((await call(a, "project.create", { name: "Late" }, "p2")).ok, true);
+    const preview = await call(a, "backup.restore.preview", { name });
+    const applied = await call(a, "backup.restore.apply", { name, confirm: preview.result.item.token }, "r1");
+    assert.ok(applied.ok, JSON.stringify(applied));
+    await a.close();
+    // the promotion, after the restore was staged and the old controller stopped
+    const other = await SqliteStorage.open({ path: dbPath });
+    try { await promoteController({ storage: other, manifestDirectory: manifests, blobs: await FileBlobStore.open({ directory: join(d, "blobs-b") }), successor: "controller-b", promotionId: "k05r", now: () => new Date("2026-11-27T12:05:00.000Z") }); } finally { await other.close(); }
+    const state = async (): Promise<Record<string, unknown> | undefined> => { const s = await SqliteStorage.open({ path: dbPath }); try { const snap = await s.snapshot(); try { return (await snap.read("state", { limit: 1 }))[0]; } finally { await snap.close(); } } finally { await s.close(); } };
+    const fenced = await state();
+    // the old controller's restart: the restore is not swapped in and the start check refuses it
+    await assert.rejects(startController(base as never), /the controller promotion k05r named controller-b/);
+    assert.ok(lines.some((l) => /The restore of .* was not applied: the database was taken by another controller or a controller promotion/.test(l)), lines.join("\n"));
+    assert.deepEqual(await state(), fenced, "the store is the promotion's, untouched");
+    // the successor (same data directory here) starts on the data it had: the project made after the backup is there, and the failed restore is not tried again
+    lines.length = 0;
+    b = await startController({ ...base, holder: "controller-b" } as never);
+    const projects = JSON.stringify((await call(b, "project.list", {})).result);
+    assert.ok(projects.includes("Late"), projects);
+    assert.ok(lines.some((l) => /was tried and could not be applied/.test(l)), lines.join("\n"));
+    assert.equal((await call(b, "backup.restore.cancel", {}, "rc")).result.cancelled, true);
+  } finally { await a.close().catch(() => undefined); await b?.close().catch(() => undefined); rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); }
+});
