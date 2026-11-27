@@ -20379,3 +20379,47 @@ ASSUMPTION: the line names the drafting tool and its arguments, not the submit s
 **Supervisor test race (Claude agent, Opus 5.5, 2026-11-27; test only, one self-review).** CI exhaustive run 45944124327 (ubuntu, Node 24.21.0, shard 2) failed `heartbeat off: no variables at all` in `release/supervisor.test.ts`. The fixture child writes its `.pids` line before its `.env` line, and the test called `off.stop()` once two pids appeared, so the read could come before the second env line was written, or stop() could end the child in between. Product behaviour is correct.
 - Fix: the test now waits, with the usual 20 s bound, for both the second pid and the second env line before stopping. Verification found a second race of the same kind (Node 22, 1/30 alone under load): the K02a test asserted `alive(kid) === false` right after the fall-back started. SIGKILL had already gone out, but a probe saw the kid still in state `Z` (killed, not yet reaped by its new parent; `kill(pid, 0)` succeeds on a zombie) twice and `R` (teardown under way) once in 60 runs. It is now a bounded wait that counts a zombie as gone; a kid that survived would ignore SIGTERM and time out. Every other "gone" check already waited.
 - Evidence (two busy loops for load): heartbeat-off on Node 24, unfixed 30/30 pass (window too short to hit), with a 300 ms sleep injected between the two writes in a temporary dist copy unfixed 0/10 (the CI assertion) and fixed 10/10, fixed without injection 30/30. K02a on Node 22: unfixed 1/30 and 3/60 fail, fixed 60/60.
+
+## U09b (validation slice): the card's scenario replayed with every step from its real producer, through the running controller, on SQLite and PostgreSQL (Claude agent, Sonnet 5.5, 2026-11-27; branch `card-u09b`; test only, no product code changed; card NOT flipped; task-plan files unchanged; not pushed; no workflow dispatched)
+
+Plain words first. The 2026-11-13 rounds above built the web view, the producers, the links, the owner's correction and the rerun refusal, and P07 (finish) put replay reruns in the task's own simulation scope. One thing in the card was still met only partly: "the validation with a task branch, provider switch, compressed history, failed tool and a later owner correction run through the running controller". In `api/start-replay-finish.test.ts` the provider switch and the failed tool call were written by hand with `activity.record`, and agent-message steps had no composed test at all. This slice runs that scenario with no step written by hand, and replays it through the state API and the web routes with zero effects.
+
+**Dependency check.** Every blocker of U09b (U09, U07, K06c, P07, C09h) is implemented, so no build-ahead was needed. Y02 and Y03 are not blockers of this card.
+
+**What the new test does** (`api/start-replay-producers.test.ts`; the composed `startController` on SQLite and on PostgreSQL, which are the two stores the composed controller takes; the services it reaches have their own four-backend suites):
+- The owner's instruction is a real message to the agent (`message.send`, so the messages service writes the `owner-message` step, outcome `dispatched`).
+- The first attempt starts on the first route of the list (the dispatcher writes "runs on route strata/qwen"). Its process makes a tool call through the dispatcher's gateway whose local executor fails ("disk full"). The dispatcher writes `tool-call` with outcome `failed`, its own knowledge with no "reported by agent" note. The process then compacts its history (`recordCompaction`, the `compression` step), opens a side line (`branch.open`, so the branch registry writes the `branch` step on the lane, `laneStatus: controller`) and reports thinking.
+- The provider switch is real: the owner cuts the first engine over (`routing.cutover`). The running attempt is cancelled and its replacement starts on the next open route, and the dispatcher writes "runs on route gpu2/qwen" and "moved from route strata/qwen to route gpu2/qwen".
+- The replacement's agent answers the owner (`message.send` with its own credential, so the messages service writes the `agent-message` step).
+- The owner's later correction comes from free words in chat. It is shown first, nothing is replaced before the yes, and after the yes the owner's instruction step is superseded by the correction step.
+- The test asserts that apart from the owner's correction, every step's writer is a controller service. It also checks each step's outcome, line and authority, that the switch comes after the failure and the answer after the switch, and the summary counts.
+- What the steps cite is resolved for the reader. Both messages are readable, and their text (the agent's words) is marked untrusted. The failed call cites its tool operation.
+- The web routes are read: the open replay (the same steps as the API), the side line's lane filter, every step's own page (the agent message's link marked untrusted), and a search. A rerun inside the replay is refused. Across all of these, a consistent copy of the store shows no new operation, the delivery table and its counter unchanged, and no new effect. No read goes through the chat interpreter, and no model or route stand-in is called anywhere in the story.
+
+**Producer gaps looked for and not found.** Each producer the card names wrote an honest step without any change: dispatcher, tool gateway, messages, compaction, branches, owner correction. Meetings, reviews, artifacts and submissions are covered by the 2026-11-13 tests. ASSUMPTION: the dispatcher's tool-call and route steps stay on the main line even while a side line is open. A side line is a side chat (several can be active at once), and the controller does not know which line a tool call served, so naming one would be a guess. A step the controller cannot place is shown on the main line, not on an invented lane.
+
+**Breakages** (each applied alone to the built files, the SQLite case run through the slot, the file restored and its sha256 compared): 16 of 17 caught. The ones caught were:
+- a failed call mapped to confirmed;
+- no provider-switch step;
+- no route-chosen step;
+- the compaction recorded as another kind;
+- the branch step written off its lane;
+- the message step not written (caught as a TypeError when the owner-message step was looked up);
+- the message step claiming confirmed;
+- the agent message's text marked trusted;
+- the message resolver dropping the text;
+- the owner correction not replacing;
+- a service step on a line read as verified;
+- a rerun allowed inside the replay;
+- the web replay read also starting a simulation (caught by the write log);
+- the web lane filter ignored;
+- the web step page without links;
+- the web search ignoring the query.
+
+Missed, as expected: the link reader treating a resolver's silence as trusted. Every resolver this story reaches says `untrusted: true` itself, and that default is covered by the 2026-11-13 review's unit test.
+
+**What remains of U09b** (for the flip audit to weigh):
+- No clean-context audit of U09b against every acceptance clause has been made yet. That audit, and a green exhaustive CI run over the U09b commits, are the remaining steps before a flip.
+- The page itself (`packages/ui` replay view) is tested by its unit tests and through its routes. No browser drives it against the composed controller (there is no browser test pattern in the repo).
+- Live thinking from a real model, the Pi-side copy of K06c's deletion and real hardware cannot be checked offline (unchanged).
+- The composed scenario runs on SQLite and PostgreSQL only, which are the two stores `startController` takes.
