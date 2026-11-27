@@ -369,7 +369,7 @@ test("re-check: no search is retried in exponentially or quadratically many ways
 });
 
 test("an access-denied start's read-back and the real-sandbox detail's arguments: every account, home folder, SID and address goes, the folders and rights stay", () => {
-  // The read-back windows-job.ts writes after an access-denied wsb start (own-hardware run 44501483353), with what a real machine can list: the console user, the machine's
+  // The read-back the removed Windows Sandbox backend (windows-job.ts) wrote after an access-denied wsb start (own-hardware run 44501483353); kept as realistic redaction input, with what a real machine can list: the console user, the machine's
   // own accounts, accounts of a domain the redaction does not know, Microsoft and Azure AD accounts, SIDs, and a job folder under the user's profile.
   const n = { users: ["DESKTOP-4F2K9\\robert", "Robert Hostetter"], hosts: ["DESKTOP-4F2K9"] };
   const readback = [

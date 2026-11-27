@@ -14,7 +14,7 @@ import {
   checkNativeRecipe, checkProgramFolder, grantsFor, isWindowStationMode, launcherArgs, nativeEnv, newRunProfileName, programPath,
   type ContainerKind, type NativeSettings,
 } from "./windows-native-plan.js";
-import { checkWindowsHostPath, overlapsWin } from "./windows-plan.js";
+import { checkWindowsHostPath, overlapsWin } from "./windows-paths.js";
 
 export interface WindowsNativeOptions {
   /** Default: the real Windows implementation. */

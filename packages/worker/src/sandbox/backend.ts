@@ -36,7 +36,7 @@ export interface PlanOptions {
 }
 
 /**
- * One OS mechanism for confinement (bubblewrap on Linux; Seatbelt and Windows Sandbox are separate backends). A backend only plans how a
+ * One OS mechanism for confinement (bubblewrap on Linux; Seatbelt on macOS and the native AppContainer launcher on Windows are separate backends). A backend only plans how a
  * confined process starts and proves itself with `health`; the launcher owns audit, capacity, time limits and killing.
  */
 export interface SandboxBackend {

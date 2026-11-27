@@ -2,6 +2,8 @@
 
 Status: PLAN ONLY (2026-11-24, Claude agent). No code was written or run. No card is flipped. Nothing here changes the implementation plan's statuses.
 
+**Update 2026-11-26: the owner decided to keep the AppContainer launcher and not use Windows Sandbox at all (it needs Windows Pro). The Windows Sandbox backend (`windows.ts`, `windows-plan.ts`, `windows-real.ts` and the rest), its tests, its `wsb` diagnostics and their workflow steps were removed; the "optional Pro tier" below is not kept. Descriptions of "Windows today" in this plan are as of 2026-11-24.**
+
 **Update 2026-11-25: the seven decisions in section 14 are decided by delegation (ASSUMPTION; the owner can overrule any of them), the native route is the Windows plan, and the cards were rewritten to match (A03b, G05, G06, H12r, H12i, A08c, Y02; see `implementation-notes.md`, "Native Windows plan revision"). Still a plan: no product code changed and no card flipped.**
 
 Why this exists. The owner decided on 2026-11-24 that the Windows Sandbox (`wsb`) route is not enough: it needs a signed-in interactive console session, `wsb start` was refused (access denied, 0x80070005) even in the owner's own elevated console session on Windows 11 Pro, its unattended and UAC story is unproven, and it exists only on Pro, Enterprise and Education, not Home. The owner wants a plan for Windows isolation that works **unattended** (a service; nobody signed in or at the keyboard; no UAC prompt at run time; at most one admin approval at install) and, if possible, on **Windows Home** too.

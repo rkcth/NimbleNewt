@@ -25,9 +25,12 @@
           "worker/sandbox/seatbelt"
         ],
         "win32": [
-          "worker/sandbox/windows",
-          "worker/sandbox/windows-host-real",
-          "worker/sandbox/windows-real"
+          "worker/sandbox/windows-native",
+          "worker/sandbox/windows-native-contract",
+          "worker/sandbox/windows-native-channel",
+          "worker/sandbox/windows-paths",
+          "worker/sandbox/containment-windows-cases",
+          "worker/sandbox/containment-native-gate"
         ]
       },
       "notApplicable": {
@@ -41,9 +44,7 @@
           "needs POSIX permissions and a non-root user",
           "symbolic links need privileges on Windows",
           "POSIX permissions",
-          "POSIX paths",
-          "this machine has a Windows Sandbox client; the no-client case does not apply (windows-real.test.ts covers a machine with one)",
-          "set NIMBLENEWT_REAL_WINDOWS_AUTOLOGON=1 on a machine the owner set up for auto-login and lock"
+          "POSIX paths"
         ]
       },
       "minTests": 45

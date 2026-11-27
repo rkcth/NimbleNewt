@@ -13,10 +13,9 @@ import type { BackendHealth, SandboxBackend, SpawnPlan } from "./backend.js";
 import { SandboxError } from "./errors.js";
 import { SandboxLauncher, type LaunchRecord } from "./launcher.js";
 import type { NormalizedRecipe } from "./recipe.js";
-import type { ProcessResult } from "./windows-host.js";
 import type { ChannelFs, ChannelJob, ChannelPorts } from "./windows-native-channel.js";
 import { FILE_CHANNEL_ENV, encodeFrame, openWorkerFileChannel } from "@nimblenewt/contracts";
-import { jobFile, launcherSid, probeProfile, profilesDir, readProfileRecord, readRecord, recordsDir, retireProfile, revokeAndReadBack, runNativeJob, runProfileFor, slotDir, sweepLeftovers, sweepLeftoversLocked, type JobOutcome, type NativeHost, type NativeJob, type RunRecord } from "./windows-native-job.js";
+import { jobFile, launcherSid, probeProfile, profilesDir, readProfileRecord, readRecord, recordsDir, retireProfile, revokeAndReadBack, runNativeJob, runProfileFor, slotDir, sweepLeftovers, sweepLeftoversLocked, type JobOutcome, type NativeHost, type NativeJob, type ProcessResult, type RunRecord } from "./windows-native-job.js";
 import {
   DEFAULT_JOB_LIMITS, EXIT_BUSY, EXIT_FAILED, FAILURE_PREFIX, LPAC_CAPABILITIES, NATIVE_MODE, NODE_PRESERVE_OPTIONS, REFUSED_ROUTE, checkNativeRecipe, failureKindOf, grantsFor, grantsLeft, isRunProfileName, launcherArgs, nativeEnv, newRunProfileName,
   parseLauncherLine, programPath, quoteWindowsArg, softRefusals, type NativeGrant, type NativeSettings,

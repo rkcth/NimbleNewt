@@ -1,10 +1,17 @@
-import type { ProcessResult } from "./windows-host.js";
 import { ChannelRelay, type ChannelFs, type ChannelJob, type ChannelPorts, type ChannelStats } from "./windows-native-channel.js";
 import {
   EXIT_BUSY, EXIT_FAILED, FAILURE_PREFIX, RUN_PROFILE_PREFIX, failureKindOf, grantArgs, isRunProfileName, isWindowStationMode, parseLauncherLine, softRefusals,
   type LauncherLine, type NativeFailure, type WindowStationMode, type NativeGrant, type NativeSettings, type RunFiles, type RunProfile,
 } from "./windows-native-plan.js";
-import { overlapsWin } from "./windows-plan.js";
+import { overlapsWin } from "./windows-paths.js";
+
+/** One finished program: its exit code (null when it was stopped or did not start), its output, and whether it ran out of time. */
+export interface ProcessResult {
+  readonly code: number | null;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly timedOut: boolean;
+}
 
 /** Everything the native backend does to the machine, behind one interface: files, processes and the launcher. The real one is windows-native-real.ts; the unit tests use a simulated one. */
 export interface NativeHost {

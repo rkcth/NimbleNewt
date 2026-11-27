@@ -28,7 +28,7 @@ export const ROOT_ONLY = [
   // (test-changed.mjs and affected-packages.mjs are not listed: they decide what every part of the typical tier runs, so, like ci.yml, a change to them tests every package)
   // (a package's drift test reads copy-credential-scan.test.mjs, so that one still selects everything)
   /^scripts\/(?!copy-credential-scan\.test\.mjs$)[^/]+\.test\.mjs$/,
-  /^scripts\/(test-shard|ci-annotate|coverage|qa-diagnose|seatbelt-diagnose|license-inventory|roadmap|check-package-boundaries|y02-checkpoint|wsb-cleanup|wsb-job-context|wsb-launch-variants|wsb-list-line)\.mjs$/,
+  /^scripts\/(test-shard|ci-annotate|coverage|qa-diagnose|seatbelt-diagnose|license-inventory|roadmap|check-package-boundaries|y02-checkpoint)\.mjs$/,
   /^scripts\/y02-scenarios\.json$/,
   /^scripts\/generate_task_plan\.py$/,
   // The other workflows are read by the evidence-workflows script test; only ci.yml is read by a package's test (the minimum Node); own-hardware.yml and qa.yml are named in package or script sources.

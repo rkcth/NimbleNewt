@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { connect } from "node:net";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, test } from "node:test";
 import type { SandboxBackend } from "./backend.js";
 import { CONTAINMENT_SCHEMA, MAX_REPORT_BYTES, REQUIRED_CASE_IDS, assessRelease, parseReport, produceReport, runContainmentSuite, runOutcome, statesWeakerBoundary, type ContainmentReport, type NativeWindowsEvidence, type PlatformName, type WindowsEvidence } from "./containment.js";
-import { evidenceIdentity, unavailableBackend, windowsConsoleUser, windowsEvidenceBackend, windowsSandboxEvidenceBackend } from "./containment-windows.js";
-import { SandboxLauncher, type LaunchRequest, type RunResult } from "./launcher.js";
+import { unavailableBackend, windowsEvidenceBackend } from "./containment-windows.js";
+import { windowsConsoleUser } from "./windows-console.js";
+import { SandboxLauncher, type LaunchRequest } from "./launcher.js";
 import { bubblewrapBackend } from "./linux.js";
 
 // The suite starts real confined processes. Where bubblewrap cannot run these are skipped, unless NIMBLENEWT_REQUIRE_SANDBOX=1 (CI), where unusable is a failure.
@@ -291,127 +291,24 @@ describe("G05 report provenance (the prebuilt owner bundle)", () => {
   });
 });
 
-// G05 on Windows: the cases are cmd batch files. A GitHub-hosted Windows runner has no Windows Sandbox, so the real Windows run happens only on a host that has it; here the Windows
-// cases are checked with recording launchers: the command lines, the read-only input that carries the batch file, and the judging of Windows-shaped (CRLF) output.
-interface Launched { readonly mode: string; readonly command: readonly string[]; readonly readOnly: readonly { host: string; guest: string }[]; readonly env: Readonly<Record<string, string>>; readonly script: string | undefined }
-function recordingLauncher(log: Launched[], stdout: (script: string) => string): SandboxLauncher {
-  const fake = {
-    capacity: { available: true, backend: "recorded", checkedAt: NOW.toISOString() },
-    launch: async (req: LaunchRequest) => {
-      const tools = req.recipe.readOnly[0]?.host;
-      let script: string | undefined;
-      try { script = tools === undefined ? undefined : readFileSync(join(tools, "case.cmd"), "utf8"); } catch { script = undefined; }
-      log.push({ mode: req.recipe.mode, command: [...req.command], readOnly: req.recipe.readOnly.map((m) => ({ ...m })), env: { ...req.recipe.env }, script });
-      const result: RunResult = { exitCode: 0, signal: null, timedOut: false, killed: false, stdout: stdout(script ?? ""), stderr: "", truncated: false, stdoutTruncated: false, durationMs: 1 };
-      return { result: Promise.resolve(result) };
-    },
-  };
-  return fake as unknown as SandboxLauncher;
-}
-// What the fixture plants (containment.ts), as an unconfined Windows run would print it: every tagged read got through.
-const UNCONFINED_READS = ["A:G05-CONTROLLER-SECRET-7f3a", "D:controller.db", "R:G05-CREDENTIAL-SECRET-91bc", "K:G05-CREDENTIAL-SECRET-91bc", "L:id_g05_fixture", "C:G05-CONTROLLER-SECRET-7f3a", "L:controller.db", "g05-end", ""].join("\r\n");
-const READ_CASES = ["deny-symlink-read", "deny-credential-read", "deny-controller-data-read"];
-
-describe("G05 containment suite, Windows cases (recorded launchers, any OS)", () => {
-  test("each case is a CRLF batch file in a read-only input, run by its guest path when confined and by its host path when not", async () => {
-    const confined: Launched[] = [];
-    const free: Launched[] = [];
-    const suite = await runContainmentSuite({ dialect: "windows", launcher: recordingLauncher(confined, () => "A:\r\nD:\r\nR:\r\nK:\r\nL:\r\nC:\r\ntried=1\r\ng05-end\r\n"), unconfinedLauncher: recordingLauncher(free, () => UNCONFINED_READS) });
-    assert.deepEqual(suite.cases.map((c) => c.id).sort(), [...REQUIRED_CASE_IDS].sort());
-    assert.ok(confined.length > 0 && free.length > 0);
-    for (const l of confined) {
-      assert.equal(l.mode, "sandboxed");
-      assert.deepEqual(l.command, ["/windows/system32/cmd.exe", "/d", "/c", "C:\\nn\\inputs\\g05\\case.cmd"]);
-      assert.equal(l.readOnly.length, 1);
-      assert.equal(l.readOnly[0]!.guest, "/inputs/g05");
-      assert.ok(l.env["SystemRoot"] !== undefined);
-    }
-    for (const l of free) {
-      assert.equal(l.mode, "trusted-host");
-      assert.match(l.command[0]!, /System32[\\/]cmd\.exe$/);
-      assert.deepEqual(l.command.slice(1, 3), ["/d", "/c"]);
-      assert.equal(l.command[3], join(l.readOnly[0]!.host, "case.cmd"));
-    }
-    for (const l of [...confined, ...free]) {
-      assert.ok(l.script !== undefined);
-      assert.ok(l.script.startsWith("@echo off\r\n"), l.script);
-      // Every case ends at its marker; the last unconfined launch is the trusted-host exception, which only reads the outside file.
-      if (l !== free[free.length - 1]) assert.ok(l.script.includes("echo g05-end\r\n"), l.script);
-      assert.doesNotMatch(l.script, /[^\r]\n/, "every line ends in CRLF");
-      assert.doesNotMatch(l.script, /\/bin\/sh|\$PWD|\/dev\/null/, "no POSIX left in a Windows case");
-    }
-    const v = Object.fromEntries(suite.cases.map((c) => [c.id, c]));
-    // The reads got through unconfined and not confined: they hold, and say they were paired.
-    for (const id of READ_CASES) { assert.equal(v[id]!.verdict, "pass", `${id}: ${v[id]!.detail}`); assert.match(v[id]!.detail, /got through without the sandbox/); }
-    // A recorded launcher changes nothing on the host, so every write and the network attempt could not be shown to work unconfined: inconclusive, never a pass.
-    for (const id of ["deny-write-host-path", "deny-symlink-write", "deny-network-loopback", "deny-write-protected-name"]) assert.equal(v[id]!.verdict, "inconclusive", `${id}: ${v[id]!.detail}`);
-    // The controls ran confined once each; the recorded launcher wrote nothing, so writing its own directories fails, and reading its own file fails (no decoy text).
-    assert.equal(v["control-write-own-directories"]!.verdict, "fail");
-    assert.equal(v["control-read-own-decoy"]!.verdict, "fail");
-    // The exception is shown with the same batch-file form. (Its refusal without authority is checked by the real launcher, which off Windows refuses a Windows program path first.)
-    assert.ok(suite.trustedHost !== undefined);
-    assert.match(free[free.length - 1]!.script ?? "", /^@echo off\r\ntype "[^"]+victim\.txt"\r\n$/);
-  });
-
-  test("a confined Windows run that prints protected content fails its case", async () => {
-    const suite = await runContainmentSuite({ dialect: "windows", launcher: recordingLauncher([], () => UNCONFINED_READS), unconfinedLauncher: recordingLauncher([], () => UNCONFINED_READS) });
-    for (const id of READ_CASES) assert.equal(suite.cases.find((c) => c.id === id)!.verdict, "fail", id);
-  });
-
-  test("the Windows evidence run's owner and share account: configured, else the console user (as windows-real.test.ts), else the runner's account; the source is always named", async () => {
-    const env = { USERDOMAIN: "PC", USERNAME: "runner" };
-    assert.deepEqual(evidenceIdentity(env, "PC\\owner"), { owner: "PC\\owner", shareIdentity: "PC\\owner", ownerSource: "console", shareSource: "console" });
-    assert.deepEqual(evidenceIdentity(env), { owner: "PC\\runner", shareIdentity: "PC\\runner", ownerSource: "runner", shareSource: "runner" });
-    assert.deepEqual(evidenceIdentity(env, ""), evidenceIdentity(env));
-    assert.deepEqual(evidenceIdentity({ ...env, NIMBLENEWT_WSB_OWNER: "PC\\set", NIMBLENEWT_WSB_SHARE_IDENTITY: "PC\\share" }, "PC\\owner"), { owner: "PC\\set", shareIdentity: "PC\\share", ownerSource: "configured", shareSource: "configured" });
-    assert.deepEqual(evidenceIdentity({ ...env, NIMBLENEWT_WSB_OWNER: "PC\\set", NIMBLENEWT_WSB_SHARE_IDENTITY: "" }, "PC\\owner"), { owner: "PC\\set", shareIdentity: "PC\\owner", ownerSource: "configured", shareSource: "console" });
-    if (process.platform !== "win32") assert.equal(await windowsConsoleUser(), undefined);
-  });
-
-  test("the Windows evidence backend never throws: off Windows, or not installed, it has no capacity and says why; the superseded Windows Sandbox variant keeps that contract", async () => {
+describe("G05 containment suite on Windows: the evidence backend (any OS)", () => {
+  test("the Windows evidence backend never throws: off Windows, or not installed, it has no capacity and says why", async () => {
     // On Windows the real health check may start a container, so the off-Windows part runs only elsewhere.
     if (process.platform !== "win32") {
       const off = await windowsEvidenceBackend({ USERDOMAIN: "D", USERNAME: "u" }).health();
       assert.equal(off.healthy, false);
       assert.equal(off.backend, "windows-native");
       assert.match(off.reason ?? "", /only on Windows|could not be configured/);
-      const legacy = await windowsSandboxEvidenceBackend({ USERDOMAIN: "D", USERNAME: "u", NIMBLENEWT_G05_WSB_BASE: "C:\\nn-g05" }).health();
-      assert.equal(legacy.healthy, false);
-      assert.match(legacy.reason ?? "", /could not be configured|only on Windows/);
+      assert.equal(await windowsConsoleUser(), undefined);
     }
-    const bad = await windowsSandboxEvidenceBackend({ NIMBLENEWT_G05_WSB_BASE: "relative\\path" }).health();
-    assert.equal(bad.healthy, false);
-    assert.match(bad.reason ?? "", /could not be configured|only on Windows/);
-    const stub = unavailableBackend("windows-sandbox", "why");
-    assert.deepEqual(await stub.health(), { healthy: false, backend: "windows-sandbox", reason: "why" });
+    const stub = unavailableBackend("stand-in", "why");
+    assert.deepEqual(await stub.health(), { healthy: false, backend: "stand-in", reason: "why" });
     const suite = await runContainmentSuite({ backend: stub });
     assert.ok(suite.cases.every((c) => c.verdict === "not_run" && c.detail.includes("why")));
   });
 });
 
-describe("G05 Windows network case and the trusted-host program path (review)", () => {
-  // The guest's 127.0.0.1 is its own, so the loopback attempt alone cannot fail there; the adapter list is what can. The unconfined recorded launcher really connects to the witness.
-  const connecting = (log: Launched[]): SandboxLauncher => {
-    const inner = recordingLauncher(log, () => "tried=1\r\ng05-end\r\n");
-    return { capacity: inner.capacity, launch: async (req: LaunchRequest) => {
-      const run = await inner.launch(req);
-      const port = /Connect\('127\.0\.0\.1', (\d+)\)/.exec(log[log.length - 1]?.script ?? "")?.[1];
-      if (port !== undefined) await new Promise<void>((resolve) => { const s = connect(Number(port), "127.0.0.1", () => { s.end(); resolve(); }); s.on("error", () => resolve()); });
-      return run;
-    } } as unknown as SandboxLauncher;
-  };
-  const network = async (confinedOut: string): Promise<{ verdict: string; detail: string }> => {
-    const suite = await runContainmentSuite({ dialect: "windows", launcher: recordingLauncher([], () => confinedOut), unconfinedLauncher: connecting([]) });
-    return suite.cases.find((c) => c.id === "deny-network-loopback")!;
-  };
-  test("no adapter up: holds (paired); an adapter up: fails; no list: inconclusive; a connection: fails", async () => {
-    const held = await network("tried=1\r\nadapters=\r\ng05-end\r\n");
-    assert.equal(held.verdict, "pass", held.detail);
-    assert.match(held.detail, /got through without the sandbox/);
-    assert.equal((await network("tried=1\r\nadapters=Ethernet\r\ng05-end\r\n")).verdict, "fail");
-    assert.equal((await network("tried=1\r\ng05-end\r\n")).verdict, "inconclusive");
-    assert.equal((await network("tried=1\r\nCONNECTED-PS\r\nadapters=\r\ng05-end\r\n")).verdict, "fail");
-  });
+describe("G05 the trusted-host program path on Windows (review)", () => {
   test("a Windows launcher takes a drive path as a trusted-host program: refused without authority (not as a bad path); still refused for a confined run", async () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), "nn-g05-win-"))); // the real path: on macOS tmpdir() is under /var, a link to /private/var, and a recipe refuses a linked workdir
     try {

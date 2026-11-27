@@ -2,8 +2,7 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, rmdirSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { posix, win32 } from "node:path";
-import type { NativeHost } from "./windows-native-job.js";
-import type { ProcessResult } from "./windows-host.js";
+import type { NativeHost, ProcessResult } from "./windows-native-job.js";
 import type { ChannelFile, ChannelFs } from "./windows-native-channel.js";
 
 /** Parses `Get-CimInstance Win32_Process` lines ("pid parent ISO-start"); a line that does not fit is skipped. */
