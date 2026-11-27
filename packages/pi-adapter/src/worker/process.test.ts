@@ -1227,3 +1227,106 @@ test("H12i: a start with a route serves the proxy on the loopback and sends each
     f.end(); await f.done.catch(() => undefined);
   } finally { await new Promise<void>((r) => taken.close(() => r())); }
 });
+
+/** A thinking-only reply the server cut at its reply limit (finish reason `length`, no visible text). */
+function cutReply(): string[] {
+  const sse = (obj: unknown): string => `data: ${JSON.stringify(obj)}\n\n`;
+  const base = { id: "c1", object: "chat.completion.chunk", created: 1, model: "local" };
+  return [sse({ ...base, choices: [{ index: 0, delta: { role: "assistant", reasoning_content: "still thinking it over" }, finish_reason: null }] }), sse({ ...base, choices: [{ index: 0, delta: {}, finish_reason: "length" }] }), "data: [DONE]\n\n"];
+}
+const replyLimitOf = (m: Extract<FromChild, { t: "fetch" }>): number | undefined => {
+  const b = JSON.parse(Buffer.from(m.body ?? "", "base64").toString("utf8")) as { max_tokens?: number; max_completion_tokens?: number };
+  return b.max_completion_tokens ?? b.max_tokens;
+};
+
+test("W09 fixes: a reply cut at the reply limit with no visible text raises the next call's limit, doubling up to the host's ceiling; the turn result says so, and a readmit of the attempt starts from the raised limit", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nn-w09cut-"));
+  try {
+    const storage = () => openNodeJsonlStorage(dir, BACKGROUND_CONTEXT);
+    const start = { ...relayed, storeDir: dir, model: { ...relayed.model, contextWindow: 131072, maxTokens: 1024, replyCeiling: 4096 } };
+    const answer = (h: ReturnType<typeof host>, id: number, lines: string[]): void => {
+      h.send({ t: "fetch.head", id, status: 200, statusText: "OK", headers: [["content-type", "text/event-stream"]] });
+      for (const c of lines) h.send({ t: "fetch.chunk", id, data: Buffer.from(c).toString("base64") });
+      h.send({ t: "fetch.end", id });
+    };
+    const first = host({ storage }, "go");
+    first.send({ t: "start", v: 1, start });
+    await first.next("ready");
+    first.send({ t: "run", requestId: "req-1", content: "do the plan" });
+    const limits: (number | undefined)[] = [];
+    let from = 0;
+    // The first call and three nudged ones (W04's bound), each cut with no visible text.
+    for (let i = 0; i < 4; i++) {
+      const call = await first.next("fetch", from);
+      from = first.seen.indexOf(call) + 1;
+      limits.push(replyLimitOf(call));
+      answer(first, call.id, cutReply());
+    }
+    const result = await first.next("result");
+    assert.equal(result.status, "completed", JSON.stringify(result));
+    assert.equal(result.endKind, "length");
+    assert.deepEqual(limits, [1024, 2048, 4096, 4096], "doubled after each cut, never past the ceiling");
+    // The last cut (no nudge was left for it) is counted too.
+    assert.deepEqual(result.replyCut, { cuts: 4, limit: 4096, ceiling: 4096 });
+    first.send({ t: "close" });
+    await first.done;
+
+    // The readmit: a new process of the same attempt, on the same store folder, asks with the raised limit from its first call.
+    const second = host({ storage }, "refuse");
+    second.send({ t: "start", v: 1, start: { ...start, recover: { reason: "readmit" } } });
+    await second.next("ready");
+    second.send({ t: "run", requestId: "req-2", content: "go on" });
+    const call = await second.next("fetch");
+    assert.equal(replyLimitOf(call), 4096);
+    answer(second, call.id, sseReply("work-end"));
+    const bridge = await second.next("bridge");
+    second.send({ t: "bridge.reply", id: bridge.id, reply: { ok: true, result: { item: { state: "requested" } } } });
+    const next = await second.next("fetch", second.seen.indexOf(call) + 1);
+    answer(second, next.id, sseReply("thinking"));
+    const r2 = await second.next("result");
+    assert.deepEqual(r2.replyCut, { cuts: 4, limit: 4096, ceiling: 4096 }, "the count is kept with the limit");
+    second.send({ t: "close" });
+    await second.done;
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("W09 fixes: without a ceiling above the reply limit (the owner's own limit, or a host that gives none) the limit never grows, and a cut reply with text is not a cut without text", async () => {
+  for (const ceiling of [undefined, 1024]) {
+    const dir = mkdtempSync(join(tmpdir(), "nn-w09cut0-"));
+    try {
+      const storage = () => openNodeJsonlStorage(dir, BACKGROUND_CONTEXT);
+      const model = { ...relayed.model, contextWindow: 131072, maxTokens: 1024, ...(ceiling === undefined ? {} : { replyCeiling: ceiling }) };
+      const h = host({ storage }, "go");
+      h.send({ t: "start", v: 1, start: { ...relayed, storeDir: dir, model } });
+      await h.next("ready");
+      h.send({ t: "run", requestId: "req-1", content: "do the plan" });
+      const limits: (number | undefined)[] = [];
+      let from = 0;
+      for (let i = 0; i < 4; i++) {
+        const call = await h.next("fetch", from);
+        from = h.seen.indexOf(call) + 1;
+        limits.push(replyLimitOf(call));
+        h.send({ t: "fetch.head", id: call.id, status: 200, statusText: "OK", headers: [["content-type", "text/event-stream"]] });
+        for (const c of cutReply()) h.send({ t: "fetch.chunk", id: call.id, data: Buffer.from(c).toString("base64") });
+        h.send({ t: "fetch.end", id: call.id });
+      }
+      const result = await h.next("result");
+      assert.deepEqual(limits, [1024, 1024, 1024, 1024], String(ceiling));
+      assert.deepEqual(result.replyCut, { cuts: 4, limit: 1024, ceiling: 1024 }, "the cuts are still counted");
+      h.send({ t: "close" });
+      await h.done;
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+  // A reply cut with visible text is W07's ordinary cut (nudged, not raised) and no turn result carries a reply cut.
+  const { offline, hooks } = scripted();
+  offline.faux.setResponses([fauxAssistantMessage("The report so far: step one is", { stopReason: "length" })]);
+  const h = host(hooks);
+  h.send({ t: "start", v: 1, start: { ...offlineStart, model: { ...offlineStart.model, replyCeiling: 8192 } } });
+  await h.next("ready");
+  h.send({ t: "run", requestId: "req-1", content: "fix the parser" });
+  const result = await h.next("result");
+  assert.equal(result.endKind, "length");
+  assert.equal(result.replyCut, undefined);
+  h.send({ t: "close" });
+  await h.done;
+});

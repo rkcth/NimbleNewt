@@ -63,6 +63,17 @@ export function buildCheck(task, timeoutSeconds = 1800) {
 }
 
 /**
+ * W09 fixes: the done's checks of a task, the build first and then the task's own package tests when it declares them (`doneTests` in the task set: test files visible in the task's checkout, relative to its root, run with the
+ * sandbox's Node.js after the build). The held-out tests are never among them: the task set refuses a `doneTests` entry that names one (lib/taskset.mjs), and they are only copied into the checkout after the attempt has ended.
+ */
+export function doneChecks(task, timeoutSeconds = 1800) {
+  const checks = buildCheck(task, timeoutSeconds);
+  const tests = Array.isArray(task.doneTests) ? task.doneTests : [];
+  if (tests.length === 0) return checks;
+  return [...checks, { name: "the task's package tests", run: [SANDBOX_NODE, "--test", ...tests.map(String)], timeoutSeconds }];
+}
+
+/**
  * Whether the tools offered to the agent include one that reads or changes files or runs a command in its checkout: Pi's own (read, write, edit, bash) or a catalogue tool by the names the approval policy classifies
  * (packages/controller/src/policy/catalog.ts), or the bridge's own checkout tool (card W09b, `nimblenewt__work-checkout`: read, write, edit and run in the checkout's sandbox). Before W09b the worker offered only the other bridge tools,
  * so this was false and a coding task could not be done there (see the W09 notes).
@@ -89,30 +100,53 @@ export function bridgeFilterFor(variant) {
 /**
  * A worker run's outcome, from the controller's records (`attemptSummary`) and the acceptance suite. The outcome names are the W01 bench's (lib/classify.mjs OUTCOMES), so the gates and the report read them unchanged.
  * Fail closed: only a done the controller verified, with a report the second agent found supported, whose work passes the acceptance suite, is a verified finish.
+ * W09 fixes: every outcome also names its cause (`cause`, one of WORKER_CAUSES, with the second agent's own cause after `second-agent-`), so no run ends without one. The causes change no outcome and no gate: an `unclassified`
+ * run still fails the "no silent non-finish" gate; it now says why.
  */
+export const WORKER_CAUSES = Object.freeze(["verified", "wall-limit", "no-attempt", "not-finished", "false-done", "interface-mismatch", "uncalibrated", "check-not-passed", "second-agent", "reply-cut-not-raised", "reply-cut-below-ceiling", "reply-cut-at-ceiling", "empty-reply", "early-stops-used-up", "ended-partial", "ended-blocked", "ended-abandoned", "done-refused", "ended-otherwise", "bench-error"]);
+
+/** The second agent's part of a cause: `second-agent-<the controller's cause>`, or its questioning state when no cause was recorded. */
+const secondAgentCause = (attempt) => `second-agent-${String(attempt.questioningCause ?? attempt.questioning ?? "none").replace(/[^a-z0-9-]/g, "-").slice(0, 40)}`;
+
+/** The reply-cut cause and words of a run whose last reply was cut off at the output limit. */
+function replyCutOutcome(attempt) {
+  const r = attempt.replyCut ?? null;
+  if (r === null) return { cause: "reply-cut-not-raised", words: "the worker did not say it raised its reply limit" };
+  return { cause: r.limit >= r.ceiling ? "reply-cut-at-ceiling" : "reply-cut-below-ceiling", words: `${r.cuts} reply(ies) cut with no visible text; the reply limit was ${r.limit} tokens of a ceiling of ${r.ceiling}` };
+}
+
 export function classifyWorkerRun({ attempt, hidden, changed, timedOut = false }) {
-  const out = (outcome, reason) => ({ outcome, reason, claimsDone: attempt?.reportResult === "done" && attempt?.status === "succeeded" });
-  if (timedOut) return out("timeout", "the attempt had not finished at the run's wall-clock limit");
-  if (attempt === null || attempt === undefined) return out("error", "the controller started no attempt for the task");
-  if (attempt.state !== "finished") return out("error", `the attempt is ${attempt.state ?? "unknown"}, not finished`);
+  const out = (outcome, reason, cause) => ({ outcome, reason, cause, claimsDone: attempt?.reportResult === "done" && attempt?.status === "succeeded" });
+  if (timedOut) return out("timeout", "the attempt had not finished at the run's wall-clock limit", "wall-limit");
+  if (attempt === null || attempt === undefined) return out("error", "the controller started no attempt for the task", "no-attempt");
+  if (attempt.state !== "finished") return out("error", `the attempt is ${attempt.state ?? "unknown"}, not finished`, "not-finished");
   const done = attempt.status === "succeeded" && attempt.reportResult === "done";
+  const notRun = attempt.questioningWhy ? `; why: ${attempt.questioningWhy}` : "";
   if (done) {
     const verified = attempt.verifications.at(-1) === "passed";
     if (hidden?.passed !== true) {
-      if (hidden?.interfaceMismatch === true) return out("interface-mismatch", "a done was recorded and the acceptance tests do not type-check against the work");
-      return out("wrong", `a done was recorded${verified ? "" : " without a passed check"}${attempt.questioning === "supported" ? "" : ` and no second agent accepted its report (${attempt.questioning ?? "none"})`} and the acceptance tests fail`);
+      if (hidden?.interfaceMismatch === true) return out("interface-mismatch", "a done was recorded and the acceptance tests do not type-check against the work", "interface-mismatch");
+      return out("wrong", `a done was recorded${verified ? "" : " without a passed check"}${attempt.questioning === "supported" ? "" : ` and no second agent accepted its report (${attempt.questioning ?? "none"}${notRun})`} and the acceptance tests fail`, "false-done");
     }
-    if (!changed) return out("error", "the acceptance tests pass on an unchanged checkout: the task is not calibrated");
-    if (!verified) return out("unclassified", `a done was recorded and the acceptance tests pass, but the controller's check of the done did not pass (${attempt.verifications.join(", ") || "never checked"}): not a verified finish`);
-    if (attempt.questioning !== "supported") return out("unclassified", `a done was recorded and the acceptance tests pass, but no second agent accepted its report (questioning ${attempt.questioning ?? "none"}): not a verified finish (fail closed)`);
-    return out("verified-finish", "a verified work.end done, a report the second agent found supported, and the acceptance tests pass on the work");
+    if (!changed) return out("error", "the acceptance tests pass on an unchanged checkout: the task is not calibrated", "uncalibrated");
+    if (!verified) return out("unclassified", `a done was recorded and the acceptance tests pass, but the controller's check of the done did not pass (${attempt.verifications.join(", ") || "never checked"}): not a verified finish`, "check-not-passed");
+    if (attempt.questioning !== "supported") return out("unclassified", `a done was recorded and the acceptance tests pass, but no second agent accepted its report (questioning ${attempt.questioning ?? "none"}${attempt.questioningCause ? `, cause ${attempt.questioningCause}` : ""}${notRun}): not a verified finish (fail closed)`, secondAgentCause(attempt));
+    return out("verified-finish", "a verified work.end done, a report the second agent found supported, and the acceptance tests pass on the work", "verified");
   }
-  if (attempt.endKind === "length") return out("length", `the attempt ended ${attempt.status}, its last reply cut off at the output limit`);
-  if (attempt.endKind === "empty-visible-text") return out("empty", `the attempt ended ${attempt.status} on a reply with no visible text`);
-  if (attempt.status === "stopped-early") return out("stopped-early", `the agent kept stopping before it said its work was done; its ${attempt.readmitted} readmit(s) were used up`);
-  if (attempt.reportResult === "partial" || attempt.reportResult === "blocked" || attempt.reportResult === "abandoned") return out("stopped-early", `the agent ended ${attempt.reportResult} with a report: ${attempt.summary.slice(0, 200)}`);
-  if (attempt.reportResult === "done") return out("stopped-early", `the agent's done was refused (the check or the second agent) until its go-ons were used up: ${attempt.summary.slice(0, 200)}`);
-  return out("error", `the attempt ended ${attempt.status ?? "without an outcome"}: ${attempt.summary.slice(0, 200)}`);
+  if (attempt.endKind === "length") { const c = replyCutOutcome(attempt); return out("length", `the attempt ended ${attempt.status}, its last reply cut off at the output limit (${c.words})`, c.cause); }
+  if (attempt.endKind === "empty-visible-text") return out("empty", `the attempt ended ${attempt.status} on a reply with no visible text`, "empty-reply");
+  if (attempt.status === "stopped-early") return out("stopped-early", `the agent kept stopping before it said its work was done; its ${attempt.readmitted} readmit(s) were used up`, "early-stops-used-up");
+  if (attempt.reportResult === "partial" || attempt.reportResult === "blocked" || attempt.reportResult === "abandoned") return out("stopped-early", `the agent ended ${attempt.reportResult} with a report: ${attempt.summary.slice(0, 200)}`, `ended-${attempt.reportResult}`);
+  if (attempt.reportResult === "done") return out("stopped-early", `the agent's done was refused (the check or the second agent) until its go-ons were used up: ${attempt.summary.slice(0, 200)}`, "done-refused");
+  return out("error", `the attempt ended ${attempt.status ?? "without an outcome"}: ${attempt.summary.slice(0, 200)}`, "ended-otherwise");
+}
+
+/** A line naming how many runs ended with each cause (W09 fixes), for a batch's report; null when no run has one. */
+export function causesLine(records) {
+  const counts = new Map();
+  for (const x of records) if (typeof x.cause === "string") counts.set(x.cause, (counts.get(x.cause) ?? 0) + 1);
+  if (counts.size === 0) return null;
+  return `causes: ${[...counts].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).map(([c, n]) => `${c} ${n}`).join(", ")}`;
 }
 
 /** What the agent changed in its checkout, read through the task's own git directory (the agent's PLAN.md not counted). */
@@ -179,7 +213,7 @@ export async function runWorkerOne(ctx, task, variantName, repeat, { beforeAgent
     });
     log(`agent started on the worker (limit ${ctx.timeoutMinutes ?? task.timeoutMinutes} min, variant ${variantName}: ${variant.about})`);
     record.startedAt = new Date().toISOString();
-    const ran = await runW09Task(inst, { repository: dir, title: workerTitle(task), description, checks: buildCheck(task), timeoutMs: (ctx.timeoutMinutes ?? task.timeoutMinutes) * 60_000, tag: runId.slice(-24), ...(ctx.pollMs === undefined ? {} : { pollMs: ctx.pollMs }) });
+    const ran = await runW09Task(inst, { repository: dir, title: workerTitle(task), description, checks: doneChecks(task), timeoutMs: (ctx.timeoutMinutes ?? task.timeoutMinutes) * 60_000, tag: runId.slice(-24), ...(ctx.pollMs === undefined ? {} : { pollMs: ctx.pollMs }) });
     record.endedAt = new Date().toISOString();
     record.wallMs = ran.wallMs;
     record.timedOut = ran.timedOut;
@@ -209,7 +243,7 @@ export async function runWorkerOne(ctx, task, variantName, repeat, { beforeAgent
     }
     Object.assign(record, classifyWorkerRun({ attempt: summary, hidden, changed: ch.changed, timedOut: ran.timedOut }), { plan, changed: ch.changed, dirty: ch.dirty, diffStat: ch.diffStat, hidden, shipped });
   } catch (e) {
-    Object.assign(record, { outcome: "error", reason: `bench error: ${String(e?.message ?? e).slice(0, 500)}`, benchError: true });
+    Object.assign(record, { outcome: "error", reason: `bench error: ${String(e?.message ?? e).slice(0, 500)}`, cause: "bench-error", benchError: true });
   } finally {
     if (inst !== undefined) await inst.close().catch(() => undefined);
     if (!ctx.keep) {
@@ -236,13 +270,13 @@ export async function releaseBlocker({ records, resultsDir, batchId, benchCommit
     card: "W09", kind: "release-blocker", createdAt: now(), batchId, benchCommit, route, variant: shipped,
     why: `the W01 release gates do not hold for the shipped variant ${shipped} on the real worker`,
     failures: verdict.failures, gates: verdict.lines, ...(fileToolsLine(mine) === null ? {} : { fileTools: fileToolsLine(mine) }),
-    results: mine.map((x) => ({ runId: x.runId, taskId: x.taskId, size: x.size, outcome: x.outcome, reason: x.reason, attemptId: x.worker?.attemptId ?? null, questioning: x.worker?.questioning ?? null, verifications: x.worker?.verifications ?? [], nudges: x.nudges ?? 0, wallMs: x.wallMs, artifacts: x.artifacts })),
+    results: mine.map((x) => ({ runId: x.runId, taskId: x.taskId, size: x.size, outcome: x.outcome, cause: x.cause ?? null, reason: x.reason, attemptId: x.worker?.attemptId ?? null, questioning: x.worker?.questioning ?? null, questioningCause: x.worker?.questioningCause ?? null, questioningWhy: x.worker?.questioningWhy ?? null, replyCut: x.worker?.replyCut ?? null, verifications: x.worker?.verifications ?? [], nudges: x.nudges ?? 0, wallMs: x.wallMs, artifacts: x.artifacts })),
   };
   const dir = join(resultsDir, "release-blockers");
   await mkdir(dir, { recursive: true });
   const base = join(dir, `w09-${batchId}`);
   await writeFile(`${base}.json`, `${JSON.stringify(blocker, null, 2)}\n`);
-  await writeFile(`${base}.md`, [`# Release blocker (card W09): ${blocker.why}`, "", `Batch ${batchId}, bench commit ${benchCommit}, route ${route.provider}/${route.model} (kind ${route.kind}).`, "", "Failures:", ...verdict.failures.map((f) => `- ${f}`), ...(blocker.fileTools === undefined ? [] : ["", blocker.fileTools]), "", report.text, "", `Results: ${base}.json`, ""].join("\n"));
+  await writeFile(`${base}.md`, [`# Release blocker (card W09): ${blocker.why}`, "", `Batch ${batchId}, bench commit ${benchCommit}, route ${route.provider}/${route.model} (kind ${route.kind}).`, "", "Failures:", ...verdict.failures.map((f) => `- ${f}`), ...(causesLine(mine) === null ? [] : ["", causesLine(mine)]), ...(blocker.fileTools === undefined ? [] : ["", blocker.fileTools]), "", report.text, "", `Results: ${base}.json`, ""].join("\n"));
   return { pass: false, verdict, json: `${base}.json`, md: `${base}.md` };
 }
 

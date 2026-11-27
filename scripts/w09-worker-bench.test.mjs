@@ -6,14 +6,14 @@
 // NIMBLENEWT_REQUIRE_SANDBOX=1, where it fails instead. No network: the endpoint is a function.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadTaskset } from "./pi-eval/lib/taskset.mjs";
-import { radianceBase, radianceOnlyFetch, attemptSummary, openW09Installation } from "./pi-eval/lib/worker-embedder.mjs";
-import { DESCRIPTION_MAX, SANDBOX_NODE, SHIPPED_VARIANT, WORKER_VARIANTS, bridgeFilterFor, buildCheck, classifyWorkerRun, fileToolsLine, offersFileTools, releaseBlocker, renderWorkerPrompt, runWorkerOne, workerTitle } from "./pi-eval/lib/worker-run.mjs";
+import { radianceBase, radianceOnlyFetch, attemptSummary, openW09Installation, scrubbed } from "./pi-eval/lib/worker-embedder.mjs";
+import { DESCRIPTION_MAX, SANDBOX_NODE, SHIPPED_VARIANT, WORKER_CAUSES, WORKER_VARIANTS, bridgeFilterFor, buildCheck, causesLine, classifyWorkerRun, doneChecks, fileToolsLine, offersFileTools, releaseBlocker, renderWorkerPrompt, runWorkerOne, workerTitle } from "./pi-eval/lib/worker-run.mjs";
 import { piContextWindow } from "./pi-eval/worker-run.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -154,6 +154,65 @@ test("a verified finish needs a verified done, a supported report and passing ac
   assert.equal(o(att({ status: "failed", reportResult: null })), "error");
 });
 
+test("W09 fixes: every run ends with a named cause; an unclassified run says why the second agent did not run, a reply cut says how far its limit was raised; the outcomes (and so the gates) are unchanged", () => {
+  const c = (attempt, hidden = pass, changed = true, timedOut = false) => classifyWorkerRun({ attempt, hidden, changed, timedOut });
+  const cases = [
+    [c(att()), "verified-finish", "verified"],
+    [c(att(), pass, true, true), "timeout", "wall-limit"],
+    [c(null), "error", "no-attempt"],
+    [c(att({ state: "running" })), "error", "not-finished"],
+    [c(att(), fail), "wrong", "false-done"],
+    [c(att(), { ...fail, interfaceMismatch: true }), "interface-mismatch", "interface-mismatch"],
+    [c(att(), pass, false), "error", "uncalibrated"],
+    [c(att({ verifications: ["failed"] })), "unclassified", "check-not-passed"],
+    [c(att({ questioning: "not-run", questioningCause: "reply-cut", questioningWhy: "the second agent could not be asked: ... (reply-cut: the reply was cut at the 32768-token reply limit ...)" })), "unclassified", "second-agent-reply-cut"],
+    [c(att({ questioning: "not-run", questioningCause: null })), "unclassified", "second-agent-not-run"],
+    [c(att({ questioning: null })), "unclassified", "second-agent-none"],
+    [c(att({ status: "stopped-early", reportResult: null, endKind: "length" }), fail), "length", "reply-cut-not-raised"],
+    [c(att({ status: "stopped-early", reportResult: null, endKind: "length", replyCut: { cuts: 3, limit: 16384, ceiling: 25000 } }), fail), "length", "reply-cut-below-ceiling"],
+    [c(att({ status: "stopped-early", reportResult: null, endKind: "length", replyCut: { cuts: 5, limit: 25000, ceiling: 25000 } }), fail), "length", "reply-cut-at-ceiling"],
+    [c(att({ status: "stopped-early", reportResult: null, endKind: "empty-visible-text" }), fail), "empty", "empty-reply"],
+    [c(att({ status: "stopped-early", reportResult: null, readmitted: 2 })), "stopped-early", "early-stops-used-up"],
+    [c(att({ status: "succeeded", reportResult: "partial" })), "stopped-early", "ended-partial"],
+    [c(att({ status: "failed", reportResult: "blocked" })), "stopped-early", "ended-blocked"],
+    [c(att({ status: "failed", reportResult: "abandoned" })), "stopped-early", "ended-abandoned"],
+    [c(att({ status: "failed", reportResult: "done", questioning: "unsupported" })), "stopped-early", "done-refused"],
+    [c(att({ status: "failed", reportResult: null })), "error", "ended-otherwise"],
+  ];
+  for (const [r, outcome, cause] of cases) {
+    assert.deepEqual([r.outcome, r.cause], [outcome, cause], r.reason);
+    assert.ok(WORKER_CAUSES.includes(cause) || cause.startsWith("second-agent-"), cause);
+  }
+  const notRun = c(att({ questioning: "not-run", questioningCause: "timeout", questioningWhy: "the second agent could not be asked: (timeout: route r/m did not answer within 540000 ms)" }));
+  assert.match(notRun.reason, /questioning not-run, cause timeout; why: the second agent could not be asked: \(timeout: route r\/m did not answer within 540000 ms\)/);
+  assert.match(c(att({ status: "stopped-early", reportResult: null, endKind: "length", replyCut: { cuts: 3, limit: 16384, ceiling: 25000 } }), fail).reason, /3 reply\(ies\) cut with no visible text; the reply limit was 16384 tokens of a ceiling of 25000/);
+  assert.equal(causesLine([{ cause: "verified" }, { cause: "false-done" }, { cause: "verified" }, {}]), "causes: verified 2, false-done 1");
+  assert.equal(causesLine([{}]), null);
+});
+
+test("W09 fixes: the done's check runs the task's declared package tests after the build; the task set refuses a declared test that names a held-out or acceptance test, a pattern, or a path outside", () => {
+  const task = { setup: { argv: ["node", "node_modules/typescript/bin/tsc", "--build"] }, doneTests: ["packages/controller/dist/chat/model-interpreter.test.js"] };
+  assert.deepEqual(doneChecks(task), [...buildCheck(task), { name: "the task's package tests", run: [SANDBOX_NODE, "--test", "packages/controller/dist/chat/model-interpreter.test.js"], timeoutSeconds: 1800 }]);
+  assert.deepEqual(doneChecks({ setup: task.setup }), buildCheck(task), "no declared tests: the build only");
+  // The task set as shipped declares none, and loads.
+  const set = loadTaskset(join(here, "pi-eval", "taskset.json"));
+  assert.ok(set.tasks.every((t) => t.doneTests === undefined));
+  const dir = tmp("doneTests");
+  try {
+    const raw = JSON.parse(readFileSync(join(here, "pi-eval", "taskset.json"), "utf8"));
+    const ql = raw.tasks.find((t) => t.id === "quote-lines");
+    for (const sub of ["tasks", "acceptance"]) cpSync(join(here, "pi-eval", sub), join(dir, sub), { recursive: true });
+    const write = (doneTests) => { const f = join(dir, "taskset.json"); writeFileSync(f, JSON.stringify({ ...raw, tasks: [{ ...ql, doneTests }] })); return f; };
+    assert.equal(loadTaskset(write(["packages/controller/dist/chat/model-interpreter.test.js"])).tasks[0].doneTests.length, 1);
+    for (const bad of [
+      ["packages/controller/dist/chat/commands-preview.test.js"], // a held-out test, built
+      ["packages/controller/src/chat/chat.test.ts"], // a held-out test, source
+      ["packages/controller/dist/chat/w01-acceptance-quote-lines.test.js"], // the bench's acceptance test
+      ["packages/controller/dist/chat/*.test.js"], ["../outside.test.js"], ["/abs/x.test.js"], [""], [3], "x",
+    ]) assert.throws(() => loadTaskset(write(bad)), /doneTests/, JSON.stringify(bad));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("offered tools: the other bridge tools are no file tools; Pi's own, the catalogue's and the bridge's checkout tool (card W09b) are", () => {
   assert.equal(offersFileTools(["nimblenewt__work-end", "nimblenewt__work-note", "nimblenewt__tool-invoke"]), false);
   for (const t of ["read", "bash", "edit", "a_x__write-file", "shell", "nimblenewt__work-checkout"]) assert.equal(offersFileTools(["nimblenewt__work-end", t]), true, t);
@@ -224,7 +283,7 @@ async function sandboxUsable() {
 }
 
 /** A tiny repository (base, and a solution commit with the shipped test), the bench's acceptance test, installed dependencies (ignored), and the task as loadTaskset makes it. */
-function fixture(parent) {
+function fixture(parent, { prompt = "Add src/b.mjs exporting the constant b = 2.\n" } = {}) {
   const repo = join(parent, "repo");
   mkdirSync(join(repo, "src"), { recursive: true });
   sh(parent, "init", "-q", "-b", "main", repo);
@@ -242,7 +301,7 @@ function fixture(parent) {
   const acc = join(parent, "acc");
   mkdirSync(acc);
   writeFileSync(join(acc, "b.test.mjs"), 'import { test } from "node:test"; import assert from "node:assert/strict"; import { b } from "./src/b.mjs"; test("b is two", () => assert.equal(b, 2));\n');
-  writeFileSync(join(parent, "tiny.md"), "Add src/b.mjs exporting the constant b = 2.\n");
+  writeFileSync(join(parent, "tiny.md"), prompt);
   const task = {
     id: "tiny", title: "Add b", size: "S", base, solution, promptPath: join(parent, "tiny.md"), hiddenFiles: ["w01-hidden.test.mjs"], testFiles: ["w01-hidden.test.mjs"],
     acceptance: { files: [{ dest: "w01-acceptance-b.test.mjs", src: join(acc, "b.test.mjs") }], support: [], testFiles: ["w01-acceptance-b.test.mjs"], testNamePatterns: [] },
@@ -276,16 +335,16 @@ function radianceScript({ workRoot, agent, second }) {
   return { fetch, bodies };
 }
 
-async function runOne({ variant, agent, second, maxTokens = 4096, reasoningTokens = 1024 }) {
+async function runOne({ variant, agent, second, maxTokens = 4096, reasoningTokens = 1024, budget = true, prompt }) {
   const parent = tmp(`e2e-${variant}`);
-  const { repo, task } = fixture(parent);
+  const { repo, task } = fixture(parent, prompt === undefined ? {} : { prompt });
   const workRoot = join(parent, "work");
   const resultsDir = join(parent, "results");
   mkdirSync(workRoot); mkdirSync(resultsDir);
   const script = radianceScript({ workRoot, agent, second });
   const ctx = {
     set: { agent: { provider: "radiance", model: "qwen-test" } }, repo, depsFrom: repo, workRoot, resultsDir, root: repository, batchId: `w09-test-${variant}`, benchCommit: "test-commit", keep: false, pollMs: 200,
-    radiance: { baseUrl: BASE, model: "qwen-test", contextTokens: 65_536, maxTokens, reasoningTokens }, fetch: script.fetch,
+    radiance: { baseUrl: BASE, model: "qwen-test", contextTokens: 65_536, ...(budget ? { maxTokens, reasoningTokens } : {}) }, fetch: script.fetch,
     start: { facts: { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" }, filesystem: async () => ({ type: "ext4", network: false }) },
   };
   try {
@@ -337,7 +396,10 @@ test("end to end on the real worker (variant D): admission, a verified work.end,
     assert.ok(allText(first).includes("Add src/b.mjs exporting the constant b = 2.") && !allText(first).includes("{{"), "the task text reached the agent");
     // The second agent: its own, non-streamed call on the same route, never the agent's conversation.
     assert.equal(run.bodies.second[0].model, "qwen-test");
-    assert.ok(!allText(run.bodies.second[0]).includes("nimblenewt__"), "no tool call of the agent reaches the second agent");
+    // No tool call of the agent reaches the second agent. Since the W09 fixes it is shown the task's description, which is the worker's task text and so names the bridge's tools; outside that quotation nothing does.
+    const user = run.bodies.second[0].messages.find((m) => m.role === "user").content;
+    assert.ok(!allText(run.bodies.second[0]).includes("tool_calls") && !allText(run.bodies.second[0]).includes("call_"), "no tool call of the agent reaches the second agent");
+    assert.ok(!user.replace(/Task description \(what the agent was asked to do\): "(?:[^"\\]|\\.)*"/, "").includes("nimblenewt__"), "tool names appear only in the quoted task description");
     // What the agent could call: the bridge's tools, the checkout tool among them (card W09b), and nothing else; the record says so truthfully.
     assert.equal(r.worker.fileTools, true, JSON.stringify(r.worker.agentTools));
     assert.ok(r.worker.agentTools.includes("nimblenewt__work-checkout") && r.worker.agentTools.every((n) => n.startsWith("nimblenewt__")), JSON.stringify(r.worker.agentTools));
@@ -393,6 +455,66 @@ test("a second agent whose replies cannot be read never lets a done through: the
     assert.match(r.worker.summary, /report_unsupported/);
     assert.ok(r.worker.requests.second >= 1);
     assert.equal(classifyWorkerRun({ attempt: { ...r.worker, state: r.worker.state }, hidden: r.hidden, changed: true }).outcome, r.outcome);
+  } finally { run.cleanup(); }
+});
+
+// ---- W09 fixes: the second agent's limits, a cut worker reply, the description the second agent sees, and a questioning that did not run -------------------
+
+/** A reply the server cut at its reply limit with only reasoning in it (no visible text). */
+const cutStream = () => stream(`${sse({ reasoning_content: "Let me think about whether b should be a number or a string, and about the build..." }, null)}${sse({}, "length", usage)}`);
+/** The second agent's reply cut before any text. */
+const judgedCut = () => ok200(JSON.stringify({ choices: [{ message: { content: "", reasoning_content: "thinking..." }, finish_reason: "length" }], usage: { prompt_tokens: 30, completion_tokens: 8192 } }));
+const EDGE = "Edge case named by the task: b must be the number 2, not the string \"2\".";
+
+test("W09 fixes, end to end on the real worker: a worker reply cut with no visible text is retried at a larger limit; the second agent's cut reply is asked again at the reasoning kind's ceiling; the second agent sees the task's description with its edge case and no held-out test; the run is a verified finish with its cause", async (t) => {
+  const s = await sandboxUsable();
+  if (!s.usable) { if (required && process.platform === "linux") assert.fail(`NIMBLENEWT_REQUIRE_SANDBOX=1 but the sandbox is unusable: ${s.why}`); return t.skip("bubblewrap or a node install it can mount is unusable"); }
+  const run = await runOne({
+    variant: "D", budget: false, prompt: `Add src/b.mjs exporting the constant b = 2.\n\n${EDGE}\n`,
+    agent: (i, _b, checkout) => (i === 1 ? cutStream() : i === 2 ? doTheWork(checkout) : textReply("Ended: src/b.mjs is added.")),
+    second: (j) => (j === 1 ? judgedCut() : judged(JSON.stringify({ verdict: "supported" }))),
+  });
+  try {
+    const r = run.record;
+    t.diagnostic(`${r.outcome}: ${r.reason} ${JSON.stringify(r.worker)}`);
+    assert.deepEqual([r.outcome, r.cause], ["verified-finish", "verified"], `${r.reason} ${JSON.stringify(r.worker)}`);
+    // Item 3: no route budget, so the worker's limit is the product default; the cut reply raised the next call's limit to the host's ceiling (an eighth of the 65,536 window), and the record says so.
+    const limits = run.bodies.agent.map((b) => b.max_completion_tokens ?? b.max_tokens);
+    assert.deepEqual(limits.slice(0, 2), [4096, 8192], JSON.stringify(limits));
+    assert.ok(limits.slice(1).every((l) => l === 8192), JSON.stringify(limits));
+    assert.deepEqual(r.worker.replyCut, { cuts: 1, limit: 8192, ceiling: 8192 });
+    // Item 2: the second agent's first reply was cut before any text at the reasoning kind's default; it was asked once more at the ceiling, and that verdict was taken.
+    assert.deepEqual(run.bodies.second.map((b) => b.max_tokens), [8192, 32_768]);
+    assert.equal(r.worker.questioning, "supported");
+    assert.equal(r.worker.requests.second, 2);
+    // Item 4: the second agent was shown the task's description, with the edge case it names, and nothing of the held-out or acceptance tests.
+    const asked = JSON.stringify(run.bodies.second[0].messages);
+    assert.ok(asked.includes("Task description (what the agent was asked to do)"), asked.slice(0, 400));
+    assert.ok(asked.includes("Edge case named by the task: b must be the number 2"), "the edge case reached the second agent");
+    for (const heldOut of ["w01-hidden", "w01-acceptance", "b is two", "shipped", "assert.equal(b, 2)"]) assert.ok(!asked.includes(heldOut), `the second agent never sees ${heldOut}`);
+    assert.match(run.bodies.second[0].messages[0].content, /every edge case the task description or the contract names/);
+  } finally { run.cleanup(); }
+});
+
+test("W09 fixes, end to end on the real worker: a second agent whose every reply is cut before any text does not run; its reason and cause are in the run record and the run is unclassified with the cause named (fail closed)", async (t) => {
+  const s = await sandboxUsable();
+  if (!s.usable) { if (required && process.platform === "linux") assert.fail(`NIMBLENEWT_REQUIRE_SANDBOX=1 but the sandbox is unusable: ${s.why}`); return t.skip("bubblewrap or a node install it can mount is unusable"); }
+  const run = await runOne({ variant: "D", maxTokens: 16_384, reasoningTokens: 4096, agent: (i, _b, checkout) => (i === 1 ? doTheWork(checkout) : textReply("Ended.")), second: () => judgedCut() });
+  try {
+    const r = run.record;
+    t.diagnostic(`${r.outcome}: ${r.reason} ${JSON.stringify(r.worker)}`);
+    assert.equal(r.hidden?.passed, true, "the work itself passes its tests");
+    assert.deepEqual([r.outcome, r.cause, r.worker.questioning, r.worker.questioningCause], ["unclassified", "second-agent-reply-cut", "not-run", "reply-cut"], `${r.reason} ${JSON.stringify(r.worker)}`);
+    assert.match(r.worker.questioningWhy, /^the second agent could not be asked: no route answered the second agent's questions \(reply-cut: the reply was cut at the 16384-token reply limit before it held any text \(the route's ceiling\)\)/);
+    assert.match(r.reason, /cause reply-cut; why: the second agent could not be asked/);
+    // The route's declared budget is the second agent's: its reply limit (also the ceiling, so it was asked once) and its reasoning cap in the Radiance kind's field.
+    assert.deepEqual(run.bodies.second.map((b) => [b.max_tokens, b.thinking_token_budget]), [[16_384, 4096]]);
+    // The release blocker carries the cause and the reason.
+    const b = await releaseBlocker({ records: [r], resultsDir: run.resultsDir, batchId: r.batchId, benchCommit: r.benchCommit, route: r.route });
+    const j = JSON.parse(readFileSync(b.json, "utf8"));
+    assert.deepEqual([j.results[0].cause, j.results[0].questioningCause], ["second-agent-reply-cut", "reply-cut"]);
+    assert.match(j.results[0].questioningWhy, /reply-cut/);
+    assert.match(readFileSync(b.md, "utf8"), /causes: second-agent-reply-cut 1/);
   } finally { run.cleanup(); }
 });
 
@@ -470,6 +592,16 @@ test("card W09b: a checkout command still running when the agent ends is stopped
 
 test("attemptSummary keeps the ending's parts and nothing of the conversation", () => {
   const s = attemptSummary({ state: "finished", outcome: { status: "succeeded", summary: "x".repeat(900) }, report: { result: "done", questioning: "supported", qa: [{ question: "q" }], text: "secret report body" }, verifications: [{ state: "failed", checks: [] }, { state: "passed", checks: [{ name: "the build", state: "passed", output: "long" }] }], nudgesUsed: 2, stoppedEarly: [{ readmitted: true }, { readmitted: false }], turnEnd: { endKind: "normal" }, notes: [{ text: "n" }] });
-  assert.deepEqual(s, { state: "finished", status: "succeeded", summary: "x".repeat(500), reportResult: "done", questioning: "supported", questions: 1, verifications: ["failed", "passed"], lastChecks: [{ name: "the build", state: "passed" }], nudges: 2, stoppedEarly: 2, readmitted: 1, endKind: "normal", notes: 1 });
+  assert.deepEqual(s, { state: "finished", status: "succeeded", summary: "x".repeat(500), reportResult: "done", questioning: "supported", questions: 1, questioningWhy: null, questioningCause: null, verifications: ["failed", "passed"], lastChecks: [{ name: "the build", state: "passed" }], nudges: 2, stoppedEarly: 2, readmitted: 1, endKind: "normal", replyCut: null, notes: 1 });
   assert.equal(attemptSummary(undefined), null);
+  // W09 fixes: why the questioning did not run and its cause (from the report, else the questioning), bounded and scrubbed; the last turn's reply cuts.
+  const why = `the second agent could not be asked: no route answered (timeout: route r/m did not answer)\nsk-abcdefghijklmnopqrstuvwxyz Bearer abc.def.ghi.jkl ${"z".repeat(400)}`;
+  const n = attemptSummary({ state: "finished", outcome: { status: "succeeded" }, report: { result: "done", questioning: "not-run", why, cause: "timeout" }, turnEnd: { endKind: "normal", replyCut: { cuts: 2, limit: 16384, ceiling: 25000 } } });
+  assert.equal(n.questioningCause, "timeout");
+  assert.equal(n.questioningWhy.length, 300);
+  assert.ok(n.questioningWhy.startsWith("the second agent could not be asked: no route answered (timeout: route r/m did not answer) [redacted] Bearer [redacted]"), n.questioningWhy);
+  assert.deepEqual(n.replyCut, { cuts: 2, limit: 16384, ceiling: 25000 });
+  const q = attemptSummary({ state: "running", interrogation: { state: "not-run", why: "no second agent is set up on this controller", cause: "not-set-up" }, turnEnd: { replyCut: { cuts: "2" } } });
+  assert.deepEqual([q.questioningWhy, q.questioningCause, q.replyCut], ["no second agent is set up on this controller", "not-set-up", null]);
+  assert.equal(scrubbed("a\u2028b\u0007c"), "a b c");
 });

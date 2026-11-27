@@ -133,7 +133,7 @@ export interface DispatchWorld {
   restart(overrides?: Partial<DispatcherDeps>, options?: AttemptDispatcherOptions): DispatcherService;
   agent(name: string, grants?: Grant[]): Promise<{ id: string; aid: string }>;
   /** A ready task in the project, assigned to the agent, with its attempt admitted (naming the harness) the way the inbox does it. */
-  task(title: string, agent: { aid: string }, extra?: { project?: string; admit?: boolean; harness?: string; repositoryId?: string }): Promise<{ taskId: string; attemptId: string | undefined }>;
+  task(title: string, agent: { aid: string }, extra?: { project?: string; admit?: boolean; harness?: string; repositoryId?: string; description?: string }): Promise<{ taskId: string; attemptId: string | undefined }>;
   heartbeatHost(hostName?: string): Promise<void>;
 }
 
@@ -204,7 +204,7 @@ export async function buildWorld(storage: ControllerStorage, o: { route?: RouteR
       return { id: `agent:${name}`, aid: name };
     },
     task: async (title, agent, extra = {}) => {
-      const taskId = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: extra.project ?? project, title, ...(extra.repositoryId === undefined ? {} : { repositoryId: extra.repositoryId }) })).id;
+      const taskId = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: extra.project ?? project, title, ...(extra.description === undefined ? {} : { description: extra.description }), ...(extra.repositoryId === undefined ? {} : { repositoryId: extra.repositoryId }) })).id;
       await projects.transitionTask({ commandId: cid("r"), actor: owner.id, taskId, expectedRevision: 1, to: "ready" });
       await assignments.assignTask({ commandId: cid("as"), actor: owner.id, taskId, owner: { kind: "agent", id: agent.aid } });
       if (extra.admit === false) return { taskId, attemptId: undefined };

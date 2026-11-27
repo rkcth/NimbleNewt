@@ -1,3 +1,4 @@
+import type { NotRunCause } from "./not-run-cause.js";
 import { DomainError } from "../domain/errors.js";
 import type { JsonObject } from "../storage/types.js";
 import type { TurnEndKind } from "./ports.js";
@@ -145,7 +146,7 @@ export interface DispatchBody {
    * How the attempt's last turn ended (card W02): the worker's classification of its last reply (`unknown` when the worker did not say), the length of that reply's visible text when it said, and when the dispatcher recorded it.
    * A completed turn whose kind is not `normal` (and whose agent did not end the attempt with work.end) is a stop before the work was said to be done (card W03, `stoppedEarly`).
    */
-  readonly turnEnd?: { readonly endKind: TurnEndKind; readonly visibleChars?: number; readonly at: string; /** Card W04: how many times the worker continued that turn after it yielded without a tool call or work.end (absent: none said). */ readonly nudges?: number; /** Card W08: the plan steps checked in the checkout when the turn ended, as the host reported them (absent: not known). */ readonly plan?: PlanCount };
+  readonly turnEnd?: { readonly endKind: TurnEndKind; readonly visibleChars?: number; readonly at: string; /** Card W04: how many times the worker continued that turn after it yielded without a tool call or work.end (absent: none said). */ readonly nudges?: number; /** Card W08: the plan steps checked in the checkout when the turn ended, as the host reported them (absent: not known). */ readonly plan?: PlanCount; /** W09 fixes: the worker's replies cut at the reply limit with no visible text, the limit it raised to and the ceiling (absent: none was, or the worker did not say). */ readonly replyCut?: { readonly cuts: number; readonly limit: number; readonly ceiling: number } };
   /** Card W04: the continuations (nudges) of all this attempt's turns, summed; absent while there were none. Each turn's own count is on `turnEnd` and on its `stoppedEarly` run. */
   readonly nudgesUsed?: number;
   /**
@@ -235,6 +236,8 @@ export interface Interrogation {
   /** The second agent's reason for `unsupported` (its words), or why it did not run. */
   readonly reason?: string;
   readonly why?: string;
+  /** W09 fixes: for `not-run`, the named cause read from `why` (`notRunCause`). Absent on records from before. */
+  readonly cause?: NotRunCause;
   readonly route?: string;
   readonly counted?: boolean;
   readonly exhausted?: boolean;
@@ -256,6 +259,8 @@ export interface AttemptReport {
   readonly qa?: readonly { readonly question: string; readonly answer?: string }[];
   readonly reason?: string;
   readonly why?: string;
+  /** W09 fixes: for `not-run`, the named cause (as on the questioning). */
+  readonly cause?: NotRunCause;
 }
 
 /** Card W10: the bounds of the notes, the report and the questioning. */
