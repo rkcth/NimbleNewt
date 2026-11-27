@@ -1658,6 +1658,38 @@ Arguments:
 
 Result: `{ item: { items, next? } }`.
 
+#### `owncode.settings`
+
+Owner only: whether optional agent work on NimbleNewt's own code is enabled (off by default) and which project is the NimbleNewt development project, with the settings' revision and the recent switches.
+
+Arguments:
+
+- none
+
+Result: `{ revision, enabled, projectId?, history }` (revision 0: never written).
+
+#### `owncode.get`
+
+One request to work on NimbleNewt's own code (the owner, or its requester).
+
+Arguments:
+
+- `requestId`: ocr-...
+
+Result: `{ item }`.
+
+#### `owncode.list`
+
+Requests to work on NimbleNewt's own code, oldest first, a page at a time: the owner sees all, an agent its own. `status` keeps one status.
+
+Arguments:
+
+- `status` (optional): pending, approved, rejected or withdrawn
+- `afterId` (optional): continue after this request
+- `limit` (optional): at most 100
+
+Result: `{ items, next? }`.
+
 #### `backup.config.status`
 
 Owner only: the whole backup configuration in plain words: the schedule (how often, the hour, how often a backup is test-restored), the retention rules (daily and weekly counts and the age limit in days, said in `rules.text` with which one decides when they disagree), the main backups folder and every extra target (a folder, another disk or an off-machine store) with whether it can be reached now, how many backups it holds, its last copy, its last problem, its last test and how long a backup stays on it, the last test restore, and any purge that is not finished on a target. The counts and the age limit are changed with retention.settings.set (backupDaily, backupWeekly, backupMaxAgeDays); the schedule with backup.config.set; targets with backup.target.add, backup.target.test and backup.target.remove.
@@ -5964,6 +5996,70 @@ Arguments:
 
 - `commandId`: required
 - `experimentId`: exp-...
+- `expectedRevision`: its revision
+- `reason`: words
+
+Result: `{ revision }`.
+
+#### `owncode.enable`
+
+Owner only: enables agent work on NimbleNewt's own code. The first time, `projectId` names the NimbleNewt development project (an existing active project; the separate project approved work goes into); it never changes afterwards. Agents may then ask; nothing starts until the owner approves a request.
+
+Arguments:
+
+- `commandId`: required
+- `expectedRevision` (optional): the settings' revision (leave out before they were first written)
+- `projectId` (optional): the development project (required the first time)
+
+Result: `{ revision, projectId }`.
+
+#### `owncode.disable`
+
+Owner only: switches agent work on NimbleNewt's own code off. New requests are refused and no attempt starts in the development project; decisions already made stay recorded.
+
+Arguments:
+
+- `commandId`: required
+- `expectedRevision`: the settings' revision
+
+Result: `{ revision }`.
+
+#### `owncode.request`
+
+An agent asks to work on NimbleNewt's own code, before any work: `what` it wants to change, `why`, the expected `effort` and the expected `cost`, in its own words. Refused while the feature is off (the message says the owner can enable it). At most 5 of one requester wait at a time; nothing starts until the owner approves.
+
+Arguments:
+
+- `commandId`: required
+- `what`: words
+- `why`: words
+- `effort`: words
+- `cost`: words
+
+Result: `{ id, replayed }`.
+
+#### `owncode.decide`
+
+Owner only: approves or rejects a waiting request to work on NimbleNewt's own code. Approval needs the feature on and creates the task in the development project (no attempt starts on it otherwise); rejection creates nothing.
+
+Arguments:
+
+- `commandId`: required
+- `requestId`: ocr-...
+- `expectedRevision`: its revision
+- `decision`: approve or reject
+- `note` (optional): words
+
+Result: `{ revision, status, taskId? }`.
+
+#### `owncode.withdraw`
+
+Withdraws a request to work on NimbleNewt's own code, with a reason: the owner a waiting or an approved one (no further attempt starts on its task), the requester its own waiting one. It stays listed.
+
+Arguments:
+
+- `commandId`: required
+- `requestId`: ocr-...
 - `expectedRevision`: its revision
 - `reason`: words
 
