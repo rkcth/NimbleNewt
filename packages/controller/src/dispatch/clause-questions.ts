@@ -33,27 +33,49 @@ const FAILING: readonly RegExp[] = [
   new RegExp(String.raw`(?<!(?:${ZERO}|(?<![A-Za-z])(?:no|zero|none|nothing))(?:[ \t]{1,3}tests?)?[ \t]{1,3})(?<![A-Za-z])fail(?:ed|s|ing|ures?)?(?![A-Za-z])(?![ \t]{0,3}[:=]?[ \t]{0,3}${ZERO})`, "i"),
   new RegExp(String.raw`${ZERO}[ \t]{1,3}(?:tests?[ \t]{1,3})?(?:ok|pass(?:ed|es|ing)?)(?![A-Za-z])|(?<![A-Za-z])(?:pass(?:ed|es|ing)?|ran|tests?)[ \t]{0,3}[:=]?[ \t]{0,3}${ZERO}(?![A-Za-z])(?![ \t]{1,3}(?:tests?[ \t]{1,3})?fail)`, "i"),
   /(?:(?<![A-Za-z])(?:not|never|cannot|should|would|will|to)|n['\u2019]t)(?:[ \t]{1,3}(?:yet|all|be|been))?[ \t]{1,3}(?:ok|pass(?:ed|es|ing)?|run|ran|tested|executed)(?![A-Za-z])/i,
-  /(?<![A-Za-z])(?:untested|unverified|timed[ \t]{1,3}out)(?![A-Za-z])|#[ \t]{0,3}(?:skip|todo)(?![A-Za-z])/i,
-  /(?<![0-9.,])[1-9][0-9]{0,8}[ \t]{1,3}(?:tests?[ \t]{1,3})?(?:skipped|cancell?ed|errors?|errored)(?![A-Za-z])|(?<![A-Za-z])(?:skipped|cancell?ed|errors?)[ \t]{0,3}[:=]?[ \t]{0,3}[1-9]/i,
+  /(?<![A-Za-z])(?:untested|unverified|timed[ \t]{1,3}out)(?![A-Za-z])/i,
+  // Re-check of the second review (an independent table of 137 report lines found these read as passing): a result word that is not a pass, with no count of 0 or negation next to it, as for `fail` above (`1 pending`,
+  // `skip`, `# todo`, `1 ignored`, `1 xfailed`, `1 deselected`, `crashed`, `panic`, `flaky`; `todo 0`, `0 skipped` and `no errors` stay passes: node's TAP summary prints `# todo 0`, which the second review read as failing).
+  new RegExp(String.raw`(?<!(?:${ZERO}|(?<![A-Za-z])(?:no|zero|none|nothing))(?:[ \t]{1,3}tests?)?[ \t]{1,3})(?<![A-Za-z])(?:skip(?:s|ped)?|pending|todo|ignored|x(?:fail|pass)(?:ed|es)?|deselected|cancell?ed|errors?|errored|crash(?:ed|es)?|panic(?:s|ked)?|broken|flaky|retr(?:y|ied|ies)|regressions?)(?![A-Za-z])(?![ \t]{0,3}[:=]?[ \t]{0,3}${ZERO})`, "i"),
+  // A run that exited other than 0 (`exit code 1`, `exited with 2`), no test run (`no test files`, `no tests ran`), a pass word denied without an apostrophe (`doesnt pass`) or only possible (`might pass`).
+  /(?<![A-Za-z])exit(?:s|ed)?(?:[ \t]{1,3}with)?(?:[ \t]{1,3}(?:code|status))?[ \t]{0,3}[:=]?[ \t]{0,3}-?[1-9]|(?<![A-Za-z])no[ \t]{1,3}tests?[ \t]{1,3}(?:files?|found|ran|run|executed|collected)(?![A-Za-z])/i,
+  /(?<![A-Za-z])(?:(?:does|do|did|is|was|wo|ca|has|have|are|were|could|would|should)nt|might|may|could|must|can)(?:[ \t]{1,3}(?:yet|all|be|been))?[ \t]{1,3}(?:ok|pass(?:ed|es|ing)?|run|ran|tested|executed)(?![A-Za-z])/i,
+  // A warning or a red mark (`⚠`, `⛔`, `🔴`, `🚫`, `🛑`).
+  /[\u26a0\u26d4\u{1F534}\u{1F6AB}\u{1F6D1}]/u,
 ];
-/** A count of passes out of a total (`2/5 passed`, `2 of 5 passing`): failing unless all passed (`0/0 passed` is already read as none passed). */
-const PASS_FRACTION = /(?<![0-9.,])([0-9]{1,9})(?:[ \t]{0,3}[\\/][ \t]{0,3}|[ \t]{1,3}of[ \t]{1,3})([0-9]{1,9})(?![0-9.,])[ \t]{1,3}(?:tests?[ \t]{1,3})?(?:ok|pass(?:ed|es|ing)?)(?![A-Za-z])/gi;
-const failing = (line: string): boolean => FAILING.some((f) => f.test(line)) || [...line.matchAll(PASS_FRACTION)].some((m) => Number(m[1]) < Number(m[2]));
+/**
+ * A count of passes out of a total, failing unless all passed (`0/0 passed` is already read as none passed): `2/5 passed`, `2 of 5 passing`, `3 out of 4 passed`, jest's `3 passed, 4 total`, vitest's `3 passed (4)`, and a
+ * share under 100 % (`75% passed`, `pass rate 50%`), also with the pass word first (`passed 3 of 4`).
+ */
+const PASS_TOTALS: readonly RegExp[] = [
+  /(?<![0-9.,])([0-9]{1,9})(?:[ \t]{0,3}[\\/][ \t]{0,3}|[ \t]{1,3}(?:out[ \t]{1,3})?of[ \t]{1,3})([0-9]{1,9})(?![0-9.,])[ \t]{1,3}(?:tests?[ \t]{1,3})?(?:ok|pass(?:ed|es|ing)?)(?![A-Za-z])/gi,
+  /(?<![0-9.,])([0-9]{1,9})[ \t]{1,3}(?:tests?[ \t]{1,3})?pass(?:ed|es|ing)?(?:[ \t]{0,3},[ \t]{0,3}([0-9]{1,9})[ \t]{1,3}total(?![A-Za-z])|[ \t]{1,3}\([ \t]{0,3}([0-9]{1,9})[ \t]{0,3}\))/gi,
+  /(?<![A-Za-z])pass(?:ed|es|ing)?[ \t]{1,3}([0-9]{1,9})(?:[ \t]{0,3}[\\/][ \t]{0,3}|[ \t]{1,3}(?:out[ \t]{1,3})?of[ \t]{1,3})([0-9]{1,9})(?![0-9.,])/gi,
+  /(?<![0-9.,])([0-9]{1,3}(?:\.[0-9]{1,3})?)[ \t]{0,3}%[ \t]{1,3}(?:of[ \t]{1,3}(?:the[ \t]{1,3})?tests?[ \t]{1,3})?(?:ok|pass(?:ed|es|ing)?)(?![A-Za-z])|(?<![A-Za-z])pass(?:ed|ing)?[ \t]{1,3}rate[ \t]{0,3}[:=]?[ \t]{0,3}([0-9]{1,3}(?:\.[0-9]{1,3})?)[ \t]{0,3}%/gi,
+];
+/** Whether a total's match counts fewer passes than its total (a share is out of 100). */
+const fewerPassed = (m: RegExpMatchArray, share: boolean): boolean => (share ? Number(m[1] ?? m[2]) < 100 : Number(m[1]) < Number(m[2] ?? m[3]));
+const failing = (line: string): boolean => FAILING.some((f) => f.test(line)) || PASS_TOTALS.some((r, i) => [...line.matchAll(r)].some((m) => fewerPassed(m, i === 3)));
+/** The test name the first prompt's sample line holds (`dispatcher.ts` `reportClauseNote`): a copied sample shows nothing tested. */
+const SAMPLE_NAME = "its test name";
 /** A run of characters a file name may hold, matched in one pass (each run is maximal, so the scan is linear). */
 const NAME_RUN = /[A-Za-z0-9_.\\/-]+/g;
 /** A file extension in a run: a dot, a letter and at most 7 more letters or digits, not followed by a letter or digit. */
 const EXTENSION = /\.[A-Za-z][A-Za-z0-9]{0,7}(?![A-Za-z0-9])/g;
 const CLAUSES_ONLY = /^(?:[Cc]\d{1,3}[\\/-]?)+$/;
 const FRACTION = /^[0-9]+(?:[\\/][0-9]+)+$/;
+/** A run of path separators only (the `/` of `0 / 1 ok`): not a file name, kept so a spaced count is read (re-check of the second review). */
+const SEPARATORS = /^[\\/]+$/;
 
 /**
  * File names outside the quotes (`src/fail-safe.test.ts`, `c2.test.mjs`, `lib\ok.js`) set aside: in a run of name characters, the part up to the end of the run when its last path separator comes after its last extension, or
  * else up to the end of its last extension. They are set aside before the result and the clause names are read, so a file named `fail-safe` is not a failing result and `src/c2.test.ts` does not name C2 (first review). A
- * part of clause names only (`C1/C2`) or a count such as `2/5` is kept. Second review: this was one regular expression whose leading `[...]*` was retried from every character of a long run (quadratic: about 2 ms for 1,000
+ * part of clause names only (`C1/C2`), a count such as `2/5` or a run of separators only (the `/` of `0 / 1 ok`) is kept. Second review: this was one regular expression whose leading `[...]*` was retried from every character of a long run (quadratic: about 2 ms for 1,000
  * characters, 15 s for 100 KB); it is now one pass over each run, setting aside the same parts (a test compares the two).
  */
 export function setAsideFileNames(text: string): string {
   return text.replace(NAME_RUN, (run) => {
+    if (SEPARATORS.test(run)) return run;
     const slash = Math.max(run.lastIndexOf("/"), run.lastIndexOf("\\"));
     let extStart = -1, extEnd = -1;
     for (const m of run.matchAll(EXTENSION)) { extStart = m.index; extEnd = m.index + m[0].length; }
@@ -69,12 +91,21 @@ const words = (text: string): string => text.toLowerCase().replace(/\s+/g, " ").
 
 /** The clause numbers (1-based) a line shows tested: it names them, outside quotes, and holds a quoted name and a passing result with no failing one. */
 function testedOn(raw: string, count: number): number[] {
-  const line = raw.length > CLAUSE_QUESTION_LIMITS.line ? raw.slice(0, CLAUSE_QUESTION_LIMITS.line) : raw;
+  const cut = raw.length > CLAUSE_QUESTION_LIMITS.line ? raw.slice(0, CLAUSE_QUESTION_LIMITS.line) : raw;
+  // Re-check of the second review: compatibility forms are read as their plain letters and digits (`０ passed`, `ｆａｉｌ`) and invisible format characters are dropped (`fa\u200bil`), then the line is cut again (one
+  // compatibility form can stand for several characters).
+  const line = cut.normalize("NFKC").replace(/\p{Cf}/gu, "").slice(0, CLAUSE_QUESTION_LIMITS.line);
   let rest = line;
   let names = 0;
   for (const style of QUOTES) {
     let taken = 0;
-    rest = rest.replace(style, () => { if (taken >= CLAUSE_QUESTION_LIMITS.quotesPerLine) return " "; taken++; names++; return " "; });
+    rest = rest.replace(style, (_, body: string) => {
+      if (taken >= CLAUSE_QUESTION_LIMITS.quotesPerLine) return " ";
+      taken++;
+      // The sample line's placeholder name is not a test name (re-check of the second review: a copied sample showed C1 tested).
+      if (words(body) !== SAMPLE_NAME) names++;
+      return " ";
+    });
   }
   rest = setAsideFileNames(rest);
   if (names === 0 || !PASSING.test(rest) || failing(rest)) return [];
@@ -152,8 +183,11 @@ export function withClauseRule(answer: Answer, input: { readonly criteria: reado
     // turned a supported into an unsupported (a go-on).
     const leftSet = new Set(left);
     const asks = own.map((q) => askedIn(q, input.criteria).filter((n) => leftSet.has(n)));
-    const keep = new Set<number>(own.flatMap((_, i) => (asks[i]!.length > 0 ? [i] : [])));
-    const asking = new Set([...keep].flatMap((i) => asks[i]!));
+    // Re-check: only an own question that asks about a clause left that no earlier one asks about keeps its place this way (two questions about the same clause took two places, leaving a clause for the round that
+    // may not ask); a repeat is one of its other questions.
+    const keep = new Set<number>();
+    const asking = new Set<number>();
+    own.forEach((_, i) => { if (asks[i]!.some((n) => !asking.has(n))) { keep.add(i); for (const n of asks[i]!) asking.add(n); } });
     const ask = left.filter((n) => !asking.has(n));
     const later = Math.max(0, input.maxRounds - input.round) * room;
     const first = Math.min(room - keep.size, Math.max(0, ask.length - later));

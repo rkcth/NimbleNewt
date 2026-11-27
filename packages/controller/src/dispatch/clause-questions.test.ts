@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { CLAUSE_QUESTION_LIMITS, askedIn, clauseNames, clauseQuestion, clausesLeft, setAsideFileNames, shownTested, withClauseRule } from "./clause-questions.js";
 import { WORK_REPORT_LIMITS } from "./model.js";
+import { reportClauseNote } from "./dispatcher.js";
 
 // Card W09 third slice: for a task with contract clauses, a supported is taken only once every clause is shown tested in the report or was asked about.
 
@@ -161,11 +162,11 @@ test("W09 third slice, second review: a confusion table of report lines as test 
 });
 
 test("W09 third slice, second review: file names are set aside in one pass over each run, with the same parts set aside as the first review's expression (a count such as 2/5 now kept), and the reading stays linear on 100 KB", () => {
-  // The first review's expression, for comparison on short text (it is quadratic in a long run), with the one change made on purpose: a count such as 2/5 is kept.
+  // The first review's expression, for comparison on short text (it is quadratic in a long run), with the changes made on purpose: a count such as 2/5 is kept, and so is a run of separators only (the / of `0 / 1 ok`).
   const OLD = /[A-Za-z0-9_.\\/-]*(?:[\\/][A-Za-z0-9_.\\/-]*|\.[A-Za-z][A-Za-z0-9]{0,7}(?![A-Za-z0-9]))/g;
   const CLAUSES = /^(?:[Cc]\d{1,3}[\\/-]?)+$/;
   const FRACTION = /^[0-9]+(?:[\\/][0-9]+)+$/;
-  const old = (t: string): string => t.replace(OLD, (w) => (CLAUSES.test(w) || FRACTION.test(w) ? w : " "));
+  const old = (t: string): string => t.replace(OLD, (w) => (CLAUSES.test(w) || FRACTION.test(w) || /^[\\/]+$/.test(w) ? w : " "));
   const alphabet = ["a", "Z", "C", "c", "1", "0", ".", "/", "\\", "-", "_", " ", "ts", "x", "\"", "!", "\u00e9"];
   let seed = 7;
   const rand = (n: number): number => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n; };
@@ -210,4 +211,52 @@ test("W09 third slice, second review: the clause questions the later rounds coul
   const plain = own("q1", "q2", "q3");
   assert.equal(withClauseRule(plain, at(2, "", r1, [])), plain);
   assert.equal(withClauseRule(plain, at(2, 'C1 "a" ok\nC2 "b" ok\nC3 "c" ok', r1)), plain);
+});
+
+test("W09 third slice, re-check of the second review: an independent table of report lines: results that are not a pass (pending, todo, ignored, xfailed, deselected, no test files, a total above the passes, a share under 100 %, an exit code other than 0, a red mark) are not read as tested, and the runners' own passing summaries still are", () => {
+  const T = true, F = false;
+  const rows: [string, boolean][] = [
+    // Read as passing by the second review, not passes.
+    ['C1 "x" Tests: 3 passed, 4 total', F], ['C1 "x" Tests: 1 todo, 2 passed, 3 total', F], ['C1 "x" 3 passing 1 pending', F], ['C1 "x" 3 passed, 1 xfailed in 0.12s', F],
+    ['C1 "x" 3 passed, 1 deselected in 0.1s', F], ['C1 "x" ok github.com/x/pkg (cached) [no test files]', F], ['C1 "x" panic: runtime error ok', F], ['C1 "x" test result: ok. 3 passed; 0 failed; 1 ignored', F],
+    ['C1 "x" passed on Node 22, broken on Node 24', F], ['C1 "x" ok? no, it crashes', F], ['C1 "x" pass rate 50%', F], ['C1 "x" passed 3 of 4 runs', F], ['C1 "x" flaky: passed once', F],
+    ['C1 "x" assertion error, then passed after retry', F], ['C1 "x" exit code 1, passed', F], ['C1 "x" exited 1 (ok)', F], ['C1 "x" OK (pending review)', F], ['C1 "x" doesnt pass', F], ['C1 "x" might pass', F],
+    ['C1 "x" TODO: make it pass', F], ['C1 "x" skip; ok', F], ['C1 "x" ok (skipped)', F], ['C1 "x" crashed; others passed', F], ['C1 "x" broken but passing', F], ['C1 "x" ok, 1 regression', F],
+    ['| C1 | "x" | ⚠️ pass |', F], ['| C1 | "x" | \u{1F534} | passed in old run', F], ['C1 "x" ０ passed', F], ['C1 "x" passed: ０', F], ['C1 "x" 0 / 1 ok', F], ['C1 "x" 3 out of 4 passed', F],
+    ['C1 "x" 75% passed', F], ['C1 "x" pass！ ｆａｉｌ', F], ['C1 "x" passed, fa​il 1', F], ['C1 "x" Tests  3 passed (4)', F], ['C1 "x" ok, no tests ran', F],
+    // The first prompt's sample line, copied: its placeholder name is not a test name.
+    ['C1: path/to/x.test.ts "its test name" passed', F], ['C1: path/to/x.test.ts “Its  Test Name” passed.', F],
+    // The runners' own passing summaries stay passes (the second review read node's TAP `# todo 0` as failing).
+    ['C1 "x" # tests 4 # suites 1 # pass 4 # fail 0 # cancelled 0 # skipped 0 # todo 0 # duration_ms 50.1', T], ['C1 "x" ℹ tests 4 ℹ pass 4 ℹ fail 0 ℹ cancelled 0 ℹ skipped 0 ℹ todo 0', T],
+    ['C1 "x" test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s', T], ['C1 "x" Tests: 4 passed, 4 total', T], ['C1 "x" Tests  4 passed (4)', T],
+    ['C1 "x" 100% passed', T], ['C1 "x" passed 4 of 4', T], ['C1 "x" 4 / 4 ok', T], ['C1: src/x.test.ts "x" ✔ (0.8ms), exit code 0', T], ['C1 "x" PASS src/a.test.ts (no errors)', T],
+    ['- [x] C1: src/a.test.ts “x” passed, 0 skipped, no regressions', T], ['C1 "x" passed (exit 0)', T], ['C1 "x" passed; coverage 85%', T], ['C1 "x" 4 passed in 0.12s', T], ['C1 "x" --- PASS: TestX (0.00s)', T],
+    ['C1 "x" ok  \tgithub.com/x/pkg\t0.3s', T], ['C1 "x" 3 passing (20ms)', T], ['C1 "its test name for empty input" passed', T], ['C1: failing.test.ts "x" passed', T],
+  ];
+  const wrong = rows.filter(([line, want]) => shownTested(line, 3).has(1) !== want).map(([line, want]) => `${want ? "refused" : "accepted"}: ${line}`);
+  assert.deepEqual(wrong, []);
+  // The sample line as the first prompt shows it (it is not taken as C1 tested, so a copied sample is asked about).
+  const sample = /(C1: \S+ "[^"]+" passed)\./.exec(reportClauseNote(["a", "b"]))?.[1];
+  assert.ok(sample !== undefined);
+  assert.deepEqual([...shownTested(sample, 2)], []);
+  assert.deepEqual([...shownTested(sample.replace("its test name", "rejects empty"), 2)], [1], "the same line with a real name is");
+  // Bounded after normalizing: a character whose compatibility form is 18 characters long, a whole line of them, is still read within the line's bound and quickly.
+  const wide = `C1 "x" passed ${"ﷺ".repeat(CLAUSE_QUESTION_LIMITS.line)}`;
+  const started = performance.now();
+  for (let i = 0; i < 50; i++) shownTested(Array.from({ length: CLAUSE_QUESTION_LIMITS.lines }, () => wide).join("\n"), 3);
+  assert.ok(performance.now() - started < 5000, `${performance.now() - started} ms`);
+});
+
+test("W09 third slice, re-check of the second review: two own questions about the same clause take one place as clause questions, so the clauses the later round cannot hold are still asked", () => {
+  const nine = Array.from({ length: 9 }, (_, i) => `clause number ${i + 1} holds well`);
+  const qs = (a: unknown): string[] => (a as { readonly questions: readonly string[] }).questions.map((q) => q.split(" ")[0]!);
+  const report = 'C1 "a" ok\nC4 "d" ok\nC9 "i" ok';
+  // Six clauses left (C2, C3, C5 to C8) over two rounds of three: the repeat about C2 gives up its place to a clause question.
+  const a = withClauseRule({ verdict: "questions", questions: ["C2 which test?", "C2 which test, again?"], route: "r" }, { criteria: nine, report, rounds: [], round: 1, maxRounds: WORK_REPORT_LIMITS.rounds });
+  assert.deepEqual(qs(a), ["C2", "C3", "C5"]);
+  const r1 = [{ questions: [...(a as unknown as { questions: string[] }).questions], answers: ["x", "y", "z"] }];
+  const b = withClauseRule({ verdict: "supported", route: "r" }, { criteria: nine, report, rounds: r1, round: 2, maxRounds: WORK_REPORT_LIMITS.rounds });
+  assert.deepEqual(qs(b), ["C6", "C7", "C8"]);
+  // With room to spare the repeat is kept as one of its other questions.
+  assert.deepEqual(qs(withClauseRule({ verdict: "questions", questions: ["C2 which test?", "C2 again?"], route: "r" }, { criteria: nine, report: report + '\nC3 "c" ok\nC5 "e" ok\nC6 "f" ok\nC7 "g" ok\nC8 "h" ok', rounds: [], round: 1, maxRounds: WORK_REPORT_LIMITS.rounds })), ["C2", "C2"]);
 });
