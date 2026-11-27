@@ -1,4 +1,4 @@
-import type { Aggregate, AggregateRef, ControllerStorage, JsonObject } from "../storage/index.js";
+import { isStorageError, type Aggregate, type AggregateRef, type ControllerStorage, type JsonObject } from "../storage/index.js";
 import { derivedId } from "../domain/ids.js";
 import { DISPATCH_KIND, DISPATCH_LIVE } from "../dispatch/model.js";
 import { readControllerAuthority } from "./controller.js";
@@ -253,7 +253,8 @@ export class WorkersHoldGate {
         ? { type: "controller.workers.released", detail: { promotionId: hold.promotionId, hosts: hosts.length, attempts: attempts.length } }
         : { type: reconciled.length > 0 ? "controller.workers.reconciled" : "controller.workers.resolved", detail: { promotionId: hold.promotionId, hosts: reconciled.slice(0, 20), resolved: attempts.filter((a) => a.resolved !== undefined).length } });
     } catch (error) {
-      if ((error as { kind?: unknown })?.kind === "state_conflict" || (error as { code?: unknown })?.code === "state_conflict") return hold;
+      // Another write moved the record since it was read (the stores refuse a stale expected revision with `revision_conflict`): it is read again at the next call.
+      if (isStorageError(error, "revision_conflict") || isStorageError(error, "state_conflict")) return hold;
       throw error;
     }
     if (allDone) this.#released = true;

@@ -282,3 +282,92 @@ test("an attempt put back to wait is reconciled only once no live placement of i
   h = (await gate.review())!;
   assert.deepEqual([how("att-o")?.detail, how("att-a")?.detail], ["it no longer runs on a worker (waiting)", "it no longer runs on a worker (parked)"]);
 });
+
+// First review of the third slice: boundaries and faults the tests above did not reach.
+test("an attempt at the fence epoch is the fenced controller's; another host's placement is no evidence; the reconnected flag needs a session after the fence; host and line bounds", async () => {
+  const s = new MemoryStorage();
+  clock = T0;
+  const e = await world(s);
+  const hosts = ["host:h1", "host:h2", "host:h3", "host:h4", "host:h5", "host:h6"];
+  await put(s, e.successor, DISPATCH_LIVE, { ids: ["att-a", "att-b", "att-c", "att-d", "att-o", "att-f", "att-x", ...hosts.map((h) => `att-${h.slice(5)}`)] });
+  await put(s, e.successor, dispatchRef("att-f"), running("att-f", "host:r3", e.fence));
+  await put(s, e.successor, dispatchRef("att-x"), running("att-x", "host:r3", e.old));
+  await put(s, e.successor, placementRef("att-x"), placement("att-x", "host:r9", "completed", { sessionId: "s-r9", result: { status: "completed" } }));
+  for (const h of hosts) await put(s, e.successor, dispatchRef(`att-${h.slice(5)}`), running(`att-${h.slice(5)}`, h, e.old));
+  const hold = await beginWorkersHold(s, e.successor, now) as WorkersHold;
+  assert.ok(hold.attempts.some((a) => a.attemptId === "att-f"), "a record at the fence epoch itself is not the successor's");
+  const x = hold.attempts.find((a) => a.attemptId === "att-x")!;
+  assert.deepEqual([x.storedResult, x.placement, x.placementState, x.sessions], [false, null, null, []], "another host's placement is not this attempt's evidence");
+  assert.equal(hold.hosts.length, 10);
+  const gate = workersHoldGate(s, e.successor, hold, now);
+  const reason = (await gate.startReason())!;
+  assert.match(reason, /10 worker hosts are not reconciled yet \(host:h1, host:h2, host:h3, host:h4, host:h5, and 5 more\)/);
+  const lines = text(hold);
+  assert.equal(lines.split("\n").filter((l) => / attempts? still open /.test(l)).length, 5);
+  assert.match(lines, /5 more host\(s\) are not reconciled yet\./);
+  // host r3's attempts end; its worker's session is still one opened before the fence: reconciled, not reconnected
+  await put(s, e.successor, { kind: SESSION_KIND, id: "host:r3" }, { hostId: "host:r3", sessionId: "s-r3", sessionEpoch: 1, primaryEpoch: e.fence });
+  for (const id of ["att-f", "att-x"]) await put(s, e.successor, dispatchRef(id), { ...running(id, "host:r3", e.old), state: "finished" });
+  const h = (await gate.review())!;
+  assert.deepEqual(h.hosts.find((y) => y.hostId === "host:r3"), { hostId: "host:r3", attempts: 2, reconciledAt: T0, reconnected: false });
+  // a record under this promotion's key that names another promotion holds everything
+  await put(s, e.successor, { kind: WORKERS_HOLD_KIND, id: "p1" }, { ...h, promotionId: "p2" } as unknown as Record<string, unknown>);
+  const other = workersHoldGate(s, e.successor, hold, now);
+  assert.match((await other.startReason())!, /cannot be read, so no work starts/);
+  assert.equal(await other.heldForReaccept("att-zzz"), true);
+});
+
+test("a store fault while reading the hold holds everything; a write that loses a race is not an error and is made at the next review", async () => {
+  const base = new MemoryStorage();
+  clock = T0;
+  const e = await world(base);
+  const hold = await beginWorkersHold(base, e.successor, now) as WorkersHold;
+  let failReads = false, raceOnce = false;
+  const s = new Proxy(base, {
+    get(target, prop, receiver) {
+      if (prop === "getAggregate") return async (ref: AggregateRef) => { if (failReads && ref.kind === WORKERS_HOLD_KIND) throw new Error("the store is not reachable"); return target.getAggregate(ref); };
+      if (prop === "applyOperation") return async (op: Parameters<ControllerStorage["applyOperation"]>[0]) => {
+        const ref = (op.changes[0] as { ref?: AggregateRef } | undefined)?.ref;
+        if (raceOnce && ref?.kind === WORKERS_HOLD_KIND) { raceOnce = false; const cur = await target.getAggregate(ref); await put(target, e.successor, ref, cur!.body as Record<string, unknown>); }
+        return target.applyOperation(op);
+      };
+      const v = Reflect.get(target, prop, receiver);
+      return typeof v === "function" ? v.bind(target) : v;
+    },
+  }) as ControllerStorage;
+  const gate = workersHoldGate(s, e.successor, hold, now);
+  failReads = true;
+  assert.match((await gate.startReason())!, /cannot be read, so no work starts/);
+  assert.equal(await gate.heldForReaccept("att-a"), true);
+  assert.match((await gate.adoptReason({ attemptId: "att-c", primaryEpoch: e.successor }))!, /cannot be read/);
+  failReads = false;
+  // the local attempt ends; the review's write loses a race with another write of the record
+  await put(base, e.successor, dispatchRef("att-b"), { ...running("att-b", "local"), state: "finished" });
+  const r0 = (await base.getAggregate({ kind: WORKERS_HOLD_KIND, id: "p1" }))!.revision;
+  raceOnce = true;
+  const lost = (await gate.review())!;
+  assert.equal(lost.attempts.find((a) => a.attemptId === "att-b")!.resolved, undefined, "nothing recorded by the lost write");
+  assert.equal((await base.getAggregate({ kind: WORKERS_HOLD_KIND, id: "p1" }))!.revision, r0 + 1, "only the other write landed");
+  const next = (await gate.review())!;
+  assert.equal(next.attempts.find((a) => a.attemptId === "att-b")!.resolved?.how, "ended");
+  assert.equal((await holdOf(base)).hosts.find((y) => y.hostId === "local")!.reconciledAt, T0);
+});
+
+test("a live list longer than the scan keeps a cut hold up even when nothing beyond the list is seen (fail closed)", async () => {
+  const s = new MemoryStorage();
+  clock = T0;
+  const old = (await s.acquireEpoch({ holder: "ctl-a", at: T0 })).epoch;
+  const ids = Array.from({ length: WORKERS_HOLD_LIMITS.attempts + 2 }, (_, i) => `att-${String(i).padStart(4, "0")}`);
+  const filler = Array.from({ length: WORKERS_HOLD_LIMITS.liveScan + 1 - ids.length }, (_, i) => `att-f${String(i).padStart(4, "0")}`);
+  await put(s, old, DISPATCH_LIVE, { ids: [...ids, ...filler] });
+  for (const id of ids) await put(s, old, dispatchRef(id), running(id, "local", old));
+  const fence = (await s.acquireEpoch({ holder: fenceHolder("p1", old, "ctl-a"), at: T0, expectedEpoch: old })).epoch;
+  await put(s, fence, CONTROLLER_AUTHORITY, promoted("p1", old, fence));
+  const succ = (await s.acquireEpoch({ holder: "ctl-b", at: T0, expectedEpoch: fence })).epoch;
+  const h = await beginWorkersHold(s, succ, now) as WorkersHold;
+  assert.equal(h.truncated, true);
+  for (const id of ids) await put(s, succ, dispatchRef(id), { ...running(id, "local", old), state: "finished" });
+  const gate = workersHoldGate(s, succ, h, now);
+  assert.equal((await gate.review())!.state, "held", "the live list is longer than the scan: what lies beyond it is not known");
+  assert.match((await gate.startReason())!, /still running beyond the ones listed/);
+});

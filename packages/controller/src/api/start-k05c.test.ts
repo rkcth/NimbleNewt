@@ -129,8 +129,17 @@ test("after a promotion the successor's workers stay stopped until reconciled: n
     second = await open(d, "controller-b");
     assert.equal((await second.storage.getAggregate({ kind: "recovery-workers-hold", id: "k05c" }))!.revision, revision);
 
+    // a takeover whose gate cannot be asked is held back (fail closed), and the run stays as it is
+    const adoptAsked = WorkersHoldGate.prototype.adoptReason;
+    WorkersHoldGate.prototype.adoptReason = async () => { throw new Error("the hold cannot be read just now"); };
+    let tick: Awaited<ReturnType<NonNullable<Controller["dispatch"]>["dispatcher"]["tick"]>>;
+    try { tick = await second.dispatch!.dispatcher.tick(); } finally { WorkersHoldGate.prototype.adoptReason = adoptAsked; }
+    assert.deepEqual(tick.adopted, [], JSON.stringify(tick));
+    assert.ok(tick.heldBack?.some((x) => x.attemptId === s.attemptId && /may be taken over could not be read/.test(x.reason)), JSON.stringify(tick.heldBack));
+    assert.equal((await dispatchOf(second, s.attemptId))!.state, "running");
+
     // nothing starts while the hold stands; the accepted run is taken over (its worker still has to be told)
-    let tick = await second.dispatch!.dispatcher.tick();
+    tick = await second.dispatch!.dispatcher.tick();
     assert.ok(!tick.started.includes(next.attemptId), JSON.stringify(tick.started));
     assert.ok(tick.skipped.some((x) => x.attemptId === next.attemptId && /its workers stay stopped until they are reconciled: 1 worker host is not reconciled yet \(host:r1\)/.test(x.reason)), JSON.stringify(tick.skipped));
     assert.deepEqual(tick.adopted, [s.attemptId], JSON.stringify(tick));
