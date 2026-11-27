@@ -9,7 +9,8 @@ import { servesProject } from "./integrator-pool.js";
  *
  * The pool's integrators are the active agents with the exact right `integration.lease` on the project (a grant for every project counts), judged by the same rule as `IntegratorPool.next` (`servesProject`). One of them
  * is busy while it holds a live integrator lease of any project it serves (one project at a time), and free otherwise. The answer is:
- * - `held`: an active agent holds the branch's live lease (whoever it is; the pool passes such a branch over too), with until when;
+ * - `held`: an active agent holds the branch's live lease (whoever it is; the pool passes such a branch over too), with until when, and whether it may still land under it (`lands`: it still serves the project; a
+ *   holder whose right was taken away cannot land, so the queue waits until the hold is released or runs out);
  * - `free`: nobody active holds it and at least one integrator that serves the project is free, so the pool gives it this queue when it asks (oldest waiting queue first);
  * - `busy`: every integrator that serves the project holds a lease already, so no capacity is left;
  * - `nobody`: no active agent serves the project, so no capacity exists;
@@ -17,11 +18,14 @@ import { servesProject } from "./integrator-pool.js";
  *
  * Bounded: the agent records are read in pages of 200, at most `CAPACITY_LIMITS.principalPages` pages, and at most `CAPACITY_LIMITS.agents` active agents are judged; the leases by `IntegratorLeaseService.liveLeases`
  * (50 pages of 200). A walk of the agent records that stops early is said (`partial`: there may be more integrators than counted); `nobody` and `busy` are then said only of the agents read.
+ *
+ * Cost: judging an agent (`PrincipalService.current`) reads every grant and restriction record, so only the agents that can have the right at all are judged: those whose own record or a grant record (any state; the
+ * judgement decides whether it holds now) names the action `integration.lease` (`integratorCandidateIds`). A view then costs one walk of the agent records, one of the grant records and one judgement per such agent.
  */
-export const CAPACITY_LIMITS = { principalPages: 10, agents: 500 } as const;
+export const CAPACITY_LIMITS = { principalPages: 10, agents: 500, grantPages: 50 } as const;
 
 export type CapacityAnswer =
-  | { readonly state: "held"; readonly holder: string; readonly expiresAt: string }
+  | { readonly state: "held"; readonly holder: string; readonly expiresAt: string; readonly lands: boolean }
   | { readonly state: "free"; readonly free: number; readonly busy: number; readonly partial: boolean }
   | { readonly state: "busy"; readonly busy: number; readonly partial: boolean }
   | { readonly state: "nobody"; readonly partial: boolean }
@@ -34,14 +38,18 @@ export interface IntegratorCapacityOptions {
   readonly principal: (principalId: string) => Promise<Principal | undefined>;
 }
 
-/** The active agents' IDs from the principal records, at most `pages` pages of 200 and `limit` agents; `partial` when either bound stopped the walk. */
-export async function activeAgentIds(storage: Pick<ControllerStorage, "listAggregates">, pages: number = CAPACITY_LIMITS.principalPages, limit: number = CAPACITY_LIMITS.agents): Promise<{ ids: string[]; partial: boolean }> {
+/**
+ * The active agents' IDs from the principal records, at most `pages` pages of 200 and `limit` agents; `partial` when either bound stopped the walk. With `keep`, only the agents it keeps are counted toward `limit`
+ * and returned.
+ */
+export async function activeAgentIds(storage: Pick<ControllerStorage, "listAggregates">, pages: number = CAPACITY_LIMITS.principalPages, limit: number = CAPACITY_LIMITS.agents, keep?: (id: string, body: unknown) => boolean): Promise<{ ids: string[]; partial: boolean }> {
   const ids: string[] = [];
   let after: string | undefined;
   for (let page = 0; page < pages; page++) {
     const batch = await storage.listAggregates("principal", { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
     for (const a of batch) {
       if (!a.id.startsWith("agent:") || (a.body as unknown as { state?: unknown }).state !== "active") continue;
+      if (keep !== undefined && !keep(a.id, a.body)) continue;
       if (ids.length >= limit) return { ids, partial: true };
       ids.push(a.id);
     }
@@ -49,6 +57,26 @@ export async function activeAgentIds(storage: Pick<ControllerStorage, "listAggre
     after = batch[batch.length - 1]!.id;
   }
   return { ids, partial: true };
+}
+
+const LEASE_RIGHT = "integration.lease";
+const names = (grants: unknown): boolean => Array.isArray(grants) && grants.some((g) => (g as { action?: unknown } | null)?.action === LEASE_RIGHT);
+
+/**
+ * The active agents that can have the right `integration.lease` at all: their own record names it, or a grant record (whatever its state) does. A superset of the integrators, so judging only these counts the same
+ * as judging every agent; the grant records are read in pages of 500, at most `grantPages`, and when that walk stops early no agent is left out for want of a grant record (every active agent is judged).
+ */
+export async function integratorCandidateIds(storage: Pick<ControllerStorage, "listAggregates">, grantPages: number = CAPACITY_LIMITS.grantPages): Promise<{ ids: string[]; partial: boolean }> {
+  const granted = new Set<string>();
+  let complete = false;
+  let after: string | undefined;
+  for (let page = 0; page < grantPages; page++) {
+    const batch = await storage.listAggregates("grant-record", { ...(after === undefined ? {} : { afterId: after }), limit: 500 });
+    for (const r of batch) { const b = r.body as unknown as { grantee?: unknown; action?: unknown }; if (b.action === LEASE_RIGHT && typeof b.grantee === "string") granted.add(b.grantee); }
+    if (batch.length < 500) { complete = true; break; }
+    after = batch[batch.length - 1]!.id;
+  }
+  return activeAgentIds(storage, CAPACITY_LIMITS.principalPages, CAPACITY_LIMITS.agents, complete ? (id, body) => granted.has(id) || names((body as { grants?: unknown } | null)?.grants) : undefined);
 }
 
 const bare = (principalId: string): string | undefined => (principalId.startsWith("agent:") && principalId.length > "agent:".length ? principalId.slice("agent:".length) : undefined);
@@ -68,7 +96,7 @@ export class IntegratorCapacity {
     if (own !== undefined) {
       const holder = await this.#options.principal(`agent:${own.holder}`);
       // A live hold of an agent that is no longer active is ended when the next integrator takes the branch (the lease door), so it is not capacity in use.
-      if (holder !== undefined && holder.kind === "agent") return { state: "held", holder: own.holder, expiresAt: own.expiresAt };
+      if (holder !== undefined && holder.kind === "agent") return { state: "held", holder: own.holder, expiresAt: own.expiresAt, lands: holder.id === `agent:${own.holder}` && servesProject(holder, projectId) };
     }
     const byHolder = new Map<string, IntegratorLease[]>();
     for (const l of leases) { const list = byHolder.get(l.holder); if (list === undefined) byHolder.set(l.holder, [l]); else list.push(l); }

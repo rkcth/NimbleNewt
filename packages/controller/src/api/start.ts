@@ -113,7 +113,7 @@ import { MaintenanceService, EnvironmentChangeApplier, type MaintenanceNotice, A
 import { EnvironmentService } from "../environments/index.js";
 import { CleanupSettingsService, ScratchCleanupService, ownerNotices, supervisorNotice, scratchRecordId, type ScratchMode, type ScratchPorts } from "../work-end/index.js";
 import { WorkspaceOpService, type WorkspacePort } from "../workspace-ops/index.js";
-import { IntegratorCapacity, IntegratorLeaseOps, IntegratorLeaseService, IntegratorPool, LandingGate, activeAgentIds, LandingQueueOps, LandingQueueService, describeLeases, integratorLeaseHandover } from "../landing/index.js";
+import { IntegratorCapacity, IntegratorLeaseOps, IntegratorLeaseService, IntegratorPool, LandingGate, integratorCandidateIds, LandingQueueOps, LandingQueueService, describeLeases, integratorLeaseHandover } from "../landing/index.js";
 import { ArtifactService, DeliverableService, FileBlobStore, TaskArtifactPublisher } from "../artifacts/index.js";
 import { ServiceOperations, type ServiceTarget } from "../service-ops/index.js";
 import { SimulationService } from "../simulation/index.js";
@@ -941,7 +941,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       activeAgent: async (agentId) => { const p = await principals.get(`agent:${agentId}`); return p !== undefined && p.kind === "agent" && p.state === "active"; },
     });
     // Who can land a landing branch now (card P10b): the owner's landing_queue view says why approved work waits when no integrator is free. Read-only, the pool's own rule, on the same lease clock.
-    const integratorCapacity = new IntegratorCapacity(integratorLeases, { agents: () => activeAgentIds(storage), principal: (id) => principals.current(id) });
+    const integratorCapacity = new IntegratorCapacity(integratorLeases, { agents: () => integratorCandidateIds(storage), principal: (id) => principals.current(id) });
     // The landing gate's required checks (card P09), with those the project's review policy adds for the task (card Q02). One function for the gate and the queue, so they cannot disagree.
     const landingRequiredChecks = async (projectId: string, taskId?: string): Promise<readonly LandingCheck[]> => { const base = (await integration.effective(projectId)).requiredChecks; const extra = qaReview === undefined ? [] : await qaReview.landingChecks(projectId, taskId); return withPolicyChecks(base, extra); };
     const landingQueueOps = new LandingQueueOps(landingQueue, {

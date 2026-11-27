@@ -31,10 +31,10 @@ for (const backend of backends) {
       const read = async (by: Principal = w.owner, s = status): Promise<string> => (await s.landingQueueLines(by, w.project))!.lines.map((l) => l.text).join("\n");
       const capacityLine = async (by: Principal = w.owner): Promise<string | undefined> => (await read(by)).split("\n").find((t) => /integrator lease of this branch|this branch.s lease now|capacity|land this queue/.test(t));
 
-      assert.equal(await capacityLine(), "No capacity is left to land this queue: no active agent has the right integration.lease on this project, so the approved work waits until an agent is given that right (or the owner takes the lease for a named agent with integrator.lease.acquire).");
+      assert.equal(await capacityLine(), "No capacity is left to land this queue: no active agent has the right integration.lease on this project, so the approved work waits until an agent is given that right.");
       assert.deepEqual(calls, [[w.project, "main"]]);
       answer = { state: "nobody", partial: true };
-      assert.match((await capacityLine())!, /acquire\) \(not every agent record was read, so there may be more integrators than counted\)\.$/);
+      assert.match((await capacityLine())!, /that right \(not every agent record was read, so there may be more integrators than counted\)\.$/);
       answer = { state: "busy", busy: 1, partial: false };
       assert.equal(await capacityLine(), "No capacity is left to land this queue: the one integrator that may land on this project already holds an integrator lease (one project at a time), so the approved work waits until one releases its lease or the lease runs out; giving another agent the right integration.lease on this project adds capacity.");
       answer = { state: "busy", busy: 3, partial: true };
@@ -45,12 +45,14 @@ for (const backend of backends) {
       assert.match((await capacityLine())!, /; 2 integrators that may land on this project hold no lease, .* first; 2 others are busy with a lease already\.$/);
       answer = { state: "free", free: 2, busy: 1, partial: false };
       assert.match((await capacityLine())!, /; 1 other is busy with a lease already\.$/);
-      answer = { state: "held", holder: "ivy", expiresAt: "2026-10-23T09:10:00.000Z" };
+      answer = { state: "held", holder: "ivy", expiresAt: "2026-10-23T09:10:00.000Z", lands: true };
       assert.equal(await capacityLine(), "Integrator ivy holds the integrator lease of this branch until 2026-10-23T09:10:00.000Z and lands its queue.");
+      answer = { state: "held", holder: "ivy", expiresAt: "2026-10-23T09:10:00.000Z", lands: false };
+      assert.equal(await capacityLine(), "Agent ivy holds the integrator lease of this branch until 2026-10-23T09:10:00.000Z but no longer has the right integration.lease on this project, so it can neither land under it nor renew it, and the pool gives this branch to nobody else: the approved work waits until the lease runs out, or until you end it sooner with integrator.lease.release (by project and branch).");
       // A hostile holder name is shown on one line and bounded.
-      answer = { state: "held", holder: `x\ny${"z".repeat(300)}`, expiresAt: "2026-10-23T09:10:00.000Z" };
+      answer = { state: "held", holder: `x\ny\u202e${"z".repeat(300)}`, expiresAt: "2026-10-23T09:10:00.000Z", lands: true };
       const hostile = (await capacityLine())!;
-      assert.ok(!hostile.includes("\n") && hostile.length < 260, hostile);
+      assert.ok(!hostile.includes("\n") && !hostile.includes("\u202e") && hostile.length < 260, hostile);
       answer = { state: "unknown", reason: "the integrator leases could not all be read" };
       assert.equal(await capacityLine(), "Who can land this queue is not known now: the integrator leases could not all be read; no integrator is assumed free.");
       // A refused read is said as not known; anything else is not hidden.
@@ -66,6 +68,7 @@ for (const backend of backends) {
       calls.length = 0;
       const ivy = { id: "agent:ivy", kind: "agent", name: "ivy", grants: [{ action: "integration.lease", project: w.project }], asOf: "2026-10-23T09:00:00.000Z" } as unknown as Principal;
       assert.equal(await capacityLine(ivy), undefined);
+      for (const kind of ["host", "client", "service"]) assert.equal(await capacityLine({ ...ivy, id: `${kind}:x`, kind } as unknown as Principal), undefined, kind);
       assert.equal(await capacityLine({ ...w.owner, taskScope: { taskId: `tsk-${"b".repeat(20)}`, projectId: w.project } } as Principal), undefined);
       q = queueOf({ branch: "old", landingBranch: "main" });
       assert.equal(await capacityLine(), undefined);

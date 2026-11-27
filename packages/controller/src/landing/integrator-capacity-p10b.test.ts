@@ -4,7 +4,7 @@ import { DomainError } from "../domain/errors.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { buildWorld } from "../dispatch/testing/world.js";
 import type { Grant, Principal } from "../security/principals.js";
-import { CAPACITY_LIMITS, IntegratorCapacity, IntegratorLeaseOps, IntegratorLeaseService, IntegratorPool, LandingQueueService, activeAgentIds, type IntegratorLease } from "./index.js";
+import { CAPACITY_LIMITS, IntegratorCapacity, IntegratorLeaseOps, IntegratorLeaseService, IntegratorPool, LandingQueueService, activeAgentIds, integratorCandidateIds, type IntegratorLease } from "./index.js";
 
 after(stopServer);
 
@@ -62,7 +62,7 @@ for (const backend of backends) {
       const took = await r.pool.next(ivy, { commandId: "i1", ttlMs: 10 * MIN });
       assert.equal(took.outcome === "taken" ? took.projectId : took.outcome, a);
       const lease = took.outcome === "taken" ? took.lease : (undefined as never as IntegratorLease);
-      assert.deepEqual(await r.capacity.of(a, "main"), { state: "held", holder: "ivy", expiresAt: lease.expiresAt });
+      assert.deepEqual(await r.capacity.of(a, "main"), { state: "held", holder: "ivy", expiresAt: lease.expiresAt, lands: true });
       assert.deepEqual(await r.capacity.of(b, "main"), { state: "busy", busy: 1, partial: false });
       // Another branch of a is its own: ivy's hold of a's main does not make a's "old" held, and she is busy there.
       assert.deepEqual(await r.capacity.of(a, "old"), { state: "busy", busy: 1, partial: false });
@@ -78,7 +78,7 @@ for (const backend of backends) {
       assert.deepEqual((await r.capacity.of(b, "main")).state, "held");
       // The right on a taken from ivy while she holds a: her hold no longer makes her busy (the pool judges the same), and a's live hold is still hers (held: the pool passes it over too).
       await r.regrant("agent:ivy", lands([b]));
-      assert.deepEqual(await r.capacity.of(a, "main"), { state: "held", holder: "ivy", expiresAt: lease.expiresAt });
+      assert.deepEqual(await r.capacity.of(a, "main"), { state: "held", holder: "ivy", expiresAt: lease.expiresAt, lands: false }, "her hold stands, but she cannot land under it");
       assert.deepEqual(await r.capacity.of(b, "old"), { state: "free", free: 2, busy: 1, partial: false }, "ivy (her hold is on a, where she has no right now) and sue are free for b; max holds b");
       assert.deepEqual((await r.pool.next(await r.w.principals.authenticate((await r.w.principals.issueCredential(r.w.owner, "agent:ivy")).token), { commandId: "i2", ttlMs: 10 * MIN })).outcome, "none", "ivy is free for the pool too, and b is held");
       // ivy disabled while her hold on a is live: it is not capacity in use (the lease door ends it at the next take); sue (every project) is free for a.
@@ -146,10 +146,57 @@ for (const backend of backends) {
       const ghost = { holder: "ghost", projectId: a, branch: "main", live: true, expiresAt: "2030-01-01T00:00:00.000Z" } as unknown as IntegratorLease;
       const ghosts = new IntegratorCapacity({ liveLeases: async () => ({ leases: [ghost], partial: false }), get: async () => undefined }, { agents: () => activeAgentIds(r.w.storage), principal: (id) => r.w.principals.current(id) });
       assert.deepEqual(await ghosts.of(a, "main"), { state: "free", free: 3, busy: 0, partial: false });
+      // A holder whose principal is not an agent (another kind answered for the ID) does not hold the branch.
+      const notAgent = new IntegratorCapacity({ liveLeases: async () => ({ leases: [{ ...ghost, holder: "ann" }], partial: false }), get: async () => undefined }, { agents: async () => ({ ids: [], partial: false }), principal: async (id) => ({ ...(await r.w.principals.current(id))!, kind: "client" } as Principal) });
+      assert.deepEqual(await notAgent.of(a, "main"), { state: "nobody", partial: false });
       // A live hold of another project by an integrator that serves this one makes it busy (one project at a time), whatever branch.
       const elsewhere = { ...ghost, holder: "ann", projectId: "prj-elsewhere" } as IntegratorLease;
       const wide = new IntegratorCapacity({ liveLeases: async () => ({ leases: [elsewhere], partial: false }), get: async () => undefined }, { agents: () => activeAgentIds(r.w.storage), principal: async (id) => { const p = (await r.w.principals.current(id))!; return id === "agent:ann" ? { ...p, grants: [...p.grants, { action: "integration.lease", project: "prj-elsewhere" }] } as Principal : p; } });
       assert.deepEqual(await wide.of(a, "main"), { state: "free", free: 2, busy: 1, partial: false });
+    } finally { await r.close(); }
+  });
+
+  test(`${backend.name}: only agents that can have the right are judged: the agent's own record or a grant record naming integration.lease; a grant walk that stops early leaves nobody out (card P10b)`, async () => {
+    const r = await rig();
+    try {
+      const [a, o] = [await r.project("Apple"), await r.project("Other")];
+      await r.queued(a);
+      await r.person("ann", lands([a]));
+      await r.person("bob", [{ action: "task.read", project: "*" }]);
+      await r.person("cal", [{ action: "integration.leases", project: a }, { action: "workspace.manage", project: a }]);
+      await r.person("dan", []);
+      // dan gets the right through a grant record (not his own record), then it is revoked: he stays a candidate (the judgement decides) but is not counted.
+      const g = await r.w.grants.grant(r.w.owner, { commandId: "g-dan", grantee: "agent:dan", action: "integration.lease", project: a, source: "direct", basis: "test" } as never);
+      await r.person("eli", lands([o]));
+      await r.person("off", lands([a]));
+      await r.w.principals.disable(r.w.owner, { commandId: "d-off", principalId: "agent:off", expectedRevision: (await r.w.principals.get("agent:off"))!.revision });
+      assert.deepEqual(await integratorCandidateIds(r.w.storage), { ids: ["agent:ann", "agent:dan", "agent:eli"], partial: false });
+      const judged: string[] = [];
+      const cap = new IntegratorCapacity(r.leases, { agents: () => integratorCandidateIds(r.w.storage), principal: (id) => { judged.push(id); return r.w.principals.current(id); } });
+      assert.deepEqual(await cap.of(a, "main"), { state: "free", free: 2, busy: 0, partial: false });
+      assert.deepEqual(judged, ["agent:ann", "agent:dan", "agent:eli"]);
+      await r.w.grants.revoke(r.w.owner, { commandId: "rv-dan", grantId: g.id, expectedRevision: g.revision, reason: "test" });
+      assert.deepEqual(await integratorCandidateIds(r.w.storage), { ids: ["agent:ann", "agent:dan", "agent:eli"], partial: false });
+      assert.deepEqual(await cap.of(a, "main"), { state: "free", free: 1, busy: 0, partial: false });
+      // The same answer as judging every active agent.
+      const every = new IntegratorCapacity(r.leases, { agents: () => activeAgentIds(r.w.storage), principal: (id) => r.w.principals.current(id) });
+      assert.deepEqual(await every.of(a, "main"), await cap.of(a, "main"));
+      // A grant walk that stops at its bound filters nobody out; one that ends filters.
+      let grantPages = 0;
+      const endlessGrants = { listAggregates: async (kind: string, page: { afterId?: string }) => (kind === "grant-record" ? (grantPages++, Array.from({ length: 500 }, (_, i) => ({ id: `grt-${grantPages}-${String(i).padStart(3, "0")}`, body: { grantee: "agent:x", action: "task.read" } }))) : r.w.storage.listAggregates(kind, page as never)) };
+      assert.deepEqual(await integratorCandidateIds(endlessGrants as never, 3), { ids: ["agent:ann", "agent:bob", "agent:cal", "agent:dan", "agent:eli"], partial: false });
+      assert.equal(grantPages, 3);
+      // Candidates count toward the agent bound only when kept: 600 other agents do not crowd out the one integrator.
+      const crowd = { listAggregates: async (kind: string, page: { afterId?: string }) => {
+        if (kind === "grant-record") return [];
+        const all = [...Array.from({ length: 600 }, (_, i) => ({ id: `agent:a${String(i).padStart(3, "0")}`, body: { state: "active", grants: [] } })), { id: "agent:zed", body: { state: "active", grants: lands([a]) } }];
+        const from = page.afterId === undefined ? 0 : all.findIndex((x) => x.id === page.afterId) + 1;
+        return all.slice(from, from + 200);
+      } };
+      assert.deepEqual(await integratorCandidateIds(crowd as never), { ids: ["agent:zed"], partial: false });
+      // A grant record must name the action exactly: one for "integration.leases" makes nobody a candidate (the stub has only that record).
+      const nearMiss = { listAggregates: async (kind: string, page: { afterId?: string }) => (kind === "grant-record" ? [{ id: "grt-near", body: { grantee: "agent:bob", action: "integration.leases" } }] : r.w.storage.listAggregates(kind, page as never)) };
+      assert.deepEqual((await integratorCandidateIds(nearMiss as never)).ids, ["agent:ann", "agent:eli"], "dan's real grant record is not in this stub; bob's near miss is not a candidate");
     } finally { await r.close(); }
   });
 
@@ -166,6 +213,11 @@ for (const backend of backends) {
       r.w.clock.advance(11 * MIN);
       assert.deepEqual((await r.leases.liveLeases()).leases.map((l) => l.holder), ["max"], "an expired hold is not live");
       assert.deepEqual(await r.leases.liveLeases(0), { leases: [], partial: true }, "no page read is partial");
+      // Past the first page: 200 released records sort first; the live one after them is still read, and the walk ends complete.
+      const filler = Array.from({ length: 200 }, (_, i) => ({ id: `!filler-${String(i).padStart(3, "0")}`, kind: "integrator-lease", revision: 1, body: { projectId: a, branch: `f${i}`, holder: "old", taskId: "t", fence: 1, ttlMs: MIN, acquiredAt: "2026-01-01T00:00:00.000Z", expiresAt: "2026-01-01T00:01:00.000Z", state: "released", epoch: r.w.epoch } }));
+      const padded = new Proxy(r.w.storage, { get: (t, k, rcv) => (k === "listAggregates" ? async (kind: string, page: { afterId?: string; limit: number }) => (kind !== "integrator-lease" ? t.listAggregates(kind, page) : page.afterId === undefined ? filler : page.afterId.startsWith("!filler-") ? t.listAggregates(kind, { limit: page.limit }) : t.listAggregates(kind, page)) : Reflect.get(t, k, rcv)) });
+      const deep = await IntegratorLeaseService.withEpoch(padded, r.w.epoch, { clock: r.w.clock.now, pause: async () => undefined }).liveLeases();
+      assert.deepEqual([deep.partial, deep.leases.map((l) => l.holder)], [false, ["max"]]);
     } finally { await r.close(); }
   });
 }
