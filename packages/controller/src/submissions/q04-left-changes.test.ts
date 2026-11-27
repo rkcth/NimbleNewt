@@ -145,6 +145,13 @@ for (const backend of backends) {
       assert.deepEqual((await leftChangesBy(s.runner, t2, "att-u3", { attempts: "att-u1", complete: true })).sort(), [ann.id]);
       assert.deepEqual((await leftChangesBy(s.runner, t2, "att-u3", { attempts: Array.from({ length: 65 }, (_, i) => `att-${i}`), complete: true })).sort(), [ann.id], "more than the bound is malformed");
       assert.deepEqual((await leftChangesBy(s.runner, t2, "att-u3", { attempts: ["att-u1", "att-u3"], complete: true })).sort(), [dee.id], "a complete report: the attempt itself is skipped, the attempt before is not added");
+      // First review: an attempt of another task whose owner is not the attempt before's is not taken as this task's (its owner is not added; the attempt before is); a report that does not say it is complete is not.
+      assert.deepEqual(await leftChangesBy(s.runner, t2, "att-u3", { attempts: ["att-1"], complete: true }), [ann.id], "att-1 is Bob's attempt of the other task");
+      assert.deepEqual((await leftChangesBy(s.runner, t2, "att-u3", { attempts: ["att-u1"] })).sort(), [ann.id, dee.id].sort(), "no `complete`: the attempt before is added as well");
+      assert.deepEqual((await leftChangesBy(s.runner, t2, "att-u3", { attempts: ["att-u1"], complete: "yes" })).sort(), [ann.id, dee.id].sort());
+      // An attempt whose owner's kind cannot be read is taken as an agent's (fail closed).
+      await s.plant("attempt", "att-k", { taskId: t2, generation: 1, owner: { id: "zed" }, number: 7, state: "active", admittedBy: s.owner.id });
+      assert.deepEqual(await leftChangesBy(s.runner, t2, "att-u3", { attempts: ["att-k"], complete: true }), ["agent:zed"]);
       // The attempt before cannot be found (not in the dispatcher's list): the work is not submitted.
       const t3 = s.task;
       await s.attempt("att-x", t3, bob, 9, false);

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -162,6 +162,7 @@ test("fails closed: a tree that cannot be read around a request charges the atte
     assert.equal((await leftBy(w.ws, a.checkout)).complete, false);
     await hand(w.ws, "att-c");
     assert.equal(w.handover().overflow, true, "a damaged record leaves the list incomplete for good");
+    assert.deepEqual(w.handover().left, ["att-c1"], "the attempt that held the checkout (from the attempt file) is still named when it changed it (first review)");
     assert.equal((await leftBy(w.ws, a.checkout)).complete, false);
   } finally { await w.done(); }
 });
@@ -249,4 +250,58 @@ test("the integrator's re-apply of a queued submission onto the moved landing br
     await hand(w.ws, "att-n");
     assert.deepEqual(w.handover().left, ["att-a"], "the reviewer is not charged with the re-apply's change");
   } finally { await w.done(); }
+});
+
+test("a host that stops part-way through a platform request: the request's change is not charged to the attempt that held the checkout, a charge found before the request is kept, and a resume settles the mark (card Q04, first review)", { skip }, async () => {
+  const w = await world();
+  const marker = join(w.task, "handover.during");
+  const original = { refresh: w.git.refresh.bind(w.git), reapply: w.git.reapply.bind(w.git) };
+  // What the folder held at the moment the request had written the checkout: put back afterwards, as if the host had stopped there.
+  let snapshot: { record: string; marked: boolean } | undefined;
+  const take = (): void => { snapshot = { record: readFileSync(join(w.task, "handover.json"), "utf8"), marked: existsSync(marker) }; };
+  const putBack = async (): Promise<void> => { await writeFile(join(w.task, "handover.json"), snapshot!.record); if (snapshot!.marked) await writeFile(marker, ""); else await rm(marker, { force: true }); };
+  (w.git as unknown as { refresh: typeof original.refresh }).refresh = async (o) => { const r = await original.refresh(o); take(); return r; };
+  (w.git as unknown as { reapply: typeof original.reapply }).reapply = async (o) => { const r = await original.reapply(o); take(); return r; };
+  const move = (name: string): void => { execFileSync("sh", ["-c", `printf 'export const x = 1;\\n' > src/${name}.ts`], { cwd: w.shared }); sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", name); };
+  try {
+    const a = await hand(w.ws, "att-a");
+    // A changed nothing; the host stops part-way through a refresh that brought the landing branch's file
+    move("b");
+    assert.equal((await w.ws.port.run(call("refresh"))).ok, true);
+    assert.equal(snapshot?.marked, true, "the mark is there while the request runs");
+    assert.equal(existsSync(marker), false, "and gone once it ended");
+    await putBack();
+    await hand(w.make(), "att-b");
+    assert.deepEqual(w.handover().left, [], "the refresh's change is not A's");
+    assert.equal(existsSync(marker), false, "the hand-out settled the mark");
+    // B edits, then re-applies and the host stops part-way: B's edit, seen before the request, is still B's
+    await writeFile(join(a.checkout, "src", "a.ts"), "export const a = 4;\n");
+    move("c");
+    assert.equal((await w.ws.port.run(call("reapply"))).ok, true);
+    await putBack();
+    assert.deepEqual(w.handover().left, ["att-b"], "the charge was written before the request started");
+    // B resumes (the same attempt) after the restart: the mark is settled with the tree as the request left it, so C's hand-out charges nothing new
+    await hand(w.make(), "att-b");
+    assert.equal(existsSync(marker), false);
+    await hand(w.ws, "att-c");
+    assert.deepEqual(w.handover().left, ["att-b"]);
+    // without a mark, a tree that changed between the record and the hand-out is the attempt's (the request ended and wrote its tree, or never ran): C writes, D's hand-out charges C
+    await writeFile(join(a.checkout, "notes.md"), "C\n");
+    await hand(w.ws, "att-d");
+    assert.deepEqual(w.handover().left.sort(), ["att-b", "att-c"]);
+  } finally { await w.done(); }
+});
+
+test("a record that is there but cannot be read counts as damaged, not as none: the list it held is not known, so it stays incomplete (card Q04, first review)", { skip: skip || (process.getuid?.() === 0 ? "root reads every file" : false) }, async () => {
+  const w = await world();
+  try {
+    const a = await hand(w.ws, "att-a");
+    await writeFile(join(a.checkout, "src", "a.ts"), "export const a = 7;\n");
+    await hand(w.ws, "att-b");
+    assert.deepEqual(w.handover().left, ["att-a"]);
+    await chmod(join(w.task, "handover.json"), 0o000);
+    await hand(w.ws, "att-c");
+    assert.equal(w.handover().overflow, true, "the unreadable record's list (att-a) is lost, so the new one says it is incomplete");
+    assert.equal((await leftBy(w.ws, a.checkout)).complete, false);
+  } finally { await chmod(join(w.task, "handover.json"), 0o600).catch(() => undefined); await w.done(); }
 });

@@ -92,6 +92,7 @@ export const START_STATE_LIMITS = { files: 500 } as const;
  *
  * The comparison is made when the checkout is handed to a NEW attempt (`ensure` with another attempt ID), and also before each platform request (the attempt it was handed to changed it before the request ran). A tree that
  * cannot be read, or a record with no tree, counts as changed (fail closed). The submit's staging reports the list (`stageWork`'s `leftBy`), and the controller adds the agents of those attempts to the task's contributors.
+ * While a platform request runs, `<task>/handover.during` marks it, so a host that stops part-way through one does not charge the request's change to an attempt (see `#tracked`).
  */
 export interface HandoverState {
   readonly attemptId: string;
@@ -390,10 +391,20 @@ export class LocalWorkspaces {
     const file = join(dir, "handover.json");
     const prior = await readHandover(file);
     const whole = prior !== undefined && prior !== "damaged" ? prior : undefined;
-    if (whole?.attemptId === call.attemptId) return;
+    // First review: a host that stopped part-way through a platform request left the mark (see `#tracked`); what the checkout holds now is that request's, and no attempt has run since (each starts here).
+    const marker = join(dir, INTERRUPTED);
+    const interrupted = whole !== undefined && isMarked(marker);
+    if (whole?.attemptId === call.attemptId) {
+      if (!interrupted) return;
+      try { await writeHandover(file, { ...whole, expected: state.tree }); } catch (error) {
+        throw new WorkspaceError("unavailable", `the workspace was not opened: the record of who changed the checkout could not be written (${String((error as Error)?.message ?? error).slice(0, 160)})`);
+      }
+      await rm(marker, { force: true }).catch(() => undefined);
+      return;
+    }
     // The attempt before: the record's, else (a task folder from before the record) the attempt file's, whose start record holds the tree it was handed.
     const previous = whole?.attemptId ?? readAttempt(join(dir, "attempt"));
-    let expected: string | null = whole?.expected ?? null;
+    let expected: string | null = interrupted ? state.tree : whole?.expected ?? null;
     if (whole === undefined && previous !== undefined) expected = (await this.startState({ taskId: call.taskId, projectId: call.projectId, attemptId: previous }))?.tree ?? null;
     const left = new Set(whole?.left ?? []);
     // A damaged record has lost its list; a checkout that already holds changes with no attempt recorded holds someone's unrecorded work.
@@ -402,25 +413,37 @@ export class LocalWorkspaces {
     try { await writeHandover(file, { attemptId: call.attemptId, expected: state.tree, left: [...left], ...(overflow ? { overflow: true as const } : {}) }); } catch (error) {
       throw new WorkspaceError("unavailable", `the workspace was not opened: the record of who changed the checkout could not be written (${String((error as Error)?.message ?? error).slice(0, 160)})`);
     }
+    await rm(marker, { force: true }).catch(() => undefined);
   }
 
   /**
    * Card Q04: a platform request on a checkout (`WorkspaceHostOptions.tracked`). Before it, a checkout that is not what its attempt was handed (or cannot be read) adds that attempt to `left`; after it (whatever it
    * answered), the tree it left becomes the expected one, so what the request itself changed is never charged to an attempt. A checkout with no record (none was handed to an attempt here) is not tracked. A record that
    * cannot be written afterwards keeps the earlier expected tree, so the change is charged to the attempt at the next hand-out (fail closed).
+   *
+   * A host that stops part-way through the request (first review): the charge found before it is written before the request starts, and then the mark `<task>/handover.during`; the mark is removed when the request
+   * ends (also when the record could not be written then, so that the earlier tree still counts). A mark found later means the request did not end: what the checkout holds is the request's, not the attempt's (no
+   * attempt runs before the next hand-out, which reads the mark), so it becomes the expected tree. When the record or the mark cannot be written before the request, the request still runs (fail closed: the attempt
+   * is charged with its change at the next hand-out).
    */
   async #tracked<T>(where: CheckoutLocation, work: () => Promise<T>): Promise<T> {
     const file = join(where.checkout, "..", "handover.json");
+    const marker = join(where.checkout, "..", INTERRUPTED);
     const prior = await readHandover(file);
     if (prior === undefined || prior === "damaged") return work();
     const tree = async (): Promise<string | undefined> => { try { return (await this.#options.git.startState({ checkout: where.checkout, gitDir: where.gitDir })).tree; } catch { return undefined; } };
     const left = new Set(prior.left);
     let overflow = prior.overflow === true;
     const before = await tree();
-    if (before === undefined || prior.expected === null || before !== prior.expected) overflow = addLeft(left, prior.attemptId) || overflow;
+    const expected = isMarked(marker) ? before ?? null : prior.expected;
+    if (before === undefined || expected === null || before !== expected) overflow = addLeft(left, prior.attemptId) || overflow;
+    const record = (tree: string | null): HandoverState => ({ attemptId: prior.attemptId, expected: tree, left: [...left], ...(overflow ? { overflow: true as const } : {}) });
+    let marked = false;
+    try { await writeHandover(file, record(before ?? null)); await writeFile(marker, "", { mode: 0o600 }); marked = true; } catch { await rm(marker, { force: true }).catch(() => undefined); }
     try { return await work(); } finally {
       const after = await tree();
-      await writeHandover(file, { attemptId: prior.attemptId, expected: after ?? null, left: [...left], ...(overflow ? { overflow: true as const } : {}) }).catch(() => undefined);
+      await writeHandover(file, record(after ?? null)).catch(() => undefined);
+      if (marked) await rm(marker, { force: true }).catch(() => undefined);
     }
   }
 
@@ -522,6 +545,10 @@ const ATTEMPT = /^[A-Za-z0-9._:-]{1,120}$/;
  * which a case-insensitive filesystem would fold onto another attempt's record, a `:`, which Windows reads as a stream name, or an end dot, which Windows drops) a digest of the ID. The record names its attempt either way.
  */
 const startFileName = (attemptId: string): string => (/^[a-z0-9_-](?:[a-z0-9._-]*[a-z0-9_-])?$/.test(attemptId) ? `${attemptId}.json` : `~${createHash("sha256").update(attemptId).digest("hex").slice(0, 40)}.json`);
+/** Card Q04 (first review): the mark, beside the handover record, that a platform request on the checkout is under way (see `LocalWorkspaces.#tracked`). */
+const INTERRUPTED = "handover.during";
+/** Whether the mark is there (anything at that name counts; one that cannot be looked at does not). */
+function isMarked(file: string): boolean { try { lstatSync(file); return true; } catch { return false; } }
 /** Adds an attempt to the list unless it is full; answers true when it could not be added (the list then does not name every attempt). */
 function addLeft(left: Set<string>, attemptId: string): boolean {
   if (left.has(attemptId)) return false;
