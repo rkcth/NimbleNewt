@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **318 of 365 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **319 of 365 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -120,7 +120,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Health and recovery | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 6 of 6 |
 | Meetings | `▓▓▓▓▓▓▓▓▓▓░░` 87% | 28 of 32 |
 | Tools and skills | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 19 of 19 |
-| Projects, repositories and workspaces | `▓▓▓▓▓▓▓▓░░░░` 66% | 12 of 18 |
+| Projects, repositories and workspaces | `▓▓▓▓▓▓▓▓░░░░` 72% | 13 of 18 |
 | Quality: deliverables, QA and defects | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 5 of 5 |
 | Balancing delivery and improvement | `░░░░░░░░░░░░` 0% | 0 of 1 |
 | Learning and improvement | `░░░░░░░░░░░░` 0% | 0 of 5 |
@@ -547,7 +547,7 @@ The immutable tool and skill catalogue, review and promotion, MCP connections, t
 </details>
 
 <details>
-<summary><strong>Projects, repositories and workspaces</strong> — ▓▓▓▓▓▓▓▓░░░░ 12 of 18</summary>
+<summary><strong>Projects, repositories and workspaces</strong> — ▓▓▓▓▓▓▓▓░░░░ 13 of 18</summary>
 
 Repository-independent projects, isolated coding workspaces, non-code and sandbox operations, ongoing responsibilities and external contribution.
 
@@ -564,7 +564,7 @@ Repository-independent projects, isolated coding workspaces, non-code and sandbo
 - [x] **P09** · P33 · Gate landing on required checks for the exact integrated tree _(needs P08, Q01b, Q02)_
 - [x] **P06** · P34 · Implement project and agent retirement and archival _(needs P01, H11, L03, K06)_
 - [ ] **P02** · P35 · Implement isolated coding workspaces and integration _(needs P01, A04, L04, Y02, H12, Q01)_
-- [ ] **P10** · P35 · Land submissions with one leased integrator per project _(needs P08, P09, H12o, H12d, Q01b, A07f, Q04)_
+- [x] **P10** · P35 · Land submissions with one leased integrator per project _(needs P08, P09, H12o, H12d, Q01b, A07f, Q04)_
 - [ ] **P02b** · P36 · Implement optional work-in-progress branch backup (after the first release) _(needs P02, A06, A07, F09)_
 - [ ] **P05** · P36 · Implement external contribution and pull-request workflow _(needs P02, A06, A07, T03, F09)_
 - [ ] **P10b** · P36 · Share integrators across projects as a pool _(needs P10, H03, A10b, R05)_
