@@ -13,6 +13,15 @@ import { GitBridge, HANDOVER_LIMITS, LocalWorkspaces, type HostWorkspaceCall } f
 const hasGit = (() => { try { execFileSync("git", ["--version"], { stdio: "ignore" }); return true; } catch { return false; } })();
 const skip = hasGit ? false : "git is not installed";
 const sh = (cwd: string, ...args: string[]): string => execFileSync("git", ["-c", "core.hooksPath=/nonexistent-hooks", "-c", "core.autocrlf=false", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8" }).trim();
+// CI fix 2026-11-27: a record that is there but cannot be read, on every platform. chmod 0o000 only sets the read-only attribute on Windows: the file stays readable (so the damaged branch was never reached)
+// and a replace of it is refused (EPERM). There an access entry denies this user reading the file's data instead; its attributes can still be read and it can still be replaced, as with chmod on POSIX. Answers the undo.
+async function unreadable(file: string): Promise<() => Promise<void>> {
+  if (process.platform !== "win32") { await chmod(file, 0o000); return async () => { await chmod(file, 0o600); }; }
+  const sid = /"(S-1-[0-9-]+)"\s*$/.exec(execFileSync("whoami", ["/user", "/fo", "csv", "/nh"], { encoding: "utf8" }).trim())?.[1];
+  assert.ok(sid !== undefined, "the current user's SID is known");
+  execFileSync("icacls", [file, "/deny", `*${sid}:(RD)`], { stdio: "ignore" });
+  return async () => { execFileSync("icacls", [file, "/remove:d", `*${sid}`], { stdio: "ignore" }); };
+}
 let counter = 0;
 const rid = (): string => { const n = counter++; return `wsr-pqqqqqqqqqqqqqqq${"abcdefghijklmnopqrstuvwxyz"[Math.floor(n / 26) % 26]}${"abcdefghijklmnopqrstuvwxyz"[n % 26]}aa`; };
 const call = (operation: HostWorkspaceCall["operation"], more: Partial<HostWorkspaceCall> = {}): HostWorkspaceCall => ({ requestId: rid(), operation, taskId: "tsk-one", projectId: "prj-one", reason: "test", quietAttempts: [], ...more });
@@ -403,14 +412,16 @@ test("a host that stops part-way through a platform request: the request's chang
 
 test("a record that is there but cannot be read counts as damaged, not as none: the list it held is not known, so it stays incomplete (card Q04, first review)", { skip: skip || (process.getuid?.() === 0 ? "root reads every file" : false) }, async () => {
   const w = await world();
+  let undo: (() => Promise<void>) | undefined;
   try {
     const a = await hand(w.ws, "att-a");
     await writeFile(join(a.checkout, "src", "a.ts"), "export const a = 7;\n");
     await hand(w.ws, "att-b");
     assert.deepEqual(w.handover().left, ["att-a"]);
-    await chmod(join(w.task, "handover.json"), 0o000);
+    undo = await unreadable(join(w.task, "handover.json"));
+    assert.throws(() => readFileSync(join(w.task, "handover.json")), "the record is there but cannot be read");
     await hand(w.ws, "att-c");
     assert.equal(w.handover().overflow, true, "the unreadable record's list (att-a) is lost, so the new one says it is incomplete");
     assert.equal((await leftBy(w.ws, a.checkout)).complete, false);
-  } finally { await chmod(join(w.task, "handover.json"), 0o600).catch(() => undefined); await w.done(); }
+  } finally { await undo?.().catch(() => undefined); await w.done(); }
 });
