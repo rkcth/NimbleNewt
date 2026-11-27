@@ -20872,3 +20872,60 @@ The second clause (the checkout's starting state is recorded) is P02's start rec
   - files: the whole worker workspace suite (with the new `contribution.test.ts`), `integration/p05-contribution-check` and `integration/p02b-wip-backup` (four storage backends, real git, the controller's scan);
   - Node 22.23.0: 230 tests, 228 passing, 0 failing, 2 Windows-only skips;
   - Node 24.21.0: 230 tests, 228 passing, 0 failing, 2 Windows-only skips.
+
+### P05 first slice, first review (Claude agent, Opus 5.5, 2026-11-27; branch `card-p05`; card NOT flipped; task-plan files unchanged; not pushed; no network)
+Base for the merge: origin/main 17dd4c6b (notes: both sides kept).
+**Problems found and fixed:**
+- *Medium.* A submodule entry's change could be missing from the diff check. When the git directory has a work tree and its `.gitmodules` (from HEAD or the index) sets `ignore = all`, `diff-tree` leaves the change out.
+  - The task's own git directory is bare and was not affected (measured). `GitBridge.contributionCheck` takes any git directory, though, so it now passes `--ignore-submodules=none`.
+- *Medium.* `.gitattributes`, `.gitmodules` and `.lfsconfig` edits were not held.
+  - A `filter`, `diff` or `merge` attribute makes git run the driver a reader's configuration names; `export-ignore` and `eol` change what a checkout or archive holds.
+  - `.gitmodules` sets where a submodule comes from and an `ignore` that hides its changes; `.lfsconfig` sets where large files come from.
+  - All three now count as ignore-rule files: an edit is allowed only when the intended list names that exact file.
+- *Medium.* Instruction text kept characters that show nothing to a reader.
+  - These were the U+E0000 tag characters (they spell out text a model reads and a person does not see), the other format characters, the variation selectors, the combining grapheme joiner and the Hangul fillers.
+  - The cleaning now removes `\p{Cf}` and those characters, matching the controller's `escapeInvisible`. U+2028, U+2029 and NEL become line breaks.
+- *Low.* A changed name that no checkout takes, or that was not read whole, was judged as an ordinary file. Git's plumbing can write such names into a tree: an empty, `.` or `..` part, a control character (a line break among them), or bytes that are not UTF-8 (read here as U+FFFD).
+  - They are now blocked as `unreadable` (`unfitName`), inside an intended folder too.
+  - Names that only Windows refuses (`aux.c`, a `:`) remain the project's.
+**Checked, no change:**
+- Git is run safely. The environment is fixed and nothing is inherited but PATH, so no `GIT_CONFIG_*`, `GIT_DIR` or `GIT_INDEX_FILE` comes in from outside. There is no system or global configuration, prompts are off, hooks point at an empty folder, and `diff.external` is empty. The protocols are `never`, and the pager is `cat`.
+  - `diff-tree --raw` and `cat-file blob` run no textconv or filter.
+  - Both new methods only read objects. They write nothing to the task's bare git directory or to the shared repository.
+  - The staging they judge is P02's private-index `stageWork`, which writes loose objects into the task's own git directory only.
+- Inputs that should be refused, and are, in the guidance read:
+  - A link, a submodule, or `AGENTS.md` as a folder: `ls-tree -r` lists only blobs, and a link or submodule entry is skipped.
+  - Case duplicates: each is read by object ID and bounded.
+  - A large blob: the prefix read stops at 256 KiB.
+  - Over 100,000 entries, or a listing over 16 MiB: refused as unavailable.
+- Inputs that should be refused, and are, in the diff:
+  - A rename is a deletion plus an addition (`--no-renames`), and each half is judged.
+  - A type change either way is `link`, and a mode-only change is scanned.
+  - An empty diff is not `ok`.
+  - Case and Unicode-form spellings of the state and ignore names are folded.
+  - An intended path in another case or form is unrelated, which is the stricter way.
+- The owner's checkout is untouched (dirty, untracked, index).
+- A remote host has no contribution operation, so nothing crosses the protocol.
+- No controller, API, chat or prompt change: 156,553 characters against the 156,560 ceiling.
+**Tests added** (`contribution.test.ts`, 2 tests and assertions in 1):
+- the hidden-character and line-separator cleaning, and a cut that never splits a surrogate pair;
+- `unfitName` cases;
+- the submodule change under `ignore = all`, in the bare task directory and in a git directory with a work tree;
+- `.gitattributes`, `src/.gitattributes` and `.gitmodules`: blocked under a folder, and passed when named;
+- a submodule entry replaced by a file; `src/` not taking in `src2/`; a long scan verdict cut to 200 characters;
+- `..`, `.`, a line break and a Latin-1 name, each blocked inside an intended folder.
+**Deliberate breakages** (19 own, on the built files, each alone, restored by SHA-256, against `contribution.test` and `p05-contribution-check`):
+- Caught (15): no `--ignore-submodules=none`; unfit names allowed; `.gitattributes` not held; `\p{Cf}` kept; separators not made line breaks; agent files ranked before contributing guides; `more` always 0; `inBase` inverted; a folder prefix matched without its slash; additions read as deletions; the old mode not checked for links; `ok` ignoring the blocked files; reasons not cut; a cut through a surrogate pair; a plan at any depth counted as state.
+- Equivalent (2): a submodule entry of the guidance read anyway (the blob read fails, so the entry is skipped as "could not be read"); a byte cut not reported (a 256 KiB cut always exceeds the 16,000-character cut).
+- Accepted (2): the 500-entry file list left unbounded (the 10,000-file bound still holds); the prefix read not stopped at its bound (the output is the same; only memory differs).
+**Residual risks:**
+- Each changed file takes two or three git processes, so a diff near the 10,000-file bound is slow. Each process has its own timeout, but the check as a whole has none.
+- In a repository whose `ls-tree` listing passes 16 MiB, the guidance read fails as unavailable. This is fail-closed, but no guidance is found; a later slice could list only the guidance places.
+- The custom scan's verdict text is shown cut to 200 characters. `createWipScanner` never puts a value in its verdict; another scan has to keep to the same rule.
+- Two paths in one tree that differ only in case are judged separately and not flagged as a collision.
+- `check:deps` fails on origin/main 17dd4c6b itself: `controller/src/api/start-k05.test.ts` (K05, 8ede2299) has SQL and `node:sqlite` outside the storage folders. P05 does not touch it.
+**Runs** (merged with origin/main 17dd4c6b):
+- `npm ci --ignore-scripts`; `tsc --build --force` clean; `api:docs:write` (no change); `licenses:check` and `roadmap:check` ok; `scripts/plan.test.mjs` 6 of 6; `check:deps` fails on main's K05 file only (above).
+- Through `/tmp/nn-slot.sh` with `NIMBLENEWT_REQUIRE_SANDBOX=1` and the offline guard: the worker workspace suite, `integration/p05-contribution-check`, `integration/p02b-wip-backup` and `controller/chat/prompt-room`.
+  - Node 22.23.0: 243 tests, 241 passing, 0 failing, 2 Windows-only skips.
+  - Node 24.21.0: 243 tests, 241 passing, 0 failing, 2 Windows-only skips.
