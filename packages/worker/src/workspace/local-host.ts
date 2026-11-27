@@ -85,7 +85,7 @@ export const START_STATE_LIMITS = { files: 500 } as const;
  * which attempts left changes, the host keeps one record per task beside the checkout (outside the sandbox mount), `<task>/handover.json`:
  *
  *   attemptId  the attempt the checkout was last handed to;
- *   expected   the checkout's tree (every file git does not ignore, as `GitBridge.startState` writes it through a private index) as that attempt got it, moved on by every request the platform carried out on the checkout
+ *   expected   the checkout's tree (every file git does not ignore, as `GitBridge.startState` writes it through a private index, the agent's plan file at the top left out: `GitBridge.withoutPlan`) as that attempt got it, moved on by every request the platform carried out on the checkout
  *              since (a refresh, re-apply, release, landing, integration or restack: see `WorkspaceHostOptions.tracked`), or `null` when it could not be read;
  *   left       every attempt of the task found to have left the checkout different from what it was handed (at most `HANDOVER_LIMITS.attempts`);
  *   overflow   true when the record cannot name every such attempt (the list was full, the record was damaged, or the checkout held changes before any attempt was recorded).
@@ -309,10 +309,11 @@ export class LocalWorkspaces {
         // In the checkout's turn (card Q04): a platform request on the checkout (which keeps the record too) finishes before the checkout is compared and handed out, and none starts meanwhile.
         await this.host.exclusive(made.checkout, async () => {
           let state: Awaited<ReturnType<GitBridge["startState"]>>;
-          try { state = await this.#options.git.startState(made); } catch (error) {
+          let handed: string;
+          try { state = await this.#options.git.startState(made); handed = await this.#options.git.withoutPlan({ gitDir: made.gitDir, tree: state.tree }); } catch (error) {
             throw new WorkspaceError("unavailable", `the workspace was not opened: the state the attempt starts from could not be recorded (${String((error as Error)?.message ?? error).slice(0, 160)})`);
           }
-          await this.#handOver(attempt, state);
+          await this.#handOver(attempt, { tree: handed, entries: state.entries }, made.gitDir);
           await writeAttempt(join(this.#options.root, attempt.projectId, attempt.taskId, "attempt"), attempt.attemptId);
           await this.#recordStart(attempt, made, binding, state);
         });
@@ -386,7 +387,7 @@ export class LocalWorkspaces {
    * Card Q04: the checkout is handed to `call.attemptId`. When the attempt it was handed to before is another one, that attempt is added to `left` if the checkout is not what it was handed (or that cannot be told). A
    * resume (the same attempt again) changes nothing. A record that cannot be written refuses the workspace, as the start record does. Runs in the checkout's turn.
    */
-  async #handOver(call: { readonly taskId: string; readonly projectId: string; readonly attemptId: string }, state: { readonly tree: string; readonly entries: readonly unknown[] }): Promise<void> {
+  async #handOver(call: { readonly taskId: string; readonly projectId: string; readonly attemptId: string }, state: { readonly tree: string; readonly entries: readonly unknown[] }, gitDir: string): Promise<void> {
     const dir = join(this.#options.root, call.projectId, call.taskId);
     const file = join(dir, "handover.json");
     const prior = await readHandover(file);
@@ -405,7 +406,10 @@ export class LocalWorkspaces {
     // The attempt before: the record's, else (a task folder from before the record) the attempt file's, whose start record holds the tree it was handed.
     const previous = whole?.attemptId ?? readAttempt(join(dir, "attempt"));
     let expected: string | null = interrupted ? state.tree : whole?.expected ?? null;
-    if (whole === undefined && previous !== undefined) expected = (await this.startState({ taskId: call.taskId, projectId: call.projectId, attemptId: previous }))?.tree ?? null;
+    if (whole === undefined && previous !== undefined) {
+      const was = (await this.startState({ taskId: call.taskId, projectId: call.projectId, attemptId: previous }))?.tree;
+      expected = was === undefined ? null : await this.#options.git.withoutPlan({ gitDir, tree: was }).catch(() => null);
+    }
     const left = new Set(whole?.left ?? []);
     // A damaged record has lost its list; a checkout that already holds changes with no attempt recorded holds someone's unrecorded work.
     let overflow = whole?.overflow === true || prior === "damaged" || (prior === undefined && previous === undefined && state.entries.length > 0);
@@ -431,7 +435,7 @@ export class LocalWorkspaces {
     const marker = join(where.checkout, "..", INTERRUPTED);
     const prior = await readHandover(file);
     if (prior === undefined || prior === "damaged") return work();
-    const tree = async (): Promise<string | undefined> => { try { return (await this.#options.git.startState({ checkout: where.checkout, gitDir: where.gitDir })).tree; } catch { return undefined; } };
+    const tree = async (): Promise<string | undefined> => { try { return await this.#options.git.withoutPlan({ gitDir: where.gitDir, tree: (await this.#options.git.startState({ checkout: where.checkout, gitDir: where.gitDir })).tree }); } catch { return undefined; } };
     const left = new Set(prior.left);
     let overflow = prior.overflow === true;
     const before = await tree();

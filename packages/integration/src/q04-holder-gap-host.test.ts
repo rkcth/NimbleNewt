@@ -118,6 +118,8 @@ test("two agents on one task over the real checkout: a reviewer whose attempt ch
       const b1 = await attempt(task, ben);
       await mkdir(join(b1.checkout, "build"), { recursive: true });
       await writeFile(join(b1.checkout, "build", "out.js"), "built\n");
+      // Second review: he keeps the plan the completion rules tell every agent to keep at the top of the checkout; that alone does not make him a contributor.
+      await writeFile(join(b1.checkout, "PLAN.md"), "- [x] read v1\n- [x] ask for changes\n");
       if (leaves) await writeFile(join(b1.checkout, "notes.txt"), "the reviewer's scratch notes\n");
       assert.equal((await api(c, benToken, "submission.record", { taskId: task, kind: "review", role: "reviewer", subject: v1, verdict: "changes" }, `rv-c-${leaves}`)).ok, true, "Ben asks for changes");
       await end(b1.attempt, false);

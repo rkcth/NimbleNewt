@@ -396,6 +396,21 @@ export class GitBridge {
     return { base, head, tree, entries };
   }
 
+  /**
+   * Card Q04 (second review): `tree` with the agent's plan file at its top (`PLAN_FILE`, in any case, as a plain or executable file) left out. Every agent is told to keep that file in its checkout (the completion rules),
+   * so a reviewer that keeps it changes nothing else; who left changes in the checkout is told on this tree. Answers `tree` itself when it holds no such file. Throws when git cannot read or write the tree.
+   */
+  async withoutPlan(options: { gitDir: string; tree: string }): Promise<string> {
+    if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(options.tree)) throw new WorkspaceError("invalid_path", "a tree is named by its full ID");
+    const listed = (await this.#run(["ls-tree", "-z", options.tree], { gitDir: options.gitDir })).stdout.split("\0").filter(Boolean);
+    const plan = PLAN_FILE.toLowerCase();
+    const kept = listed.filter((e) => { const tab = e.indexOf("\t"); return !(/^100(?:644|755) blob /.test(e) && e.slice(tab + 1).toLowerCase() === plan); });
+    if (kept.length === listed.length) return options.tree;
+    const tree = (await this.#run(["mktree", "-z"], { gitDir: options.gitDir, input: kept.map((e) => `${e}\0`).join("") })).stdout.trim();
+    if (!/^[0-9a-f]{40,64}$/.test(tree)) throw new WorkspaceError("invalid_path", "the checkout's state could not be read");
+    return tree;
+  }
+
   /** The tree of a commit of the checkout's own repository (card P10: a landing of a queued submission compares the committed work with the approved tree). */
   async treeOf(options: { gitDir: string; commit: string }): Promise<string> {
     if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(options.commit)) throw new WorkspaceError("invalid_path", "a commit is named by its full ID");

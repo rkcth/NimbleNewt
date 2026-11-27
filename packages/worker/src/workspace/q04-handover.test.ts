@@ -89,6 +89,46 @@ test("a task whose attempts change nothing reports an empty, complete list; file
   } finally { await w.done(); }
 });
 
+test("the plan file every agent is told to keep at the top of its checkout is not a change that makes it a contributor (any case, plain or executable); any other file is, also one named like it elsewhere (card Q04, second review)", { skip }, async () => {
+  const w = await world();
+  try {
+    const a = await hand(w.ws, "att-a");
+    // A (the author) writes its plan and its change; B (a reviewer) rewrites the plan only, as the completion rules tell every agent
+    await writeFile(join(a.checkout, "PLAN.md"), "- [ ] change a\n");
+    await writeFile(join(a.checkout, "src", "a.ts"), "export const a = 2;\n");
+    await hand(w.ws, "att-b");
+    assert.deepEqual(w.handover().left, ["att-a"]);
+    await writeFile(join(a.checkout, "PLAN.md"), "- [x] read the change\n- [ ] give a verdict\n");
+    await hand(w.ws, "att-c");
+    assert.deepEqual(w.handover().left, ["att-a"], "a reviewer that only kept its plan stays independent");
+    // C deletes the plan, D writes it in another case and makes it executable: neither is named
+    await rm(join(a.checkout, "PLAN.md"));
+    await hand(w.ws, "att-d");
+    await writeFile(join(a.checkout, "plan.MD"), "- [ ] look\n");
+    await chmod(join(a.checkout, "plan.MD"), 0o755);
+    await hand(w.ws, "att-e");
+    assert.deepEqual(w.handover().left, ["att-a"]);
+    // the plan file is also left out around a platform request: E keeps its plan, then re-applies; not charged
+    await writeFile(join(a.checkout, "plan.MD"), "- [x] look\n");
+    assert.equal((await w.ws.port.run(call("reapply"))).ok, true);
+    assert.deepEqual(w.handover().left, ["att-a"]);
+    // a file of that name below the top, or a folder of that name at the top, is an ordinary change
+    await writeFile(join(a.checkout, "src", "PLAN.md"), "not the plan\n");
+    await hand(w.ws, "att-f");
+    assert.deepEqual(w.handover().left.sort(), ["att-a", "att-e"]);
+    await rm(join(a.checkout, "plan.MD"));
+    await mkdir(join(a.checkout, "PLAN.md"));
+    await writeFile(join(a.checkout, "PLAN.md", "x.ts"), "export const x = 1;\n");
+    await hand(w.ws, "att-g");
+    assert.deepEqual(w.handover().left.sort(), ["att-a", "att-e", "att-f"], "a folder named like the plan holds code");
+    // the plan file still goes into the submission as before (only the comparison leaves it out)
+    await rm(join(a.checkout, "PLAN.md"), { recursive: true });
+    await writeFile(join(a.checkout, "PLAN.md"), "- [x] done\n");
+    const staged = await w.ws.stageWork(scope);
+    assert.ok(staged.files.includes("PLAN.md"), JSON.stringify(staged.files));
+  } finally { await w.done(); }
+});
+
 test("what the platform's own requests change is not charged: a refresh onto a moved landing branch, and an author's re-apply over a clean checkout; an attempt's change made before a re-apply still is (card Q04)", { skip }, async () => {
   const w = await world();
   try {
