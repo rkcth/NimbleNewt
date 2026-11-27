@@ -55,3 +55,26 @@ test("the worker's reply ceiling: the owner's declared limit when the route has 
   assert.equal(replyCeilingFor({ contextTokens: 65_536 }), 8192);
   assert.equal(replyCeilingFor({ contextTokens: Number.NaN }), DEFAULT_REPLY_TOKENS);
 });
+
+// First review of the W09 fixes: the defaults fit the route's window with the largest request (a reviewer route may be as small as 12,000 tokens).
+test("the default reply limit and ceiling fit the route's window with the largest prompt, never below the old 1,500; a declared limit is the owner's", () => {
+  const L = REVIEWER_CALL_LIMITS;
+  const room = (w: number) => w - L.promptTokens - L.windowMarginTokens;
+  // A large window changes nothing.
+  assert.deepEqual([reviewerCallLimits({ kind: "radiance", contextTokens: 200_000 }).replyTokens, reviewerCallLimits({ kind: "radiance", contextTokens: 200_000 }).ceilingTokens], [8192, 32_768]);
+  // The launcher's default window (36,864): the retry is lowered to what fits.
+  const d = reviewerCallLimits({ kind: "vllm", contextTokens: 36_864 });
+  assert.deepEqual([d.replyTokens, d.ceilingTokens], [8192, room(36_864)]);
+  assert.ok(d.ceilingTokens + L.promptTokens <= 36_864);
+  assert.equal(d.timeoutMs, Math.min(L.hardTimeoutMs, room(36_864) * L.msPerToken));
+  // The smallest reviewer window: reply and ceiling are what fits (no retry); below the old default, the old default.
+  const s = reviewerCallLimits({ kind: "radiance", contextTokens: 12_000 });
+  assert.deepEqual([s.replyTokens, s.ceilingTokens], [room(12_000), room(12_000)]);
+  assert.deepEqual([reviewerCallLimits({ kind: "radiance", contextTokens: 9000 }).replyTokens, reviewerCallLimits({ kind: "radiance", contextTokens: 9000 }).ceilingTokens], [1500, 1500]);
+  // A non-reasoning kind: 1,500 stays, its ceiling fits.
+  assert.deepEqual([reviewerCallLimits({ kind: "openai", contextTokens: 12_000 }).replyTokens, reviewerCallLimits({ kind: "openai", contextTokens: 12_000 }).ceilingTokens], [1500, room(12_000)]);
+  // The owner's declared limit is used as declared.
+  assert.equal(reviewerCallLimits({ kind: "radiance", maxTokens: 16_384, contextTokens: 12_000 }).replyTokens, 16_384);
+  // A window that is not a whole number above 0 is ignored.
+  for (const bad of [0, -1, 1.5, Number.NaN]) assert.equal(reviewerCallLimits({ kind: "radiance", contextTokens: bad }).ceilingTokens, 32_768, String(bad));
+});

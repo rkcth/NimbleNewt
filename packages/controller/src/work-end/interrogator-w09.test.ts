@@ -54,3 +54,11 @@ test("a reply cut before any text is not asked again on a second pass; a dropped
   await assert.rejects(new ReportInterrogator(flaky, { routes: ["r/m"], retryDelayMs: 0 }).ask(base()), /no route answered/);
   assert.equal(dropped, 2);
 });
+
+// First review of the W09 fixes: a key-like text in the task's description never reaches the second agent's prompt.
+test("a key-like text written into the task's description is redacted in the prompt", () => {
+  const key = "sk-abcdefghijklmnopqrstuvwxyz0123456789";
+  const p = promptOf(base({}, { description: `CONTRACT: use the token ${key} and Bearer ${key}` }));
+  assert.ok(!p.includes(key), "the planted key is not in the prompt");
+  assert.match(p, /Task description \(what the agent was asked to do\): "CONTRACT: use the token /);
+});

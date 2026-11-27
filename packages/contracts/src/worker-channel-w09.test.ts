@@ -33,3 +33,10 @@ test("a turn result carries the reply cuts, exactly shaped; anything else is ref
     assert.equal(replyCutOf(bad), undefined, JSON.stringify(bad));
   }
 });
+
+// First review of the W09 fixes: the bound is the same figure the controller's own check (dispatch/ports.ts replyCutOf) and the worker's saved-limit reader (pi-adapter reply-room.ts) use, so it is pinned as a figure.
+test("the largest reply ceiling is 1,000,000, and a start or result above it is refused", () => {
+  assert.equal(MAX_REPLY_CEILING, 1_000_000);
+  assert.throws(() => parseToChild(startLine({ replyCeiling: 1_000_001 })), ChannelError);
+  assert.throws(() => parseFromChild({ t: "result", status: "completed", replyCut: { cuts: 1, limit: 1, ceiling: 1_000_001 } }), ChannelError);
+});

@@ -89,3 +89,27 @@ test("the call's time limit is the route's; limits that cannot be read fail the 
   await assert.rejects(broken.complete("a/b", { system: "s", user: "u" }), /reply limits could not be read: the routing table could not be read/);
   assert.equal(none, 0);
 });
+
+// First review of the W09 fixes: a call that ends as reply-cut was still answered (and paid for) twice; its tokens are counted under the daily cap of the controller's own calls.
+test("a call that fails as reply-cut carries the tokens its cut replies used, and the guarded client counts them under the cap", async () => {
+  const { GuardedModelCall } = await import("./routed-model.js");
+  const { failedUsage } = await import("./http-model.js");
+  const cut = () => reply("", "length", { prompt_tokens: 100, completion_tokens: 8192 });
+  const m = client({ replyTokens: 8192, ceilingTokens: 32_768, timeoutMs: 300_000, kind: "radiance" }, [cut, () => reply("", "length", { prompt_tokens: 100, completion_tokens: 32_768 })]);
+  const recorded: number[] = [];
+  const spend = { allow: async () => ({ allowed: true, cap: null }), record: async (tokens: number) => { recorded.push(tokens); } };
+  const guarded = new GuardedModelCall(m, { spend: spend as never });
+  let thrown: unknown;
+  await guarded.completeDetailed("radiance/qwen", { system: "s", user: "u" }).catch((e: unknown) => { thrown = e; });
+  assert.match(String((thrown as Error).message), /^reply-cut: /);
+  assert.deepEqual(failedUsage(thrown), { inputTokens: 200, outputTokens: 40_960 });
+  assert.deepEqual(recorded, [41_160]);
+  // A failure with no counted reply (an outage) carries nothing and records nothing; a failing count never changes the failure.
+  const down = new HttpModelCall({ endpoint: () => ({ url: "http://radiance:8002/v1" }), limits: async () => ({ replyTokens: 8192, timeoutMs: 60_000 }), fetch: async () => new Response("bad gateway", { status: 502 }) });
+  const r2: number[] = [];
+  await assert.rejects(new GuardedModelCall(down, { spend: { allow: async () => ({ allowed: true }), record: async (n: number) => { r2.push(n); } } as never }).completeDetailed("radiance/qwen", { system: "s", user: "u" }), /^Error: outage: /);
+  assert.deepEqual(r2, []);
+  let told = 0;
+  await assert.rejects(new GuardedModelCall(client({ replyTokens: 8192, ceilingTokens: 8192, timeoutMs: 60_000 }, [cut]), { spend: { allow: async () => ({ allowed: true }), record: async () => { throw new Error("store down"); } } as never, onSpendFailure: () => { told++; } }).completeDetailed("radiance/qwen", { system: "s", user: "u" }), /^Error: reply-cut: /);
+  assert.equal(told, 1);
+});

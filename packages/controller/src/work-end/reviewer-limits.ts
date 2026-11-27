@@ -12,12 +12,16 @@
  * ASSUMPTION: 40 ms a token (25 tokens a second) is a slow local server's pace; a faster one answers well within it, and a hung one is given up at the limit. The time limit only bounds waiting, it costs nothing.
  * ASSUMPTION: no owner setting is added for these figures; the existing route budget (`routing.budget.set`, reachable in chat) is the owner's control, and it now applies to the second agent too.
  */
+import { REVIEWER_LIMITS } from "./reviewer-model.js";
+
 export const REVIEWER_CALL_LIMITS = {
   replyTokens: 1500, timeoutMs: 60_000,
   reasoningReplyTokens: 8192,
   cutCeilingTokens: 6000,
   hardReplyTokens: 32_768, hardTimeoutMs: 480_000,
   msPerToken: 40,
+  /** The most the second agent's request can hold, in tokens (its system and user texts at their bounds, a token for every 3 characters: more than they hold), and a margin, for the window check below. */
+  promptTokens: Math.ceil((REVIEWER_LIMITS.system + REVIEWER_LIMITS.user) / 3), windowMarginTokens: 256,
 } as const;
 
 /** Endpoint kinds whose servers commonly run reasoning models and whose reasoning field is known (route-budget.ts). */
@@ -38,13 +42,17 @@ export interface ReviewerCallLimits {
 const whole = (v: unknown): number | undefined => (typeof v === "number" && Number.isSafeInteger(v) && v > 0 ? v : undefined);
 
 /** The limits of a call on a route of `kind` with the route's declared budget (either may be absent). */
-export function reviewerCallLimits(route: { readonly kind?: string; readonly maxTokens?: number; readonly reasoningTokens?: number }): ReviewerCallLimits {
+export function reviewerCallLimits(route: { readonly kind?: string; readonly maxTokens?: number; readonly reasoningTokens?: number; readonly contextTokens?: number }): ReviewerCallLimits {
   const L = REVIEWER_CALL_LIMITS;
   const kind = typeof route.kind === "string" && route.kind !== "" ? route.kind.slice(0, 40) : undefined;
   const reasons = kind !== undefined && REASONING_KINDS.includes(kind);
   const declared = whole(route.maxTokens);
-  const replyTokens = Math.min(declared ?? (reasons ? L.reasoningReplyTokens : L.replyTokens), L.hardReplyTokens);
-  const ceilingTokens = declared !== undefined ? replyTokens : Math.max(replyTokens, reasons ? L.hardReplyTokens : L.cutCeilingTokens);
+  // The defaults (not an owner's declared limit) also fit the route's window with the largest request: a reviewer route may be as small as REVIEWER_LIMITS.contextTokens (12,000), where 8,192 tokens of reply and a full prompt,
+  // or a retry at 32,768, would be refused by the server as too large. Never below the old 1,500 (what such a route was asked for before).
+  const window = whole(route.contextTokens);
+  const room = window === undefined ? Number.POSITIVE_INFINITY : Math.max(L.replyTokens, window - L.promptTokens - L.windowMarginTokens);
+  const replyTokens = Math.min(declared ?? Math.min(reasons ? L.reasoningReplyTokens : L.replyTokens, room), L.hardReplyTokens);
+  const ceilingTokens = declared !== undefined ? replyTokens : Math.max(replyTokens, Math.min(reasons ? L.hardReplyTokens : L.cutCeilingTokens, room));
   // A reasoning kind's time follows its ceiling (the retry may need it); any other kind's its first reply limit, so the default stays the old 60 s.
   const timeoutMs = Math.min(L.hardTimeoutMs, Math.max(L.timeoutMs, (reasons ? ceilingTokens : replyTokens) * L.msPerToken));
   const cap = whole(route.reasoningTokens);

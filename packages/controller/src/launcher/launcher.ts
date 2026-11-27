@@ -204,7 +204,7 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
       const routes = live === undefined ? undefined : (await live.services.routing.get())?.routes;
       const entry = routes !== undefined && Object.hasOwn(routes, route) ? routes[route] : undefined;
       const kind = endpoints.get(route.slice(0, route.indexOf("/")))?.kind;
-      return reviewerCallLimits({ ...(kind === undefined ? {} : { kind }), ...(entry?.maxTokens === undefined ? {} : { maxTokens: entry.maxTokens }), ...(entry?.reasoningTokens === undefined ? {} : { reasoningTokens: entry.reasoningTokens }) });
+      return reviewerCallLimits({ ...(kind === undefined ? {} : { kind }), ...(entry?.maxTokens === undefined ? {} : { maxTokens: entry.maxTokens }), ...(entry?.reasoningTokens === undefined ? {} : { reasoningTokens: entry.reasoningTokens }), ...(entry?.contextTokens === undefined ? {} : { contextTokens: entry.contextTokens }) });
     },
   });
   /** A route's endpoint for the worker host's relay: read from the records at each call, the key from the secret store by name at each call. */

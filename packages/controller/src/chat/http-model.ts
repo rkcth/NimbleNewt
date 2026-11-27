@@ -47,11 +47,16 @@ export class HttpModelCall implements ModelCall {
   async completeDetailed(route: string, request: { readonly system: string; readonly user: string }): Promise<ModelReply> {
     const endpoint = this.#o.endpoint(route);
     if (endpoint === undefined) throw new Error(`route ${route.slice(0, 60)} has no endpoint`);
+    // The tokens the server counted for this call's replies so far (a reply cut before any text and asked again is still paid for).
+    let input = 0, output = 0, counted = true;
     const fail = (status: number | undefined, message: string, named?: string): never => {
       const text = redactText(message).slice(0, 300);
       const kind = named ?? classifyProviderFailure({ message: text, ...(status === undefined ? {} : { status }) });
       this.#o.onFailure?.(route, kind, text);
-      throw new Error(`${kind}: ${text}`);
+      const error = new Error(`${kind}: ${text}`);
+      // A failed call whose replies the server counted carries those tokens (`failedUsage`), so the daily cap counts them too.
+      if (counted && input + output > 0) Object.defineProperty(error, "usage", { value: { inputTokens: input, outputTokens: output }, enumerable: false });
+      throw error;
     };
     let limits: HttpCallLimits | undefined;
     if (this.#o.limits !== undefined) {
@@ -65,7 +70,6 @@ export class HttpModelCall implements ModelCall {
     let replyTokens = limits?.replyTokens ?? this.#o.maxReplyTokens ?? 1500;
     const ceiling = limits === undefined ? replyTokens : Math.max(replyTokens, limits.ceilingTokens ?? replyTokens);
     let reasoning = limits?.reasoningTokens !== undefined;
-    let input = 0, output = 0, counted = true;
     for (let tries = 0; ; tries++) {
       const body: Record<string, unknown> = { model, temperature: 0, stream: false, max_tokens: replyTokens, messages: [{ role: "system", content: request.system }, { role: "user", content: request.user }] };
       const added = reasoning ? applyRouteBudget(body, "chat/completions", limits!.kind, { reasoningTokens: limits!.reasoningTokens! }).added : undefined;
@@ -115,4 +119,11 @@ function whyFailed(error: unknown): string {
   const e = error as { message?: unknown; name?: unknown; cause?: { code?: unknown; message?: unknown } };
   const cause = e?.cause == null ? "" : ` (${String(e.cause.code ?? e.cause.message ?? "").slice(0, 100)})`;
   return `${String(e?.name === "TimeoutError" ? "timed out" : e?.message ?? error)}${cause}`;
+}
+
+/** The tokens a failed call's replies used, when the HTTP client counted them (a reply cut before any text); undefined otherwise. */
+export function failedUsage(error: unknown): { readonly inputTokens: number; readonly outputTokens: number } | undefined {
+  const u = (error as { usage?: unknown } | null)?.usage as { inputTokens?: unknown; outputTokens?: unknown } | undefined;
+  const ok = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+  return u !== undefined && u !== null && typeof u === "object" && ok(u.inputTokens) && ok(u.outputTokens) ? { inputTokens: u.inputTokens, outputTokens: u.outputTokens } : undefined;
 }
