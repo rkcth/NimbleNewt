@@ -22,6 +22,30 @@ export interface RelayFetch {
   refuse(reason: string): void;
   /** Fails every call in flight (the channel ended). */
   closeAll(reason: string): void;
+  /**
+   * W09 fixes: from the next call on, a model request (a POST whose body is a JSON object that names a reply limit, `max_tokens` or `max_completion_tokens`) whose limit is below `tokens` is sent with `tokens` instead. Raises only, never
+   * lowers; undefined turns it off. The host's relay still applies the route's own budget after it (an owner's reply limit wins there).
+   */
+  raiseReplyLimit(tokens: number | undefined, window?: number): void;
+}
+
+/** Pi's margin between the window and the request plus its reply (pi-ai `CONTEXT_SAFETY_TOKENS`; `PI_CONTEXT_SAFETY_TOKENS` in compaction-thresholds.ts). */
+const REPLY_SAFETY_TOKENS = 4096;
+
+/** A model request's body with its reply limit raised to `floor` (in the field the request uses), or the body unchanged when it is not a JSON object, names no reply limit, or already asks for at least `floor`. */
+export function withReplyFloor(body: Buffer, floor: number, window?: number): Buffer {
+  let json: unknown;
+  try { json = JSON.parse(body.toString("utf8")); } catch { return body; }
+  if (json === null || typeof json !== "object" || Array.isArray(json)) return body;
+  const o = json as Record<string, unknown>;
+  const field = typeof o["max_completion_tokens"] === "number" ? "max_completion_tokens" : typeof o["max_tokens"] === "number" ? "max_tokens" : undefined;
+  if (field === undefined) return body;
+  const asked = o[field] as number;
+  // Never past the window: Pi sizes its own limit as window - estimated input - its 4,096-token margin, and so does this, with the input counted as one token for every 3 bytes of the request (more than it holds).
+  const room = window === undefined ? floor : Math.min(floor, window - Math.ceil(body.length / 3) - REPLY_SAFETY_TOKENS);
+  if (asked >= room) return body;
+  o[field] = room;
+  return Buffer.from(JSON.stringify(o), "utf8");
 }
 
 const abortError = (): Error => { const e = new Error("The operation was aborted"); e.name = "AbortError"; return e; };
@@ -32,6 +56,8 @@ export function relayFetch(relayBase: string, send: (message: FromChild) => void
   const pending = new Map<number, Pending>();
   let next = 0;
   let refusing: string | undefined;
+  let replyFloor: number | undefined;
+  let replyWindow: number | undefined;
 
   const call = async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit): Promise<Response> => {
     if (refusing !== undefined) throw new TypeError(`fetch failed: ${refusing}`);
@@ -49,6 +75,7 @@ export function relayFetch(relayBase: string, send: (message: FromChild) => void
     else if (raw instanceof ArrayBuffer) body = Buffer.from(raw);
     else if (ArrayBuffer.isView(raw)) body = Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength);
     else throw new TypeError("fetch failed: the request body must be text or bytes");
+    if (replyFloor !== undefined && method === "POST" && body !== undefined && body.length > 0) body = withReplyFloor(body, replyFloor, replyWindow);
     const id = ++next;
     const list: HeaderList = [...headers.entries()].map(([k, v]) => [k, v] as const);
     return await new Promise<Response>((resolve, reject) => {
@@ -77,6 +104,7 @@ export function relayFetch(relayBase: string, send: (message: FromChild) => void
 
   return {
     fetch: call as typeof globalThis.fetch,
+    raiseReplyLimit(tokens, window) { replyFloor = tokens !== undefined && Number.isSafeInteger(tokens) && tokens > 0 ? tokens : undefined; replyWindow = window !== undefined && Number.isSafeInteger(window) && window > 0 ? window : undefined; },
     accept(message) {
       switch (message.t) {
         case "fetch.head": {

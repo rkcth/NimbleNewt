@@ -89,6 +89,16 @@ for (const backend of backends) {
     assert.equal(d.nudgesUsed, 2);
   });
 
+  suite("W09 fixes: a remote host's result may say how its replies were cut with no visible text; the attempt records it, and one that is not well formed is refused", async (c) => {
+    const r1 = await c.host("r1");
+    const { attemptId, attempt } = await c.started(r1);
+    for (const bad of [{ cuts: 1, limit: 9000, ceiling: 8192 }, { cuts: 1, limit: 0, ceiling: 8 }, { cuts: 1, limit: 1, ceiling: 2, more: 1 }, "x"]) await wireRefuses("invalid_command", () => attempt.complete({ status: "completed", text: "x", endKind: "normal", replyCut: bad as never }), 400);
+    const cut = { cuts: 2, limit: 16_384, ceiling: 25_000 };
+    assert.deepEqual(await attempt.complete({ status: "completed", text: "done", endKind: "normal", replyCut: cut }), { status: "completed", text: "done", endKind: "normal", replyCut: cut });
+    await c.current.idle();
+    assert.deepEqual((await c.current.get(c.owner, attemptId))!.turnEnd?.replyCut, cut);
+  });
+
   suite("only the owner and the dispatcher place, move, end and steer attempts; a host, an agent or a client cannot, and none can read the records", async (c) => {
     const r1 = await c.host("r1");
     const { attemptId, order } = await c.started(r1);

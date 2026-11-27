@@ -108,6 +108,18 @@ export const TURN_END_KINDS = ["length", "empty-visible-text", "no-work-end", "a
 export type TurnEndKind = (typeof TURN_END_KINDS)[number];
 export const turnEndKindOf = (value: unknown): TurnEndKind => (typeof value === "string" && (TURN_END_KINDS as readonly string[]).includes(value) ? (value as TurnEndKind) : "unknown");
 
+/** W09 fixes: how a worker's replies were cut (restated from `@nimblenewt/contracts` `ReplyCut`). */
+export interface ReplyCut { readonly cuts: number; readonly limit: number; readonly ceiling: number }
+/** A reply-cut record when `value` is one (exact keys, whole numbers, at most 1,000 cuts, a limit from 1 to the ceiling, a ceiling at most 1,000,000); otherwise undefined. */
+export function replyCutOf(value: unknown): ReplyCut | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const v = value as Record<string, unknown>;
+  if (Object.keys(v).sort().join(",") !== "ceiling,cuts,limit") return undefined;
+  const ok = (n: unknown, max: number): n is number => Number.isSafeInteger(n) && (n as number) >= 0 && (n as number) <= max;
+  if (!ok(v["cuts"], 1000) || !ok(v["ceiling"], 1_000_000) || !ok(v["limit"], v["ceiling"] as number) || (v["limit"] as number) < 1) return undefined;
+  return { cuts: v["cuts"] as number, limit: v["limit"] as number, ceiling: v["ceiling"] as number };
+}
+
 export interface WorkerTurnResult {
   readonly status: "completed" | "failed" | "cancelled";
   /** How the turn ended (card W02). Absent (a worker from before W02, a remote worker that does not say): `unknown`. */
@@ -116,6 +128,8 @@ export interface WorkerTurnResult {
   readonly visibleChars?: number;
   /** Card W04: how many times the worker continued the turn after it yielded without a tool call or work.end (its own bound is 3), when it said. The model calls of those continuations are in `usage` like any other: nothing is charged twice. */
   readonly nudges?: number;
+  /** W09 fixes: the worker's replies cut at the reply limit with no visible text (a reasoning model that spent the limit thinking), the reply limit it raised to and the ceiling, when any was. A malformed one is left out. */
+  readonly replyCut?: ReplyCut;
   readonly text?: string;
   readonly error?: string;
   /** Card H07b: set only by the controller's own remote service when an offer was put back before the host read it (the policy refused it meanwhile). The turn never ran, so the dispatcher ends the attempt and admits the task again. A worker cannot send it (the wire result refuses unknown fields). */

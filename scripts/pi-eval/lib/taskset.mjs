@@ -33,6 +33,18 @@ export function loadTaskset(file) {
     const timeoutMinutes = t?.timeoutMinutes ?? d.timeoutMinutes?.[t?.size];
     if (!(Number.isFinite(timeoutMinutes) && timeoutMinutes > 0)) problems.push(`${where}: no timeout for size ${t?.size}`);
     const acceptance = loadAcceptance(root, t, where, problems);
+    // W09 fixes: the task's own package tests for the done's check (lib/worker-run.mjs doneChecks): plain relative file paths, never a held-out or acceptance test (by name, in either its source or its built form).
+    if (t?.doneTests !== undefined) {
+      if (!Array.isArray(t.doneTests) || t.doneTests.length > 50) problems.push(`${where}: doneTests must be a list of at most 50 test files`);
+      else {
+        const stem = (f) => String(f).split(/[\\/]/).pop().replace(/\.(?:[cm]?[jt]s|tsx?)$/, "");
+        const heldOut = new Set([...(t?.hiddenFiles ?? []), ...(t?.testFiles ?? []), ...(acceptance?.files ?? []).map((f) => f.dest), ...(acceptance?.testFiles ?? [])].map(stem));
+        for (const f of t.doneTests) {
+          if (typeof f !== "string" || f === "" || isAbsolute(f) || f.split(/[\\/]/).includes("..") || /[*?[\]{}]/.test(f)) problems.push(`${where}: doneTests entry ${JSON.stringify(f)} must be a plain relative file path inside the repository (no pattern)`);
+          else if (heldOut.has(stem(f)) || /(?:^|\/)w01-acceptance-/.test(f)) problems.push(`${where}: doneTests entry ${f} names a held-out test; the done's check must never run or name one`);
+        }
+      }
+    }
     return {
       ...t,
       acceptance,

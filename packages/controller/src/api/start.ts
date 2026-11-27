@@ -94,7 +94,7 @@ import { DependencyNotes, DependencyService, RESOURCE_READ_LIMITS, RecentTexts, 
 import { entriesLook, resumeObserver } from "../continuation/resume-observer.js";
 import { ActivityService, ReplayLimitsService, ReplayService, ReplaySimulationService } from "../activity/index.js";
 import { replayResolvers } from "../activity/replay-resolvers.js";
-import { BoundedReviewerModel, RESUME_REVIEWER_ROUTE_SETTING, REVIEWER_ROUTE_SETTING, ReportInterrogator, WorkEndService, reviewerRoute, checkpointVerdict, dispatcherEndingPorts, dispatcherLanding, dispatcherStage, recordedSubmission, stagedSubmit, type EndingAttempt, type Landed, type StagedWork } from "../work-end/index.js";
+import { BoundedReviewerModel, RESUME_REVIEWER_ROUTE_SETTING, REVIEWER_CALL_LIMITS, REVIEWER_LIMITS, REVIEWER_ROUTE_SETTING, ReportInterrogator, WorkEndService, reviewerRoute, checkpointVerdict, dispatcherEndingPorts, dispatcherLanding, dispatcherStage, recordedSubmission, stagedSubmit, type EndingAttempt, type Landed, type StagedWork } from "../work-end/index.js";
 import { HandoffService, PauseService, StopService, agentsUnder, controllerHandoffSources, dispatchStopPorts, responsibilityHandover, describeReassigned, hostLocalWork, swarmDescendantsInfo, swarmDescendantsOf, type LocalWork } from "../lifecycle/index.js";
 import { AcceptanceService, DEFECT_CYCLE_DEFAULT, DEFECT_CYCLE_SETTING, DefectService, DocObligationService, QaEvidenceService, QaReviewService, SubmissionService, decisionChangeHook, withPolicyChecks, attemptOfAgents, landingDefectsGate, landingDirectorGate, landingDocsGate, landingQaGate } from "../submissions/index.js";
 import { artifactDocumentReader } from "../submissions/doc-claims.js";
@@ -1493,6 +1493,9 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const interrogator = options.reportInterrogation === undefined && reviewerClient === undefined ? undefined : new ReportInterrogator(new GuardedModelCall(options.reportInterrogation?.model ?? reviewerClient!, { spend: ChatSpendService.withEpoch(storage, epoch), onSpendFailure: (error) => options.onInternalError?.(error) }), {
       routes: options.reportInterrogation !== undefined ? (options.reportInterrogation.routes ?? chatRoutes(routing, { role: options.reportInterrogation.role ?? "safety-supervisor" })) : reviewerRoute({ setting: () => configuration.installationValue(REVIEWER_ROUTE_SETTING), routing }),
       onFailure: (route, detail) => { options.onInternalError?.(new Error(`the report interrogator on ${route}: ${detail}`)); },
+      // W09 fixes: the shipped client bounds each call itself (`reviewerCallLimits`, at most `hardTimeoutMs`, after at most `waitMs` for a slot), so the interrogator's own limit is only the backstop above both; at 120 s it would
+      // give up on a reasoning route the client still allows.
+      ...(options.reportInterrogation === undefined ? { callTimeoutMs: REVIEWER_CALL_LIMITS.hardTimeoutMs + REVIEWER_LIMITS.waitMs + 15_000 } : {}),
     });
     const resumePorts: Partial<ResumePorts> = {
       ...(reviewer === undefined ? {} : { review: (request) => reviewer.review(request) }),

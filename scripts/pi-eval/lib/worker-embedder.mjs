@@ -207,10 +207,24 @@ export async function runW09Task(inst, t) {
   return { projectId, taskId, agentId, attemptId, attempt, timedOut, wallMs: Date.now() - startedAt, checkoutCalls, ...taskCheckout(inst, projectId, taskId) };
 }
 
+/** Text the bench keeps from a record: control characters made spaces, anything that looks like a key or a bearer token replaced, cut to `max` (the controller already redacted it; this is a second guard for the results file). */
+export function scrubbed(text, max = 300) {
+  return String(text ?? "").replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ").replace(/\b(?:sk|pk|rk|api|key|tok)[-_][A-Za-z0-9_-]{12,}/gi, "[redacted]").replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, "Bearer [redacted]").slice(0, max);
+}
+
+/** The reply-cut record of the attempt's last turn (W09 fixes), checked; null when there is none. */
+function replyCutOf(v) {
+  const ok = (n) => Number.isSafeInteger(n) && n >= 0;
+  return v !== null && typeof v === "object" && ok(v.cuts) && ok(v.limit) && ok(v.ceiling) ? { cuts: v.cuts, limit: v.limit, ceiling: v.ceiling } : null;
+}
+
 /** The parts of the attempt record a bench run keeps (bounded: no conversation, no notes' full text). */
 export function attemptSummary(a) {
   if (a === undefined || a === null) return null;
   const last = (a.verifications ?? []).at(-1);
+  // W09 fixes: why the second agent's questioning did not run, and its named cause, from the report (or the questioning when no report was recorded), so a `not-run` says why without --keep.
+  const why = a.report?.why ?? a.interrogation?.why;
+  const cause = a.report?.cause ?? a.interrogation?.cause;
   return {
     state: a.state ?? null,
     status: a.outcome?.status ?? null,
@@ -218,12 +232,15 @@ export function attemptSummary(a) {
     reportResult: a.report?.result ?? null,
     questioning: a.report?.questioning ?? null,
     questions: (a.report?.qa ?? []).length,
+    questioningWhy: why === undefined || why === null ? null : scrubbed(why, 300),
+    questioningCause: typeof cause === "string" ? scrubbed(cause, 40) : null,
     verifications: (a.verifications ?? []).map((v) => v.state),
     lastChecks: last === undefined ? [] : (last.checks ?? []).map((x) => ({ name: x.name, state: x.state })),
     nudges: a.nudgesUsed ?? 0,
     stoppedEarly: (a.stoppedEarly ?? []).length,
     readmitted: (a.stoppedEarly ?? []).filter((r) => r.readmitted).length,
     endKind: a.turnEnd?.endKind ?? null,
+    replyCut: replyCutOf(a.turnEnd?.replyCut),
     notes: (a.notes ?? []).length,
   };
 }
