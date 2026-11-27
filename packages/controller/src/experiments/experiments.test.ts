@@ -5,6 +5,7 @@ import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import { CommandRunner } from "../domain/runner.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
+import { EnvironmentService } from "../environments/index.js";
 import { PrincipalService, type Grant, type Principal } from "../security/index.js";
 import type { ControllerStorage } from "../storage/types.js";
 import { ExperimentService, betterPct, judge, sealOf, type Criteria, type ExperimentBody, type ExperimentOptions } from "./index.js";
@@ -30,12 +31,17 @@ const criteria = (over: Record<string, unknown> = {}): Record<string, unknown> =
   baselineMetrics: { timeToAcceptedSeconds: 100, reworkCount: 4, costPerSuccess: 10, adoptionCount: 5 }, budget: { maxRuns: 3, maxCost: 30 }, minRuns: 2, minImprovementPct: 5, maxRegressionPct: 0, ...over,
 });
 const good = { timeToAcceptedSeconds: 80, reworkCount: 3, costPerSuccess: 9, adoptionCount: 6 };
-const runArgs = (over: Record<string, unknown> = {}): Record<string, unknown> => ({ environment: { ref: "env-scratch-1", disposable: true }, cost: 5, metrics: good, cases: [{ id: "c1", passed: true }, { id: "c2", passed: false }], ...over });
+// Every agent has environment revision 1 (made by the owner) with one protected extension; a run names the reporter's own revision and the digest the host found there. The owner may name any agent's.
+const GUARD = `sha256:${hex("9")}`;
+const envOf = (agentId = "agent:dev", over: Record<string, unknown> = {}): Record<string, unknown> => ({ agentId, revision: 1, observed: { "nimblenewt.guard": GUARD }, disposable: true, ...over });
+const MANIFEST = { base: { name: "nimblenewt-base", version: "1.0.0", digest: `sha256:${hex("1")}` }, packages: [], skills: [], capabilities: ["desk.read"], configuration: { installation: 1 }, limits: { cpus: 1, memoryMb: 512, diskMb: 1024, processes: 64 }, protectedExtensions: [{ name: "nimblenewt.guard", digest: GUARD }] };
+const runArgs = (over: Record<string, unknown> = {}, agentId = "agent:dev"): Record<string, unknown> => ({ environment: envOf(agentId), cost: 5, metrics: good, cases: [{ id: "c1", passed: true }, { id: "c2", passed: false }], ...over });
 
 interface Ctx {
   owner: Principal; mgr: Principal; mgr2: Principal; dev: Principal; dev2: Principal; reader: Principal; eve: Principal;
   a: string; b: string; svc: ExperimentService; storage: ControllerStorage; epoch: number;
-  make(): ExperimentService;
+  make(o?: ExperimentOptions): ExperimentService;
+  env: EnvironmentService; reserved: Map<string, string>; usable: Set<string>;
   /** A proposed experiment by `dev` (or `by`). */
   propose(extra?: Record<string, unknown>, by?: Principal): Promise<string>;
   rev(id: string): Promise<number>;
@@ -64,18 +70,23 @@ for (const backend of backends) {
         const a = (await projects.createProject({ commandId: cid("pa"), actor: owner.id, name: "A" })).id;
         const b = (await projects.createProject({ commandId: cid("pb"), actor: owner.id, name: "B" })).id;
         const runner = new CommandRunner(world.storage, epoch, options);
-        const make = (o: ExperimentOptions = {}) => ExperimentService.withEpoch(world.storage, epoch, { ...options, ...o });
+        const reserved = new Map<string, string>([["nimblenewt.guard", GUARD]]);
+        const usable = new Set<string>();
+        const env = EnvironmentService.withEpoch(world.storage, epoch, { ...options, reservedDigest: async (name) => reserved.get(name), skillUsable: async (_by, v) => usable.has(v) });
+        const make = (o: ExperimentOptions = {}) => ExperimentService.withEpoch(world.storage, epoch, { ...options, environments: env, ...o });
         const svc = make();
         const mgr = await enroll("mgr", [{ action: "meeting.manage", project: a }]);
         const dev = await enroll("dev", [{ action: "meeting.agenda", project: a }]);
+        const rest = { mgr2: await enroll("mgr2", [{ action: "meeting.manage", project: a }]), dev2: await enroll("dev2", [{ action: "meeting.agenda", project: a }]),
+          reader: await enroll("reader", [{ action: "meeting.read", project: a }]), eve: await enroll("eve", [{ action: "meeting.manage", project: b }, { action: "meeting.agenda", project: b }]) };
+        for (const p of [mgr, dev, ...Object.values(rest)]) await env.change(owner, { commandId: cid("env"), agentId: p.id, manifest: MANIFEST, reason: "first" });
         const ctx: Ctx = {
-          owner, mgr, dev, mgr2: await enroll("mgr2", [{ action: "meeting.manage", project: a }]), dev2: await enroll("dev2", [{ action: "meeting.agenda", project: a }]),
-          reader: await enroll("reader", [{ action: "meeting.read", project: a }]), eve: await enroll("eve", [{ action: "meeting.manage", project: b }, { action: "meeting.agenda", project: b }]),
-          a, b, svc, storage: world.storage, epoch, make,
+          owner, mgr, dev, ...rest,
+          a, b, svc, storage: world.storage, epoch, make, env, reserved, usable,
           propose: async (extra = {}, by = dev) => (await svc.propose(by, { commandId: cid("x"), projectId: a, title: "Checklist prompt", proposal: PROPOSAL, affectedKey: "handler reviews", ...extra } as never)).id,
           rev: async (id) => (await svc.get(owner, id))!.revision,
           started: async (over = {}, extra = {}) => { const id = await ctx.propose(extra); await svc.pin(mgr, { commandId: cid("p"), experimentId: id, expectedRevision: await ctx.rev(id), criteria: criteria(over) } as never); return id; },
-          run: async (id, over = {}, by = dev) => svc.recordRun(by, { commandId: cid("r"), experimentId: id, ...runArgs(over) } as never),
+          run: async (id, over = {}, by = dev) => svc.recordRun(by, { commandId: cid("r"), experimentId: id, ...runArgs(over, by.kind === "owner" ? "agent:dev" : by.id) } as never),
           conclude: async (id, by = mgr) => svc.conclude(by, { commandId: cid("c"), experimentId: id, expectedRevision: await ctx.rev(id), finding: "read the runs" }),
           body: async (id) => (await svc.get(owner, id))! as unknown as ExperimentBody,
           lesson: async (project) => { const id = derivedId("lsn", cid("l")); await runner.command("test.put", { commandId: cid("put"), actor: owner.id }, async () => ({ payload: {}, build: async () => ({ ref: { kind: "lesson", id }, creates: true, changes: [{ type: "create" as const, ref: { kind: "lesson", id }, body: { projectId: project, proposedBy: "agent:dev" } as never }], detail: {} }) })); return id; },
@@ -155,8 +166,9 @@ for (const backend of backends) {
 
   suite("a run must name a disposable environment and report exactly the pinned metrics and cases; only the proposer or a judge reports", async (c) => {
     const id = await c.started({ budget: { maxRuns: 10, maxCost: 100 } });
-    await refuses("invalid_command", () => c.run(id, { environment: { ref: "env-1", disposable: false } }), /disposable/);
-    await refuses("invalid_command", () => c.run(id, { environment: { ref: "env-1" } }), /disposable/);
+    await refuses("invalid_command", () => c.run(id, { environment: envOf("agent:dev", { disposable: false }) }), /disposable/);
+    await refuses("invalid_command", () => c.run(id, { environment: envOf("agent:dev", { disposable: undefined }) }), /disposable/);
+    await refuses("invalid_command", () => c.run(id, { environment: { ...envOf(), ref: "env-1" } }), /ref/);
     await refuses("invalid_command", () => c.run(id, { environment: undefined }), /environment/);
     await refuses("invalid_command", () => c.run(id, { metrics: { ...good, adoptionCount: undefined } }), /exactly the pinned metrics/);
     await refuses("invalid_command", () => c.run(id, { metrics: { ...good, maintenanceMinutes: 1 } }), /exactly the pinned metrics/);
@@ -172,7 +184,7 @@ for (const backend of backends) {
     assert.deepEqual(await c.run(id, { note: "first" }), { run: 1, status: "running" });
     assert.deepEqual(await c.run(id, {}, c.mgr2), { run: 2, status: "running" });
     const got = await c.body(id);
-    assert.deepEqual([got.runs.map((r) => [r.n, r.by, r.environment, r.cost]), got.spent, got.runs[0]!.note], [[[1, "agent:dev", "env-scratch-1", 5], [2, "agent:mgr2", "env-scratch-1", 5]], { runs: 2, cost: 10 }, "first"]);
+    assert.deepEqual([got.runs.map((r) => [r.n, r.by, r.environment, r.cost]), got.spent, got.runs[0]!.note], [[[1, "agent:dev", "agent:dev revision 1", 5], [2, "agent:mgr2", "agent:mgr2 revision 1", 5]], { runs: 2, cost: 10 }, "first"]);
     // The same command again is the same run.
     const r = { commandId: "run-x", experimentId: id, ...runArgs() } as never;
     const first = await c.svc.recordRun(c.dev, r);
@@ -182,6 +194,67 @@ for (const backend of backends) {
     assert.deepEqual(await c.run(id, {}, c.mgr), { run: 4, status: "running" });
     assert.deepEqual(await c.make().recordRun(c.dev, r), { run: 3, status: "running" });
     assert.equal((await c.body(id)).runs.length, 4);
+  });
+
+  suite("slice 2: a run is kept only when the A08 revision its disposable environment was built from passes A08's check; the reporter names its own (the owner any); a replay is answered from its record", async (c) => {
+    const id = await c.started({ budget: { maxRuns: 20, maxCost: 1000 } });
+    const before = await c.rev(id);
+    const withEnv = (env: Record<string, unknown>) => ({ environment: env });
+    // Shapes, bounded before anything is stored.
+    for (const bad of [{ ...envOf(), agentId: 7 }, { ...envOf(), agentId: "x".repeat(61) }, { ...envOf(), revision: 0 }, { ...envOf(), revision: 1.5 }, { ...envOf(), revision: "1" }, { ...envOf(), observed: [] }, { ...envOf(), observed: null }, { ...envOf(), observed: undefined },
+      { ...envOf(), observed: Object.fromEntries(Array.from({ length: 21 }, (_, i) => [`ext-${i}`, GUARD])) }, { ...envOf(), observed: { "nimblenewt.guard": 5 } }, { ...envOf(), observed: { ["x".repeat(81)]: GUARD } }]) {
+      await refuses("invalid_command", () => c.run(id, withEnv(bad)), /environment/);
+    }
+    await refuses("invalid_command", () => c.run(id, withEnv(envOf("dev"))), /agentId/);
+    // The shape is judged before anything is stored or any right is looked up: a malformed reference from someone who may not report runs is refused for its shape.
+    for (const agentId of [7, "x".repeat(61), ["agent:dev"]]) await refuses("invalid_command", () => c.run(id, withEnv(envOf("agent:dev", { agentId })), c.dev2), /environment\.agentId/);
+    await refuses("forbidden", () => c.run(id, {}, c.dev2));
+    await refuses("invalid_command", () => c.run(id, withEnv(envOf("agent:dev", { revision: 501 }))), /revision/);
+    await refuses("invalid_command", () => c.run(id, withEnv(envOf("agent:dev", { observed: { "nimblenewt.guard": "sha256:short" } }))), /digest/);
+    await refuses("invalid_command", () => c.run(id, withEnv(envOf("agent:dev", { observed: JSON.parse(`{"__proto__":"${GUARD}"}`) }))), /observed/);
+    // A revision that does not exist, and another agent's revision, answer alike.
+    await refuses("not_found", () => c.run(id, withEnv(envOf("agent:dev", { revision: 9 }))), /may not name environment revision 9 of agent:dev, or it does not exist/);
+    await refuses("not_found", () => c.run(id, withEnv(envOf("agent:mgr"))), /may not name environment revision 1 of agent:mgr, or it does not exist/);
+    await refuses("not_found", () => c.run(id, withEnv(envOf("agent:dev")), c.mgr), /may not name/);
+    // A08's integrity check: the extension missing, another one on disk, one loaded that the manifest does not name, the catalog's digest moved, a skill revoked, the manifest changed in storage.
+    await refuses("integrity", () => c.run(id, withEnv(envOf("agent:dev", { observed: {} }))), /nimblenewt.guard was not found where the worker loads it/);
+    await refuses("integrity", () => c.run(id, withEnv(envOf("agent:dev", { observed: { "nimblenewt.guard": `sha256:${hex("8")}` } }))), /on disk is not the one the manifest names/);
+    await refuses("integrity", () => c.run(id, withEnv(envOf("agent:dev", { observed: { "nimblenewt.guard": GUARD, constructor: GUARD } }))), /constructor is loaded but the manifest does not name it/);
+    c.reserved.set("nimblenewt.guard", `sha256:${hex("7")}`);
+    await refuses("integrity", () => c.run(id), /the manifest's digest is not the catalog's/);
+    c.reserved.delete("nimblenewt.guard");
+    await refuses("integrity", () => c.run(id), /not a live system version/);
+    c.reserved.set("nimblenewt.guard", GUARD);
+    const skill = "cav-aaaaaaaaaaaaaaaaaaaa";
+    c.usable.add(skill);
+    assert.deepEqual(await c.env.change(c.owner, { commandId: cid("env"), agentId: "agent:dev", manifest: { ...MANIFEST, skills: [skill] }, reason: "a skill", expectedRevision: 1 }), { revision: 2 });
+    c.usable.delete(skill);
+    await refuses("integrity", () => c.run(id, withEnv(envOf("agent:dev", { revision: 2 }))), /skill library is missing or was revoked/);
+    const runner = new CommandRunner(c.storage, c.epoch, options);
+    const revRef = { kind: "environment-revision", id: derivedId("evr", "agent:dev2|1") };
+    const stored = (await runner.get(revRef.kind, revRef.id))!;
+    await runner.command("test.tamper", { commandId: cid("t"), actor: c.owner.id }, async () => ({ payload: {}, build: async () => ({ ref: revRef, creates: false, changes: [{ type: "update" as const, ref: revRef, expectedRevision: stored.revision, body: { ...(stored.body as object), manifest: { ...MANIFEST, capabilities: ["*"] } } as never }], detail: {} }) }));
+    const pinned2 = await c.started({ budget: { maxRuns: 5, maxCost: 100 } }, {});
+    await refuses("integrity", () => c.svc.recordRun(c.owner, { commandId: cid("r"), experimentId: pinned2, ...runArgs({}, "agent:dev2") } as never), /no longer matches its digest/);
+    // Nothing refused was kept.
+    assert.deepEqual([await c.rev(id), (await c.body(id)).runs.length, (await c.body(pinned2)).runs.length], [before, 0, 0]);
+    // Without the environment records no run is recorded at all.
+    await refuses("unavailable", () => c.make({ environments: undefined } as never).recordRun(c.dev, { commandId: cid("r"), experimentId: id, ...runArgs() } as never), /environment records are not available/);
+    // A run that passes keeps the revision as the controller found it; the owner may name any agent's revision.
+    const digest = (await c.env.get(c.owner, "agent:dev", 1))!.revision!.digest;
+    const cmd = { commandId: "run-env", experimentId: id, ...runArgs() } as never;
+    assert.deepEqual(await c.svc.recordRun(c.dev, cmd), { run: 1, status: "running" });
+    assert.deepEqual(await c.svc.recordRun(c.owner, { commandId: cid("r"), experimentId: id, ...runArgs({}, "agent:mgr2") } as never), { run: 2, status: "running" });
+    const got = await c.body(id);
+    assert.deepEqual(got.runs.map((r) => [r.by, r.environment, r.environmentRevision]), [["agent:dev", "agent:dev revision 1", { agentId: "agent:dev", revision: 1, digest }], [c.owner.id, "agent:mgr2 revision 1", { agentId: "agent:mgr2", revision: 1, digest: (await c.env.get(c.owner, "agent:mgr2", 1))!.revision!.digest }]]);
+    // The check is inside the command: a replay after the catalog moved is answered from its record; a new run is refused.
+    c.reserved.set("nimblenewt.guard", `sha256:${hex("6")}`);
+    assert.deepEqual(await c.make().recordRun(c.dev, cmd), { run: 1, status: "running" });
+    await refuses("integrity", () => c.run(id), /catalog/);
+    // The same command ID with another environment is a different command, refused.
+    c.reserved.set("nimblenewt.guard", GUARD);
+    await refuses("command_conflict", () => c.svc.recordRun(c.dev, { commandId: "run-env", experimentId: id, ...runArgs({}, "agent:dev"), environment: envOf("agent:dev", { revision: 2 }) } as never));
+    assert.equal((await c.body(id)).runs.length, 2);
   });
 
   suite("the verdict is the controller's: improved, no-change, worse (a metric or a case the baseline passed) or inconclusive, and every result is kept", async (c) => {
@@ -348,7 +421,7 @@ for (const backend of backends) {
     // Two controllers reporting the last run the budget allows at once: one is kept and pauses it, the other is refused, and the budget is not overrun.
     const edge = await c.started({ budget: { maxRuns: 2, maxCost: 1000 }, minRuns: 1 });
     await c.run(edge);
-    const last = await Promise.allSettled([c.run(edge), other.recordRun(c.mgr, { commandId: cid("r"), experimentId: edge, ...runArgs() } as never)]);
+    const last = await Promise.allSettled([c.run(edge), other.recordRun(c.mgr, { commandId: cid("r"), experimentId: edge, ...runArgs({}, c.mgr.id) } as never)]);
     assert.deepEqual(last.map((o) => (o.status === "fulfilled" ? `${o.value.run} ${o.value.status}` : (o.reason as DomainError).code)).sort(), ["2 paused", "unavailable"]);
     assert.deepEqual([(await c.body(edge)).runs.length, (await c.body(edge)).spent.runs], [2, 2]);
   });
@@ -382,7 +455,7 @@ test("the verdict arithmetic: lower is better except adoption, a zero baseline m
   assert.equal(betterPct("adoptionCount", 5, 4), -20);
   assert.deepEqual([betterPct("reworkCount", 0, 0), betterPct("reworkCount", 0, 2), betterPct("adoptionCount", 0, 2)], [0, -100, 100]);
   const crit = criteria({ minRuns: 1 }) as never as Criteria;
-  const run = (metrics: Record<string, number>, cases = [{ id: "c1", passed: true }, { id: "c2", passed: true }]) => ({ n: 1, at: "t", by: "a", environment: "e", cost: 1, metrics, cases }) as never;
+  const run = (metrics: Record<string, number>, cases = [{ id: "c1", passed: true }, { id: "c2", passed: true }]) => ({ n: 1, at: "t", by: "a", environment: "agent:a revision 1", cost: 1, metrics, cases }) as never;
   assert.equal(judge(crit, [run({ ...good, timeToAcceptedSeconds: 96 })]).verdict, "improved", "4% time but 25% rework: any metric at the bar");
   assert.equal(judge(crit, [run({ timeToAcceptedSeconds: 97, reworkCount: 4, costPerSuccess: 10, adoptionCount: 5 })]).verdict, "no-change", "3% is under the 5% bar");
   const lenient = { ...crit, maxRegressionPct: 10 };

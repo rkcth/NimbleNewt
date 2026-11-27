@@ -185,17 +185,7 @@ export class EnvironmentService {
     if (typeof command.observed !== "object" || command.observed === null || Array.isArray(command.observed)) invalid("observed", "maps each protected extension to the digest found on disk");
     const rev = (await this.#runner.get("environment-revision", derivedId("evr", `${agentId}|${n}`)))?.body as unknown as RevisionBody | undefined;
     if (rev === undefined) throw new DomainError("not_found", `${agentId} has no environment revision ${n}`);
-    const problems: string[] = [];
-    for (const e of rev.manifest.protectedExtensions) {
-      const registered = await this.#reserved(e.name);
-      if (registered === undefined) problems.push(`${e.name} is not a live system version in the catalog`);
-      else if (registered !== e.digest) problems.push(`${e.name}: the manifest's digest is not the catalog's`);
-      const found = command.observed[e.name];
-      if (found === undefined) problems.push(`${e.name} was not found where the worker loads it`);
-      else if (found !== e.digest) problems.push(`${e.name} on disk is not the one the manifest names`);
-    }
-    for (const skill of rev.manifest.skills) if (!(await this.#skillUsable(by, skill))) problems.push(`${skill} in the skill library is missing or was revoked`);
-    for (const name of Object.keys(command.observed)) if (!rev.manifest.protectedExtensions.some((e) => e.name === name)) problems.push(`${name} is loaded but the manifest does not name it`);
+    const problems = await this.#problems(by, rev, command.observed);
     if (problems.length > 0) throw new DomainError("integrity", `revision ${n} was not activated: ${problems.join("; ")}`, { field: "observed" });
     const ref: AggregateRef = { kind: "environment", id: derivedId("env", agentId) };
     await this.#runner.command("environment.activate", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
@@ -207,6 +197,43 @@ export class EnvironmentService {
         return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: { ...body, active: n } as unknown as JsonObject }], detail: { agentId, revision: n } };
       },
     }));
+  }
+
+  /**
+   * Checks, without activating or changing anything, a revision a disposable environment was built from (card B04: a candidate's run). It is activation's integrity check (each protected extension has the
+   * catalog's digest and the one the host found, nothing extra is loaded, every skill is usable by `by`) plus the revision's manifest still matching its digest. Only the owner or the agent itself may name
+   * the agent's revisions; a revision that does not exist and one `by` may not name answer alike. Answers the revision's identity, or refuses naming every problem.
+   */
+  async verify(by: Principal, ref: { readonly agentId: unknown; readonly revision: unknown; readonly observed: unknown }): Promise<{ readonly agentId: string; readonly revision: number; readonly digest: string }> {
+    const agentId = typeof ref.agentId === "string" && AGENT.test(ref.agentId) ? ref.agentId : invalid("environment.agentId", "is not an agent principal");
+    const n = typeof ref.revision === "number" && Number.isSafeInteger(ref.revision) && ref.revision >= 1 && ref.revision <= ENV_LIMITS.revisions ? ref.revision : invalid("environment.revision", `must be an environment revision number from 1 to ${ENV_LIMITS.revisions}`);
+    const observed = ref.observed;
+    if (typeof observed !== "object" || observed === null || Array.isArray(observed)) return invalid("environment.observed", "maps each protected extension to the digest the host found where the worker loads it");
+    const entries = Object.entries(observed as Record<string, unknown>);
+    if (entries.length > ENV_LIMITS.protectedExtensions) invalid("environment.observed", `names at most ${ENV_LIMITS.protectedExtensions} extensions`);
+    for (const [name, digest] of entries) if (!NAME.test(name) || typeof digest !== "string" || !DIGEST.test(digest)) invalid("environment.observed", "maps extension names to sha256:<hex> digests");
+    const rev = mayManage(by) || by.id === agentId ? (await this.#runner.get("environment-revision", derivedId("evr", `${agentId}|${n}`)))?.body as unknown as RevisionBody | undefined : undefined;
+    if (rev === undefined || rev.agentId !== agentId || rev.revision !== n) throw new DomainError("not_found", `${by.id} may not name environment revision ${n} of ${agentId}, or it does not exist`);
+    const problems = await this.#problems(by, rev, observed as Readonly<Record<string, string>>);
+    if (`sha256:${sha(canonicalJson(rev.manifest as unknown as JsonObject))}` !== rev.digest) problems.unshift("the revision's manifest no longer matches its digest");
+    if (problems.length > 0) throw new DomainError("integrity", `environment revision ${n} of ${agentId} did not pass its check: ${problems.join("; ")}`, { field: "environment" });
+    return { agentId, revision: n, digest: rev.digest };
+  }
+
+  /** Every integrity problem of a revision against the catalog and what the host found (card A08). */
+  async #problems(by: Principal, rev: RevisionBody, observed: Readonly<Record<string, string>>): Promise<string[]> {
+    const problems: string[] = [];
+    for (const e of rev.manifest.protectedExtensions) {
+      const registered = await this.#reserved(e.name);
+      if (registered === undefined) problems.push(`${e.name} is not a live system version in the catalog`);
+      else if (registered !== e.digest) problems.push(`${e.name}: the manifest's digest is not the catalog's`);
+      const found = Object.hasOwn(observed, e.name) ? observed[e.name] : undefined;
+      if (found === undefined) problems.push(`${e.name} was not found where the worker loads it`);
+      else if (found !== e.digest) problems.push(`${e.name} on disk is not the one the manifest names`);
+    }
+    for (const skill of rev.manifest.skills) if (!(await this.#skillUsable(by, skill))) problems.push(`${skill} in the skill library is missing or was revoked`);
+    for (const name of Object.keys(observed)) if (!rev.manifest.protectedExtensions.some((e) => e.name === name)) problems.push(`${name} is loaded but the manifest does not name it`);
+    return problems;
   }
 
   /** Records the revision an attempt or a checkpoint runs with: the agent's active one now. Repeating it returns the same pin. */

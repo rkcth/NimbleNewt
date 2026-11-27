@@ -6,6 +6,7 @@ import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import { allows, inTaskScope } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
+import type { EnvironmentService } from "../environments/environments.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import { clean, invalid, plain, whole } from "../standups/shared.js";
 
@@ -52,7 +53,10 @@ export interface Run {
   readonly revision: number;
   readonly at: string;
   readonly by: string;
+  /** How the run names its environment, for reading: `<agent> revision <n>` (a run recorded before the check of slice 2 holds the reporter's own words). */
   readonly environment: string;
+  /** The A08 environment revision the disposable environment was built from, as the controller checked it when the run was recorded (absent on runs recorded before that check). */
+  readonly environmentRevision?: { readonly agentId: string; readonly revision: number; readonly digest: string };
   readonly cost: number;
   readonly metrics: Readonly<Partial<Record<Metric, number>>>;
   readonly cases: readonly { readonly id: string; readonly passed: boolean }[];
@@ -134,15 +138,20 @@ export function judge(criteria: Criteria, runs: readonly Run[]): Omit<Result, "a
   return { verdict, runsUsed: runs.length, candidateMetrics, betterPct: better, failedCases, savings: [], claims };
 }
 
-export interface ExperimentOptions extends RunnerOptions {}
+export interface ExperimentOptions extends RunnerOptions {
+  /** A08's check of the revision a candidate's disposable environment was built from. Without it no run is recorded (fail closed). */
+  readonly environments?: Pick<EnvironmentService, "verify">;
+}
 
 export class ExperimentService {
   readonly #runner: CommandRunner;
+  readonly #environments: Pick<EnvironmentService, "verify"> | undefined;
 
-  private constructor(runner: CommandRunner) { this.#runner = runner; }
+  private constructor(runner: CommandRunner, environments: Pick<EnvironmentService, "verify"> | undefined) { this.#runner = runner; this.#environments = environments; }
 
   static withEpoch(storage: ControllerStorage, epoch: number, options: ExperimentOptions = {}): ExperimentService {
-    return new ExperimentService(new CommandRunner(storage, epoch, options));
+    const { environments, ...rest } = options;
+    return new ExperimentService(new CommandRunner(storage, epoch, rest), environments);
   }
 
   /** Proposes an experiment (needs `meeting.agenda` or `meeting.manage` in the project, or the owner). It changes nothing until a manager pins its criteria. */
@@ -202,16 +211,19 @@ export class ExperimentService {
   }
 
   /**
-   * Records one run (the proposer, or a judge). It names a disposable environment, the cost, exactly the pinned metrics and exactly the pinned cases. A run that uses up the budget is kept and pauses the
-   * experiment; once paused or concluded another run is refused.
+   * Records one run (the proposer, or a judge). It names the disposable environment (the A08 revision it was built from and the protected-extension digests the host found there), the cost, exactly the
+   * pinned metrics and exactly the pinned cases. The controller checks the revision with A08's integrity check before keeping the run; a revision that is missing, not the reporter's own (unless the
+   * reporter is the owner) or fails the check is refused and nothing is recorded. A run that uses up the budget is kept and pauses the experiment; once paused or concluded another run is refused.
    */
-  async recordRun(by: Principal, command: NoActor & { experimentId: string; environment: { ref: string; disposable: boolean }; cost: number; metrics: Record<string, number>; cases: { id: string; passed: boolean }[]; note?: string }): Promise<{ run: number; status: ExperimentStatus }> {
+  async recordRun(by: Principal, command: NoActor & { experimentId: string; environment: { agentId: string; revision: number; observed: Record<string, string>; disposable: boolean }; cost: number; metrics: Record<string, number>; cases: { id: string; passed: boolean }[]; note?: string }): Promise<{ run: number; status: ExperimentStatus }> {
     onlyKnown(command, ["commandId", "experimentId", "environment", "cost", "metrics", "cases", "note"]);
     const id = this.#id(command.experimentId);
-    if (command.environment === null || typeof command.environment !== "object") invalid("environment", "must name the disposable environment the run used");
-    onlyKnown(command.environment, ["ref", "disposable"]);
+    if (command.environment === null || typeof command.environment !== "object" || Array.isArray(command.environment)) invalid("environment", "must name the disposable environment the run used: agentId, revision, observed and disposable");
+    onlyKnown(command.environment, ["agentId", "revision", "observed", "disposable"]);
     if (command.environment.disposable !== true) invalid("environment", "a candidate runs only in a disposable environment (disposable must be true)");
-    const environment = plain(command.environment.ref, "environment.ref", EXPERIMENT_LIMITS.label);
+    const env = this.#environmentRef(command.environment);
+    const environments = this.#environments ?? (() => { throw new DomainError("unavailable", "the environment records are not available here, so no run can be checked or recorded"); })();
+    const environment = `${env.agentId} revision ${env.revision}`;
     const cost = this.#number(command.cost, "cost", EXPERIMENT_LIMITS.cost);
     const note = command.note === undefined ? undefined : plain(command.note, "note", EXPERIMENT_LIMITS.text);
     const metrics = this.#metrics(command.metrics, "metrics");
@@ -223,7 +235,7 @@ export class ExperimentService {
       return { id: c.id, passed: c.passed };
     });
     const result = await this.#retrying(() => this.#runner.command("experiment.run", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
-      payload: clean({ experimentId: id, environment, cost, metrics, cases, note }),
+      payload: clean({ experimentId: id, environment: { agentId: env.agentId, revision: env.revision, observed: env.observed }, cost, metrics, cases, note }),
       build: async () => {
         const got = await this.#get(id);
         if (got === undefined || !this.#mayRun(by, got.body)) throw new DomainError("forbidden", `${by.id} may not report runs for that experiment`);
@@ -236,12 +248,14 @@ export class ExperimentService {
         const wantCases = b.criteria.cases.map((c) => c.id).sort();
         const gotCases = cases.map((c) => c.id).sort();
         if (wantCases.length !== gotCases.length || wantCases.some((c, i) => c !== gotCases[i])) invalid("cases", `must report exactly the pinned evaluation cases once each: ${wantCases.join(", ")}`);
+        // Checked inside the command, so a repeat is answered from its record and a run is kept only with the revision as the controller found it.
+        const environmentRevision = await environments.verify(by, env);
         const nowIso = this.#runner.now();
         const run = b.runs.length + 1;
         const spent = { runs: b.spent.runs + 1, cost: Math.round((b.spent.cost + cost) * 1e6) / 1e6 };
         const out = spent.runs >= b.criteria.budget.maxRuns || spent.cost >= b.criteria.budget.maxCost;
         const status: ExperimentStatus = out ? "paused" : "running";
-        const next: ExperimentBody = { ...b, spent, runs: [...b.runs, { n: run, revision: got.found.revision + 1, at: nowIso, by: by.id, environment, cost, metrics, cases, ...(note === undefined ? {} : { note }) }], status, ...(out ? { pausedWhy: "budget" as const, history: this.#history(b, nowIso, by.id, "paused", "budget used up") } : {}) };
+        const next: ExperimentBody = { ...b, spent, runs: [...b.runs, { n: run, revision: got.found.revision + 1, at: nowIso, by: by.id, environment, environmentRevision: { agentId: environmentRevision.agentId, revision: environmentRevision.revision, digest: environmentRevision.digest }, cost, metrics, cases, ...(note === undefined ? {} : { note }) }], status, ...(out ? { pausedWhy: "budget" as const, history: this.#history(b, nowIso, by.id, "paused", "budget used up") } : {}) };
         return { ref: { kind: "experiment", id }, creates: false, changes: [{ type: "update", ref: { kind: "experiment", id }, expectedRevision: got.found.revision, body: clean(next) }], detail: { projectId: b.projectId, run } };
       },
     })));
@@ -412,6 +426,17 @@ export class ExperimentService {
       minImprovementPct: c["minImprovementPct"] === undefined ? 0 : this.#number(c["minImprovementPct"], "minImprovementPct", 1000),
       maxRegressionPct: c["maxRegressionPct"] === undefined ? 0 : this.#number(c["maxRegressionPct"], "maxRegressionPct", 100),
     };
+  }
+
+  /** The shape of a run's environment reference, bounded before it is stored as the command's payload; A08's `verify` judges the rest. */
+  #environmentRef(raw: { agentId?: unknown; revision?: unknown; observed?: unknown }): { agentId: string; revision: number; observed: Record<string, string> } {
+    if (typeof raw.agentId !== "string" || raw.agentId.length > 60) return invalid("environment.agentId", "must name the agent whose environment revision the disposable environment was built from");
+    if (typeof raw.revision !== "number" || !Number.isSafeInteger(raw.revision) || raw.revision < 1) return invalid("environment.revision", "must be the environment revision number");
+    const o = raw.observed;
+    if (o === null || typeof o !== "object" || Array.isArray(o)) return invalid("environment.observed", "maps each protected extension to the digest the host found (an empty object when there are none)");
+    const entries = Object.entries(o as Record<string, unknown>);
+    if (entries.length > 20 || entries.some(([k, v]) => k.length > 80 || typeof v !== "string" || v.length > 80)) return invalid("environment.observed", "names at most 20 extensions, each with a sha256:<hex> digest");
+    return { agentId: raw.agentId, revision: raw.revision, observed: Object.fromEntries(entries) as Record<string, string> };
   }
 
   #metrics(raw: unknown, field: string): Partial<Record<Metric, number>> {
