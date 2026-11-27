@@ -9,6 +9,7 @@ import { redactText } from "../security/redact.js";
 import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { CoordinatorModel, CoordinatorRequest } from "./coordinator.js";
 import type { ModelCall, ModelReply } from "./model-interpreter.js";
+import { failedUsage } from "./http-model.js";
 
 /**
  * The routed client for the controller's own model calls (card U03b): the owner chat's interpreter and the coordinator. It is the small part of R01 and R02 that applies to a call with no task and no tools.
@@ -94,6 +95,9 @@ export class GuardedModelCall implements ModelCall {
       if (kind === "credit" || kind === "auth") this.#providers.add(route.slice(0, Math.max(route.indexOf("/"), 0)));
       else if (kind === "rate-limit") this.#until.set(route, now + (this.#o.rateLimitMs ?? 60_000));
       else if (kind === "outage") this.#until.set(route, now + (this.#o.outageMs ?? 300_000));
+      // A failed call the provider still counted tokens for (a reply cut before any text, asked again at the ceiling: W09 fixes) is counted under the cap like a reply; counting never changes the failure.
+      const paid = failedUsage(error);
+      if (this.#o.spend !== undefined && paid !== undefined && paid.inputTokens + paid.outputTokens > 0) await this.#o.spend.record(paid.inputTokens + paid.outputTokens, `${process.pid}.${this.#id}.${this.#seq++}.${Date.now()}`).catch((e: unknown) => { try { this.#o.onSpendFailure?.(e); } catch { /* a report that fails changes nothing */ } });
       throw error;
     }
     // The call was made and paid for: a failure to count it must never turn a good reply into a route failure (the next route would repeat the paid call).
@@ -178,14 +182,17 @@ export class ChatSpendService {
 
   /** Adds one call's tokens to today's count; a repeat of the same key adds nothing. */
   async record(tokens: number, key: string): Promise<void> {
-    if (!Number.isSafeInteger(tokens) || tokens < 0) return;
+    // Not a count (not a number, NaN, negative): nothing is added, so no figure can lower the day's count. A count past the safe range (a server reporting huge figures) is kept at the largest safe integer, so it reaches the cap
+    // instead of being dropped, and the day's total never leaves the exact range.
+    if (typeof tokens !== "number" || Number.isNaN(tokens) || tokens < 0) return;
+    tokens = Math.min(Number.MAX_SAFE_INTEGER, Math.floor(tokens));
     const { day, ref } = this.#dayId();
     await this.#retrying(() => this.#runner.command("chat.spend", { commandId: `chat-spend-${key}`.slice(0, 120), actor: "controller" }, async () => ({
       payload: { day, tokens },
       build: async () => {
         const found = await this.#runner.get(ref.kind, ref.id);
         const before = found === undefined ? { day, tokens: 0, calls: 0 } : (found.body as unknown as ChatSpendBody);
-        const body: ChatSpendBody = { day, tokens: before.tokens + tokens, calls: before.calls + 1 };
+        const body: ChatSpendBody = { day, tokens: Math.min(Number.MAX_SAFE_INTEGER, before.tokens + tokens), calls: before.calls + 1 };
         return { ref, creates: found === undefined, changes: [found === undefined ? { type: "create", ref, body: body as unknown as JsonObject } : { type: "update", ref, expectedRevision: found.revision, body: body as unknown as JsonObject }], detail: { day, tokens } };
       },
     })));

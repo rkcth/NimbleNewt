@@ -353,6 +353,9 @@ test("second review: an omitted old primary, an address that would fall back to 
     assert.match(result.notes.join(" | "), /old primary did not answer/);
     assert.doesNotMatch(result.notes.join(" | "), /no other standbys were named/);
     assert.match((await promoteDatabaseWith(ok, steps())).notes.join(" | "), /no other standbys were named/);
+    // a manifest of an earlier epoch than the standby's is said so (it passes: the epoch moves at every start); one of the same epoch is not
+    assert.doesNotMatch(result.notes.join(" | "), /written under epoch/);
+    assert.match((await promoteDatabaseWith(ok, steps({ state: stateOf({ epoch: 3 }, [record]) }))).notes.join(" | "), /written under epoch 2 and the standby holds epoch 3: it was not written by the controller that holds the epoch now/);
   } finally { gone(dir); }
 });
 

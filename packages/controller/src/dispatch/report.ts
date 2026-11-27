@@ -11,7 +11,11 @@ import { STOPPED_EARLY_READMITS, WORK_NOTE_KINDS, WORK_REPORT_LIMITS, type Attem
 export interface InterrogationInput {
   readonly taskId: string;
   readonly attemptId: string;
-  readonly task: { readonly title: string; readonly expectedResult?: string; readonly acceptanceCriteria: readonly string[]; readonly requiredEvidence: readonly string[]; readonly checks: readonly string[] };
+  /**
+   * `description` (W09 fixes): the task's own description, as the agent was given it, so the second agent can question the report against the acceptance criteria and the edge cases the task names (often written in the description, not in the
+   * contract's list). Only what the agent saw: no grader's or held-out test reaches it.
+   */
+  readonly task: { readonly title: string; readonly description?: string; readonly expectedResult?: string; readonly acceptanceCriteria: readonly string[]; readonly requiredEvidence: readonly string[]; readonly checks: readonly string[] };
   readonly report: string;
   readonly notes: readonly WorkNote[];
   /** The controller's mechanical check of the done (card W05: `passed`, or `skipped` when the contract names no evidence or checks), and what the host reports of the checkout (plan steps and diff stat, in the controller's words). */

@@ -54,6 +54,19 @@ const WINDOW_STEP = 1_024;
  * figure as the model's `maxTokens`, and its first call reserves it (`replyReserveTokens`). A route with a reply limit reserves that limit instead.
  */
 export const DEFAULT_REPLY_TOKENS = 4_096;
+
+/** W09 fixes: the most a worker's reply limit may grow to after replies cut with no visible text, when the route declares no reply limit of its own. */
+export const REPLY_CUT_MAX_TOKENS = 32_768;
+/**
+ * The ceiling a worker host gives a worker for replies cut at the limit with no visible text (W09 fixes, `ChannelModel.replyCeiling`). A route whose reply limit the owner set (`maxTokens`, card W07) keeps it: the ceiling is that
+ * limit, so it never grows. Otherwise the reply may grow from `DEFAULT_REPLY_TOKENS` to an eighth of the window (the share Pi's compaction keeps for a reply), at most `REPLY_CUT_MAX_TOKENS`, and never below the default.
+ */
+export function replyCeilingFor(route: { readonly contextTokens: number; readonly maxTokens?: number }): number {
+  const declared = route.maxTokens;
+  if (declared !== undefined && Number.isSafeInteger(declared) && declared > 0) return declared;
+  const window = Number.isSafeInteger(route.contextTokens) && route.contextTokens > 0 ? route.contextTokens : 0;
+  return Math.max(DEFAULT_REPLY_TOKENS, Math.min(REPLY_CUT_MAX_TOKENS, Math.floor(window / 8)));
+}
 /** The window figures are worked out for: from the smallest `contextBudget` accepts up to the largest. */
 const WINDOW_RANGE = { min: 1_024, max: 100_000_000 } as const;
 

@@ -5,3 +5,5 @@ export { SCRATCH_LIMITS, ScratchCleanupService, scratchRecordId, type Leftover, 
 export { LEFTOVER_NOTICES, ownerNotices, supervisorNotice } from "./leftovers-report.js";
 export { INTERROGATOR_LIMITS, ReportInterrogator, parseAnswer, promptOf, type ReportInterrogatorOptions } from "./interrogator.js";
 export { BoundedReviewerModel, RESUME_REVIEWER_ROUTE_SETTING, REVIEWER_LIMITS, REVIEWER_ROUTE_SETTING, TOO_LONG, reviewerRoute } from "./reviewer-model.js";
+export { REASONING_KINDS, REVIEWER_CALL_LIMITS, reviewerCallLimits, type ReviewerCallLimits } from "./reviewer-limits.js";
+export { NOT_RUN_CAUSES, notRunCause, type NotRunCause } from "../dispatch/not-run-cause.js";

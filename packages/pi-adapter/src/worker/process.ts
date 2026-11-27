@@ -3,7 +3,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, createProvider, type Models } from "@earendil-works/pi-ai";
 import { openNodeJsonlStorage } from "@earendil-works/pi-durable/storage/jsonl/node";
 import type { Storage } from "@earendil-works/pi-durable";
-import { CHECKPOINT_DURABILITY_ERROR, ChannelError, safeText, findAnchors, stripAnchors, verifyAnchor, LeaseWatchdog, LineDecoder, WORKER_CHANNEL_VERSION, encodeMessage, parseToChild, requestId, type ChannelStart, type CheckpointDurability, type FromChild, type LossReason, type ToChild, type WatchdogClock } from "@nimblenewt/contracts";
+import { CHECKPOINT_DURABILITY_ERROR, ChannelError, safeText, findAnchors, stripAnchors, verifyAnchor, LeaseWatchdog, LineDecoder, WORKER_CHANNEL_VERSION, encodeMessage, parseToChild, requestId, type ChannelStart, type CheckpointDurability, type ReplyCut, type FromChild, type LossReason, type ToChild, type WatchdogClock } from "@nimblenewt/contracts";
 import { PiAdapter, type AdapterConversation } from "../adapter.js";
 import { RequestIdConflictError } from "../errors.js";
 import { assertWorkableWindow, compactionThresholds } from "../compaction-thresholds.js";
@@ -16,6 +16,7 @@ import { classifyTurnEnd } from "./end-kind.js";
 import { nudgeCallId, nudgeText } from "./nudge.js";
 import { startProxy, type Proxy } from "./proxy.js";
 import { relayFetch } from "./relay-fetch.js";
+import { ReplyRoom, cutWithoutText, loadReplyRoom, saveReplyRoom } from "./reply-room.js";
 import { pendingThinking, type ThinkingMark } from "./thinking-report.js";
 
 /**
@@ -219,6 +220,14 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
   let adapter: PiAdapter | undefined;
   let bridge: Bridge | undefined;
   let relay: ReturnType<typeof relayFetch> | undefined;
+  // W09 fixes: the reply limit after replies cut with no visible text, and whether the current turn's last answer was already looked at for it.
+  let room: ReplyRoom | undefined;
+  let tailSeen = false;
+  const onCut = async (): Promise<void> => {
+    if (room === undefined || started === undefined) return;
+    if (room.cut()) relay?.raiseReplyLimit(room.limit, started.model.contextWindow);
+    await saveReplyRoom(started.storeDir, room).catch(() => undefined);
+  };
   /** The proxy endpoint of the sandbox (card H12i), served only when the host started the process with a network route. */
   let proxy: Proxy | undefined;
   let started: ChannelStart | undefined;
@@ -304,6 +313,9 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
     globalThis.fetch = relay.fetch;
     const models = await (hooks.models ?? ((s) => relayModels(s)))(start, relay.fetch);
     const storage = await (hooks.storage ?? ((dir) => openNodeJsonlStorage(dir, BACKGROUND_CONTEXT)))(start.storeDir);
+    // W09 fixes: a raised reply limit an earlier process of this attempt kept goes on (a readmit on the stored conversation, W03).
+    room = await loadReplyRoom(start.storeDir, start.model.maxTokens, start.model.replyCeiling ?? start.model.maxTokens);
+    if (room.raised) relay.raiseReplyLimit(room.limit, start.model.contextWindow);
     const wire = boundTransport(start.credential, async (token, request) => {
       // After a fenced answer no further call leaves until the controller has said whether the lease still holds (or the lease has ended).
       while (checking !== undefined && dog?.productive === true) await checking.done;
@@ -335,10 +347,14 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
     const continuation: ContinuationPolicy = {
       max: DEFAULT_MAX_CONTINUATIONS,
       decide: async (answer, ask) => {
+        // A reply cut with no visible text raises the limit for the next call, nudged or not (W09 fixes).
+        tailSeen = true;
+        if (cutWithoutText(answer.stopReason, answer.visibleText)) await onCut();
         if (stopped()) return undefined;
         const endKind = classifyTurnEnd({ stopReason: answer.stopReason, visibleText: answer.visibleText, toolCalls: [] }).endKind;
         const reply = await transport.send({ op: "turn.continue", callId: nudgeCallId(ask.turn, ask.n), args: { n: ask.n, max: ask.max, endKind } });
         if (!reply.ok || reply.result["go"] !== true || stopped()) return undefined;
+        tailSeen = false;
         return nudgeText(answer.stopReason);
       },
       onError: (error) => { console.error(`continuation hook failed: ${safeText(error, 300)}`); },
@@ -377,6 +393,7 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
   const turn = async (requestIdText: string, content: string): Promise<void> => {
     if (adapter === undefined || started === undefined) return fault("the process was not started");
     turnOpen = true;
+    tailSeen = false;
     try {
       if (dog !== undefined) await dog.assertProductive();
       // The request opens with a snapshot of the catalogue's declarations, which go to the model in the volatile context after the stable prompt. A tool registered while the request is in flight appears in the next request's snapshot.
@@ -398,14 +415,18 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
       // How many times the turn was continued (card W04), from the conversation's document; told with every result so the attempt records it.
       let nudges = 0;
       try { const c = await adapter.continuations(); if (c.turn === requestIdText) nudges = c.used; } catch { /* not known: 0 is not claimed as more */ }
-      if (dog !== undefined && !dog.productive) send({ t: "result", status: "failed", error: `lease lost (${dog.reason}): the turn was stopped`, nudges });
+      const cutOf = (): { replyCut?: ReplyCut } => { const r = room?.record(); return r === undefined ? {} : { replyCut: r }; };
+      if (dog !== undefined && !dog.productive) send({ t: "result", status: "failed", error: `lease lost (${dog.reason}): the turn was stopped`, nudges, ...cutOf() });
       else if (result.status === "completed") {
         // How the turn ended (card W02): told with the result, so the controller can tell a full report from a reply cut off at the output limit, one with nothing visible, or a stop without work.end. After continuations (W04) it is the last answer's.
-        const ending = classifyTurnEnd({ stopReason: await lastStopReason(adapter), visibleText: result.text, toolCalls: result.toolCalls });
-        send({ t: "result", status: "completed", text: result.text, endKind: ending.endKind, visibleChars: ending.visibleChars, nudges });
+        const stopReason = await lastStopReason(adapter);
+        const ending = classifyTurnEnd({ stopReason, visibleText: result.text, toolCalls: result.toolCalls });
+        // The last answer was not looked at by the continuation (its bound was reached): a cut with no text still raises the limit, for the readmit that follows (W09 fixes).
+        if (!tailSeen && cutWithoutText(stopReason, result.text)) await onCut();
+        send({ t: "result", status: "completed", text: result.text, endKind: ending.endKind, visibleChars: ending.visibleChars, nudges, ...cutOf() });
       }
-      else if (result.status === "unanswered" && result.reason === "aborted") send({ t: "result", status: "cancelled", nudges });
-      else send({ t: "result", status: "failed", nudges, error: result.status === "unanswered" ? `the model did not answer (${result.reason}${"detail" in result && typeof result.detail === "string" ? `: ${safeText(result.detail, 500)}` : ""})` : `the turn ended as ${result.status}` });
+      else if (result.status === "unanswered" && result.reason === "aborted") send({ t: "result", status: "cancelled", nudges, ...cutOf() });
+      else send({ t: "result", status: "failed", nudges, ...cutOf(), error: result.status === "unanswered" ? `the model did not answer (${result.reason}${"detail" in result && typeof result.detail === "string" ? `: ${safeText(result.detail, 500)}` : ""})` : `the turn ended as ${result.status}` });
     } catch (error) {
       send({ t: "result", status: "failed", error: dog !== undefined && !dog.productive ? `lease lost (${dog.reason}): the turn was stopped` : safeText(error, 2000) });
     } finally { turnOpen = false; bridge?.declarations.closeRequest(requestIdText); if (dog !== undefined && !dog.productive) dog.quiet(); }

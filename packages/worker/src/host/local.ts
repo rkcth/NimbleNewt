@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ANCHOR_CHANNEL_MAX, CHANNEL_UPDATES, safeTail, safeText, endKindOf, findAnchors, verifyAnchor, type ThinkingReport, type BridgeReplyMessage, type ChannelContext, type ChannelModel, type HostEndKind, type JsonValue } from "@nimblenewt/contracts";
+import { ANCHOR_CHANNEL_MAX, CHANNEL_UPDATES, safeTail, safeText, endKindOf, findAnchors, verifyAnchor, type ThinkingReport, type BridgeReplyMessage, type ChannelContext, type ChannelModel, type HostEndKind, type JsonValue, type ReplyCut } from "@nimblenewt/contracts";
 import { attemptSandbox, type AttemptSandboxPlan } from "../sandbox/attempt.js";
 import type { SandboxLauncher } from "../sandbox/launcher.js";
 import type { LimitEnforcement, ResourceLimits } from "../sandbox/limits.js";
@@ -103,6 +103,8 @@ export interface HostTurnResult {
   readonly visibleChars?: number;
   /** Card W04: how many times the process continued the turn after it yielded without a tool call or work.end, when it said (any status). */
   readonly nudges?: number;
+  /** W09 fixes: the process's replies cut at the reply limit with no visible text, the limit now in force and its ceiling, when any was (any status). */
+  readonly replyCut?: ReplyCut;
 }
 export interface CacheFigures { readonly backend: string; readonly route: string; readonly cachedTokens: number; readonly computedTokens: number; readonly writtenTokens: number }
 
@@ -621,7 +623,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
           try { checkpoint = wrapCheckpoint(await process.checkpoint()); } catch { checkpoint = undefined; }
           // Only a completed turn has an ending to classify; a worker that says nothing (one from before W02) is read as unknown, never as normal.
           const endKind = result.status === "completed" ? endKindOf(result.endKind) : "unknown";
-          return { status: result.status, ...(result.text === undefined ? {} : { text: result.text }), ...(result.error === undefined ? {} : { error: result.error }), ...(checkpoint === undefined ? {} : { checkpoint }), usage: { turnSeq, ...(figures === undefined ? {} : { cache: figures }) }, endKind, ...(result.status === "completed" && result.visibleChars !== undefined ? { visibleChars: result.visibleChars } : {}), ...(result.nudges === undefined ? {} : { nudges: result.nudges }) };
+          return { status: result.status, ...(result.text === undefined ? {} : { text: result.text }), ...(result.error === undefined ? {} : { error: result.error }), ...(checkpoint === undefined ? {} : { checkpoint }), usage: { turnSeq, ...(figures === undefined ? {} : { cache: figures }) }, endKind, ...(result.status === "completed" && result.visibleChars !== undefined ? { visibleChars: result.visibleChars } : {}), ...(result.nudges === undefined ? {} : { nudges: result.nudges }), ...(result.replyCut === undefined ? {} : { replyCut: result.replyCut }) };
         },
         async checkpoint() {
           try { return wrapCheckpoint(await process.checkpoint()); } catch (error) {

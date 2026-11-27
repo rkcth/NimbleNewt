@@ -38,6 +38,11 @@ export interface ChannelModel {
   readonly modelId: string;
   readonly contextWindow: number;
   readonly maxTokens: number;
+  /**
+   * W09 fixes: the most one reply may be given after a reply was cut at `maxTokens` with no visible text (a reasoning model that spent the whole limit thinking). The process raises its reply limit step by step up to it. Absent, or
+   * equal to `maxTokens` (a route whose reply limit the owner set): the limit is never raised. At least `maxTokens`, at most `MAX_REPLY_CEILING`.
+   */
+  readonly replyCeiling?: number;
   readonly reasoning: boolean;
   readonly input: readonly ("text" | "image")[];
 }
@@ -162,7 +167,8 @@ export type FromChild =
   | { readonly t: "net.ack"; readonly id: number }
   /** `endKind` and `visibleChars` (card W02): how a completed turn ended and the length of its last reply's visible text (trimmed). A worker from before W02 sends neither: the host reads that as `unknown`. */
   /** `nudges` (card W04): how many times the process continued the turn after it yielded without a tool call or work.end; absent from a worker before W04. */
-  | { readonly t: "result"; readonly status: "completed" | "failed" | "cancelled"; readonly text?: string; readonly error?: string; readonly endKind?: TurnEndKind; readonly visibleChars?: number; readonly nudges?: number }
+  /** `replyCut` (W09 fixes): replies of this process cut at the reply limit with no visible text, the reply limit now in force and its ceiling; absent while none was cut. */
+  | { readonly t: "result"; readonly status: "completed" | "failed" | "cancelled"; readonly text?: string; readonly error?: string; readonly endKind?: TurnEndKind; readonly visibleChars?: number; readonly nudges?: number; readonly replyCut?: ReplyCut }
   /**
    * `contextTokens`: an estimate of the stored conversation, for the resume decision (card H12f). `durable` (card L04d): the process read the checkpoint back from its store and checked that the stored history up to it is what
    * the checkpoint describes; a process that did not check sends none, and the host reads that as not verified.
@@ -210,6 +216,7 @@ function parseStart(o: Obj): ChannelStart {
   const model: ChannelModel = {
     alias: /^[a-z0-9][a-z0-9-]{0,40}$/.test(str(m, "alias", 41)) ? (m["alias"] as string) : fail("model.alias: a short lower-case name"),
     provider: str(m, "provider", 80), api: str(m, "api", 80), modelId: str(m, "modelId", 200), contextWindow: int(m, "contextWindow"), maxTokens: int(m, "maxTokens"),
+    ...(m["replyCeiling"] === undefined ? {} : { replyCeiling: bounded(m, "replyCeiling", int(m, "maxTokens"), MAX_REPLY_CEILING)! }),
     reasoning: typeof m["reasoning"] === "boolean" ? m["reasoning"] : fail("model.reasoning: must be true or false"),
     input: Array.isArray(m["input"]) && m["input"].every((x) => x === "text" || x === "image") ? (m["input"] as ("text" | "image")[]) : fail("model.input: must list text and image"),
   };
@@ -281,6 +288,20 @@ function reply(o: Obj): BridgeReplyMessage {
 
 /** The most continuations one turn can report (card W04): the worker's own bound is far lower; a figure above this is a broken process, not a count. */
 export const MAX_TURN_NUDGES = 100;
+/** W09 fixes: the largest reply ceiling a host may give (`ChannelModel.replyCeiling`). */
+export const MAX_REPLY_CEILING = 1_000_000;
+/** W09 fixes: how a process's replies were cut at the reply limit with no visible text. `cuts` is bounded by `MAX_REPLY_CUTS`. */
+export interface ReplyCut { readonly cuts: number; readonly limit: number; readonly ceiling: number }
+export const MAX_REPLY_CUTS = 1000;
+/** A reply-cut record when `value` is one (exact keys, whole numbers, the limit within the ceiling); otherwise undefined. */
+export function replyCutOf(value: unknown): ReplyCut | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const v = value as Record<string, unknown>;
+  if (Object.keys(v).sort().join(",") !== "ceiling,cuts,limit") return undefined;
+  const ok = (n: unknown, max: number): n is number => Number.isSafeInteger(n) && (n as number) >= 0 && (n as number) <= max;
+  if (!ok(v["cuts"], MAX_REPLY_CUTS) || !ok(v["ceiling"], MAX_REPLY_CEILING) || !ok(v["limit"], v["ceiling"] as number) || (v["limit"] as number) < 1) return undefined;
+  return { cuts: v["cuts"] as number, limit: v["limit"] as number, ceiling: v["ceiling"] as number };
+}
 
 /** Checks a line the host read from the process. */
 export function parseFromChild(value: unknown): FromChild {
@@ -314,7 +335,8 @@ export function parseFromChild(value: unknown): FromChild {
       const kind = value["endKind"] === undefined ? undefined : endKindOf(optStr(value, "endKind", 60));
       const visibleChars = value["visibleChars"] === undefined ? undefined : int(value, "visibleChars");
       const nudges = value["nudges"] === undefined ? undefined : bounded(value, "nudges", 0, MAX_TURN_NUDGES);
-      return { t: "result", status, ...(text === undefined ? {} : { text }), ...(error === undefined ? {} : { error }), ...(kind === undefined || kind === "unknown" ? {} : { endKind: kind }), ...(visibleChars === undefined ? {} : { visibleChars }), ...(nudges === undefined ? {} : { nudges }) };
+      const replyCut = value["replyCut"] === undefined ? undefined : replyCutOf(value["replyCut"]) ?? fail("replyCut: { cuts, limit, ceiling } whole numbers, limit at most ceiling");
+      return { t: "result", status, ...(text === undefined ? {} : { text }), ...(error === undefined ? {} : { error }), ...(kind === undefined || kind === "unknown" ? {} : { endKind: kind }), ...(visibleChars === undefined ? {} : { visibleChars }), ...(nudges === undefined ? {} : { nudges }), ...(replyCut === undefined ? {} : { replyCut }) };
     }
     case "checkpoint.ok": {
       const contextTokens = value["contextTokens"] === undefined ? undefined : int(value, "contextTokens");

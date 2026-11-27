@@ -181,7 +181,10 @@ export function localHostBuilder(setup) {
                 const route = String(order.route);
                 const slash = route.indexOf("/");
                 const entry = (await ctx.controller().services.routing.get())?.routes?.[route];
-                return { alias: "m0", provider: route.slice(0, slash), api: "openai-completions", modelId: route.slice(slash + 1), contextWindow: entry?.contextTokens ?? controller.DEFAULT_CONTEXT_TOKENS, maxTokens: entry?.maxTokens ?? controller.DEFAULT_REPLY_TOKENS, reasoning: false, input: ["text"] };
+                const contextWindow = entry?.contextTokens ?? controller.DEFAULT_CONTEXT_TOKENS;
+                const maxTokens = entry?.maxTokens ?? controller.DEFAULT_REPLY_TOKENS;
+                // W09 fixes: how far the reply limit may grow after replies cut with no visible text (the owner's own reply limit, when the route has one, is the ceiling: it never grows).
+                return { alias: "m0", provider: route.slice(0, slash), api: "openai-completions", modelId: route.slice(slash + 1), contextWindow, maxTokens, replyCeiling: Math.max(maxTokens, controller.replyCeilingFor({ contextTokens: contextWindow, ...(entry?.maxTokens === undefined ? {} : { maxTokens: entry.maxTokens }) })), reasoning: false, input: ["text"] };
               },
               namespaceId: (order) => services.namespaceId(order),
               bridge: (order, call, token, request) => {

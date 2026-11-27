@@ -4,6 +4,7 @@ export { connectPublic, resolvePublic, type NameResolver, type Pinned } from "./
 export type { RecipeSummary, ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, WorkerTurnResult, TurnUsage, WorkOrder, WorkerHandle, WorkerHost, HostLocalWork, WorkProgress, DoneCheckRequest, DoneCheckReport, DoneCheckRun, HostSubmitView, HostStagedWork, ContextUpdate, CheckoutToolRequest, CheckoutToolReport } from "./ports.js";
 export { CONTEXT_UPDATE_LIMITS } from "./ports.js";
 export { TURN_END_KINDS, turnEndKindOf, type TurnEndKind } from "./ports.js";
+export { replyCutOf, type ReplyCut } from "./ports.js";
 export { DRIVER_LIMITS, DispatchDriver, realTimer, type DriverError, type DriverOptions, type DriverStatus, type TimerPort } from "./driver.js";
 export { type RouteProbes } from "./loops.js";
 export { activeAgents, assignedTaskIn, attendanceLoops, budgetNoticeLoops, decisionLoops, eventLoops, watchLoops, wakeLoops, attemptWaker, recordLoops, responsibilityLoops, responsibilityRunLoops, leaseExpiryLoops, type ExpiredLeaseLike, type WaitingLeaseLike, liveProjectIds, coverageGapLoops, sourceGapHook, type ProviderHealthLike, coverageLoops, type CoverageNoticeLike, archiveLoops, probeLoops, grantLapseLoops, lapseNotice, sourceLoops, improvementOutcomeLoops, lessonOutcomeLoops, untoldImprovementLoops, meetingLoops, messageLoops, projectIds, recoveryLoops, reviewLoops, standupLoops, workspaceLoops, wakeAttendLoops } from "./loops.js";

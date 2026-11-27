@@ -237,6 +237,23 @@ for (const backend of backends) {
     assert.deepEqual({ tokens: v.tokens, calls: v.calls }, { tokens: 6 * 10 + 15, calls: 6 }, "every call counted once; a repeated key adds nothing");
   });
 
+  // Second review of the W09 fixes: a figure that is not a count never lowers the day's count, and one past the safe range reaches the cap instead of being dropped.
+  suite("a count that is negative, NaN or not a number adds nothing; a huge or infinite count is kept at the largest safe integer and reaches the cap, and the day's total stays exact", async (w, _script, spend) => {
+    await spend.record(100, "edge-base");
+    for (const [i, bad] of [-5, Number.NaN, "50" as unknown as number, -Infinity].entries()) await spend.record(bad, `edge-bad-${i}`);
+    assert.deepEqual(await spend.used(), 100, "nothing added, nothing taken away");
+    // Late-change re-check: a fraction counts its whole tokens only, so the day's total stays a whole number.
+    await spend.record(2.7, "edge-fraction");
+    assert.equal(await spend.used(), 102);
+    await spend.record(Number.MAX_SAFE_INTEGER * 4, "edge-huge");
+    assert.equal(await spend.used(), Number.MAX_SAFE_INTEGER, "saturated, not dropped and not past the safe range");
+    await spend.record(Infinity, "edge-inf");
+    await spend.record(7, "edge-after");
+    assert.equal(await spend.used(), Number.MAX_SAFE_INTEGER);
+    assert.ok(Number.isSafeInteger(await spend.used()));
+    assert.equal((await spend.allow()).allowed, true, "no cap set: still allowed");
+  });
+
   suite("an agent cannot read the cap by chat status or set it: the status view is the owner's alone", async (w, _script, _spend, status) => {
     const ann = await w.agent("ann", [{ action: "*", project: "*" }]);
     assert.equal(await status.ask(ann.principal, { kind: "chat_budget" }), undefined);

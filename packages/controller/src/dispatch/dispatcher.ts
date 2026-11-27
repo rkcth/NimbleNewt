@@ -46,7 +46,8 @@ import { ToolPath, type Loaded } from "./tools.js";
 import { askingMessage, earlierReportNote, isNoteKind, keptText, qaOf, unansweredMessage, unsupportedMessage, type InterrogationInput, type InterrogatorAnswer, type ReportInterrogatorPort, type ReportVerdict } from "./report.js";
 import { sealContract } from "../remote/contract.js";
 import { boundContextUpdates } from "./context-updates.js";
-import { StartRefused, turnEndKindOf, type ContextUpdate, type HostProbe, type RecipeSummary, type ToolGateway, type WorkerTurnResult, type TurnUsage, type WorkOrder, type WorkerHandle, type WorkerHost, type HostLocalWork, type TurnEndKind, type WorkProgress, type DoneCheckReport, type DoneCheckRequest, type HostSubmitView, type HostStagedWork, type CheckoutToolReport, type CheckoutToolRequest } from "./ports.js";
+import { notRunCause } from "./not-run-cause.js";
+import { StartRefused, replyCutOf, turnEndKindOf, type ContextUpdate, type HostProbe, type RecipeSummary, type ToolGateway, type WorkerTurnResult, type TurnUsage, type WorkOrder, type WorkerHandle, type WorkerHost, type HostLocalWork, type TurnEndKind, type WorkProgress, type DoneCheckReport, type DoneCheckRequest, type HostSubmitView, type HostStagedWork, type CheckoutToolReport, type CheckoutToolRequest } from "./ports.js";
 import { chooseHost, type HostVerdict } from "../hosts/candidates.js";
 import { routeCostWords, UNREADABLE } from "./route-cost.js";
 import { JOB_WAKE_KIND, JOB_WAKE_LIMITS, JOB_WAKE_NOTE_KIND, JOB_WAKES_INDEX, dueRemoved, stateWords, wakeNote, type JobWakeBody, type JobWakesIndex } from "../jobs/wakes.js";
@@ -1405,6 +1406,8 @@ export class DispatcherService {
     const reason = answer?.verdict === "unsupported" ? keptText(answer.reason, WORK_REPORT_LIMITS.reason) || "it gave no reason" : answer?.verdict === "questions" ? (questions.length === 0 ? "it asked no question it could state" : "it still had questions after the last round") : undefined;
     const at = this.#runner.now();
     const route = answer?.route === undefined ? undefined : clip(String(answer.route), 120);
+    // W09 fixes: a questioning that did not run names its cause, read from the (redacted, bounded) why.
+    const cause = state === "not-run" ? notRunCause(why) : undefined;
     let used = 0;
     let lost = false;
     const written = await this.#update(attemptId, (x) => {
@@ -1417,8 +1420,8 @@ export class DispatcherService {
       const newRound: InterrogationRound[] = questions.length === 0 ? [] : [{ key: request.key, questions, at, ...(route === undefined ? {} : { route }) }];
       if (state === "asking") return { ...x, ...interrogated, interrogation: { state, rounds: [...(base?.rounds ?? []), ...newRound], at } };
       const exhausted = state === "unsupported" && used >= STOPPED_EARLY_READMITS;
-      const closed: Interrogation = { state, rounds: [...(base?.rounds ?? []), ...newRound], at, verdictKey: request.key, ...(reason === undefined ? {} : { reason }), ...(why === undefined ? {} : { why }), ...(route === undefined ? {} : { route }), ...(state === "unsupported" ? { counted: true, exhausted, goOn: used + 1 } : {}) };
-      const report: AttemptReport | undefined = state !== "unsupported" || exhausted ? { key: request.key, result: state === "unsupported" ? "blocked" : "done", text, at, questioning: state === "unsupported" ? "unsupported" : state, qa: qaOf(closed.rounds), ...(reason === undefined ? {} : { reason }), ...(why === undefined ? {} : { why }) } : undefined;
+      const closed: Interrogation = { state, rounds: [...(base?.rounds ?? []), ...newRound], at, verdictKey: request.key, ...(reason === undefined ? {} : { reason }), ...(why === undefined ? {} : { why }), ...(cause === undefined ? {} : { cause }), ...(route === undefined ? {} : { route }), ...(state === "unsupported" ? { counted: true, exhausted, goOn: used + 1 } : {}) };
+      const report: AttemptReport | undefined = state !== "unsupported" || exhausted ? { key: request.key, result: state === "unsupported" ? "blocked" : "done", text, at, questioning: state === "unsupported" ? "unsupported" : state, qa: qaOf(closed.rounds), ...(reason === undefined ? {} : { reason }), ...(why === undefined ? {} : { why }), ...(cause === undefined ? {} : { cause }) } : undefined;
       return { ...x, ...interrogated, interrogation: closed, ...(report === undefined ? {} : { report }) };
     }, async (x) => {
       // Another process answered this call meanwhile: its answer stands and nothing is counted again.
@@ -1445,7 +1448,7 @@ export class DispatcherService {
     const progress = await this.#progressOf(b);
     return {
       taskId: b.taskId, attemptId: b.attemptId,
-      task: { title: task?.title ?? b.taskId, ...(c?.expectedResult === undefined ? {} : { expectedResult: c.expectedResult }), acceptanceCriteria: c?.acceptanceCriteria ?? [], requiredEvidence: c?.requiredEvidence ?? [], checks: (c?.checks ?? []).map((x) => x.name) },
+      task: { title: task?.title ?? b.taskId, ...(typeof task?.description === "string" && task.description !== "" ? { description: task.description } : {}), ...(c?.expectedResult === undefined ? {} : { expectedResult: c.expectedResult }), acceptanceCriteria: c?.acceptanceCriteria ?? [], requiredEvidence: c?.requiredEvidence ?? [], checks: (c?.checks ?? []).map((x) => x.name) },
       report, notes: b.notes ?? [], evidence: { verified, plan: progress.plan, diff: progress.diff },
       rounds: rounds.map((r) => ({ questions: r.questions, ...(r.answers === undefined ? {} : { answers: r.answers }) })),
       ...(earlier === undefined ? {} : { earlier }), round, maxRounds: WORK_REPORT_LIMITS.rounds,
@@ -3115,7 +3118,9 @@ export class DispatcherService {
         const nudges = Number.isSafeInteger(result.nudges) && result.nudges! >= 0 && result.nudges! <= MAX_RECORDED_NUDGES ? result.nudges : undefined;
         // Card W08: how far the plan got when a completed turn ended (the steps checked, of how many), as the host reports it; what it cannot say is left out, never guessed.
         // The turn's ending is held before the host is asked (up to 10 s): a stop that ends the attempt meanwhile records it; the plan joins it only while it is still held.
-        const held: NonNullable<DispatchBody["turnEnd"]> = { endKind: turnEndKindOf(result.endKind), ...(visibleChars === undefined ? {} : { visibleChars }), at: this.#runner.now(), ...(nudges === undefined ? {} : { nudges }) };
+        // W09 fixes: how the worker's replies were cut with no visible text (the reply limit it raised to), on the same record; a malformed figure is left out.
+        const replyCut = replyCutOf(result.replyCut);
+        const held: NonNullable<DispatchBody["turnEnd"]> = { endKind: turnEndKindOf(result.endKind), ...(visibleChars === undefined ? {} : { visibleChars }), at: this.#runner.now(), ...(nudges === undefined ? {} : { nudges }), ...(replyCut === undefined ? {} : { replyCut }) };
         this.#turnEnds.set(attemptId, held);
         mine = held;
         const progress = result.status === "completed" ? await this.#progressOf(d.body, true) : undefined;
