@@ -253,6 +253,8 @@ test("more running attempts of the fenced controller than are listed: the rest a
   assert.match((await gate.adoptReason({ attemptId: ids.at(-1)!, primaryEpoch: old }))!, /beyond the attempts the hold lists; it is not taken over/);
   assert.match((await gate.adoptReason({ attemptId: ids.at(-2)! }))!, /beyond the attempts the hold lists/, "an attempt without an epoch beyond the list is held back too");
   assert.equal(await gate.adoptReason({ attemptId: ids[0]!, primaryEpoch: old }), undefined, "a listed attempt without a stored result is taken over as before");
+  assert.equal(await gate.adoptReason({ attemptId: ids[WORKERS_HOLD_LIMITS.attempts - 1]!, primaryEpoch: old }), undefined, "the last listed attempt is taken over as before");
+  assert.match((await gate.adoptReason({ attemptId: ids[WORKERS_HOLD_LIMITS.attempts]!, primaryEpoch: old }))!, /beyond the attempts the hold lists/, "the first attempt beyond the list is held back");
   assert.equal(await gate.adoptReason({ attemptId: "att-new", primaryEpoch: succ }), undefined);
   assert.match(text(h), /200\+ attempts of the fenced controller were running/);
   // every listed attempt ends; the two beyond the list still run
@@ -267,6 +269,25 @@ test("more running attempts of the fenced controller than are listed: the rest a
   await put(s, succ, dispatchRef(ids.at(-2)!), { ...running(ids.at(-2)!, "local", old), state: "finished" });
   r = (await gate.review())!;
   assert.equal(r.state, "released");
+});
+
+test("exactly as many running attempts of the fenced controller as are listed: the list is not cut, and none is held back from takeover for being beyond it", async () => {
+  const s = new MemoryStorage();
+  clock = T0;
+  const old = (await s.acquireEpoch({ holder: "ctl-a", at: T0 })).epoch;
+  const ids = Array.from({ length: WORKERS_HOLD_LIMITS.attempts }, (_, i) => `att-${String(i).padStart(4, "0")}`);
+  await put(s, old, DISPATCH_LIVE, { ids });
+  for (const id of ids) await put(s, old, dispatchRef(id), running(id, "local", old));
+  const fence = (await s.acquireEpoch({ holder: fenceHolder("p1", old, "ctl-a"), at: T0, expectedEpoch: old })).epoch;
+  await put(s, fence, CONTROLLER_AUTHORITY, promoted("p1", old, fence));
+  const succ = (await s.acquireEpoch({ holder: "ctl-b", at: T0, expectedEpoch: fence })).epoch;
+  const h = await beginWorkersHold(s, succ, now) as WorkersHold;
+  assert.deepEqual([h.attempts.length, h.truncated], [WORKERS_HOLD_LIMITS.attempts, false]);
+  const gate = workersHoldGate(s, succ, h, now);
+  for (const id of [ids[0]!, ids.at(-1)!]) assert.equal(await gate.adoptReason({ attemptId: id, primaryEpoch: old }), undefined, id);
+  // an old attempt the list does not name, with the list not cut, is judged by its placement only (no stored result here)
+  assert.equal(await gate.adoptReason({ attemptId: "att-unlisted", primaryEpoch: old }), undefined);
+  assert.equal(await gate.heldForReaccept("att-unlisted"), false);
 });
 
 test("an attempt put back to wait is reconciled only once no live placement of it is left (a waiting local attempt at once)", async () => {
