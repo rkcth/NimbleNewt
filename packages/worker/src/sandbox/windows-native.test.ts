@@ -2477,6 +2477,23 @@ describe("A03b sign-out / restart: run-g05.ps1 -Hold and -AfterSignIn (simulated
     const r = await check(host);
     assert.ok(!("error" in r) && r.afterSignOut.taskRunningAfter === false && r.afterSignOut.interruptedRecorded, JSON.stringify(r));
   });
+  test("a launcher check answer that leaves out a granted path is not read as clean (the path counts as left)", async () => {
+    const host = new PkgHost();
+    await hold(host);
+    signOut(host);
+    const base = host.run.bind(host);
+    host.run = async (file, args, options) => {
+      const r = await base(file, args, options);
+      if (args[0] !== "check") return r;
+      const lines = r.stdout.trimEnd().split("\n");
+      const o = JSON.parse(lines.at(-1)!) as { grants: unknown[] };
+      o.grants = o.grants.slice(1);
+      return { ...r, stdout: `${[...lines.slice(0, -1), JSON.stringify(o)].join("\n")}\n` };
+    };
+    const r = await check(host);
+    assert.ok(!("error" in r) && r.afterSignOut.grantsAfter === "left", JSON.stringify(r));
+    assert.ok(afterSignOutProblems(r.afterSignOut).some((p) => /still on a granted path/.test(p)));
+  });
   test("not signed out yet: the task still runs, nothing is swept or revoked, the state stays for the next try, and the check does not hold", async () => {
     const host = new PkgHost();
     await hold(host);

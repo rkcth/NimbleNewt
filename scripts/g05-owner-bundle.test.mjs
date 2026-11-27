@@ -454,7 +454,7 @@ test("sign-out check, -AfterSignIn: refused without a hold; the logon compared b
   const a = code.slice(at("if ($AfterSignIn) {"), at("$rng = New-Object System.Security.Cryptography.RNGCryptoServiceProvider"));
   assert.match(a, /if \(-not \[System\.IO\.File\]::Exists\(\$holdState\)\) \{\n\s+Write-Host 'REFUSED: no hold is recorded[^\n]*\n\s+exit 2\n\s+\}/);
   assert.ok(a.includes("$newLogon = 'unknown'") && a.includes("if ($before -and $nowHash) { if ($before -ceq $nowHash) { $newLogon = 'no' } else { $newLogon = 'yes' } }"));
-  assert.ok(a.indexOf("[System.IO.File]::Delete($holdResult)") < a.indexOf("'after-sign-in', '--new-logon', $newLogon"), "an older result never stands for this check");
+  assert.ok(a.indexOf("[System.IO.File]::Delete($holdResult)") >= 0 && a.indexOf("[System.IO.File]::Delete($holdResult)") < a.indexOf("'after-sign-in', '--new-logon', $newLogon"), "an older result never stands for this check");
   assert.match(a, /\$afterCode = Invoke-Captured \$node @\('--import', '\.\/scripts\/offline-guard\.mjs', 'scripts\\containment-evidence\.mjs', 'after-sign-in', '--new-logon', \$newLogon\) [^\n]* \$null 10\n/);
   assert.match(a, /if \(\$afterCode -eq 3\) \{\n\s+Write-Host "REFUSED: the held task is still running[^\n]*\n\s+exit 1\n\s+\}/);
   const passOn = a.indexOf("if ([System.IO.File]::Exists($holdResult)) { $afterSignOutArgs = @('--after-sign-out', $holdResult) }");
