@@ -15,12 +15,15 @@ const skip = hasGit ? false : "git is not installed";
 const sh = (cwd: string, ...args: string[]): string => execFileSync("git", ["-c", "core.hooksPath=/nonexistent-hooks", "-c", "core.autocrlf=false", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8" }).trim();
 // CI fix 2026-11-27: a record that is there but cannot be read, on every platform. chmod 0o000 only sets the read-only attribute on Windows: the file stays readable (so the damaged branch was never reached)
 // and a replace of it is refused (EPERM). There an access entry denies this user reading the file's data instead; its attributes can still be read and it can still be replaced, as with chmod on POSIX. Answers the undo.
+// CI fix 2026-11-27 (second): the Windows tools are named by their full System32 path, as the product names its own. By bare name, the CI job's bash step had Git for Windows' `usr\bin` first on PATH, so
+// `whoami` was GNU coreutils' ("whoami: extra operand '/user'") and this test failed on every Windows job that reached it.
+const system32 = (exe: string): string => `${process.env["SystemRoot"] ?? "C:\\Windows"}\\System32\\${exe}`;
 async function unreadable(file: string): Promise<() => Promise<void>> {
   if (process.platform !== "win32") { await chmod(file, 0o000); return async () => { await chmod(file, 0o600); }; }
-  const sid = /"(S-1-[0-9-]+)"\s*$/.exec(execFileSync("whoami", ["/user", "/fo", "csv", "/nh"], { encoding: "utf8" }).trim())?.[1];
+  const sid = /"(S-1-[0-9-]+)"\s*$/.exec(execFileSync(system32("whoami.exe"), ["/user", "/fo", "csv", "/nh"], { encoding: "utf8" }).trim())?.[1];
   assert.ok(sid !== undefined, "the current user's SID is known");
-  execFileSync("icacls", [file, "/deny", `*${sid}:(RD)`], { stdio: "ignore" });
-  return async () => { execFileSync("icacls", [file, "/remove:d", `*${sid}`], { stdio: "ignore" }); };
+  execFileSync(system32("icacls.exe"), [file, "/deny", `*${sid}:(RD)`], { stdio: "ignore" });
+  return async () => { execFileSync(system32("icacls.exe"), [file, "/remove:d", `*${sid}`], { stdio: "ignore" }); };
 }
 let counter = 0;
 const rid = (): string => { const n = counter++; return `wsr-pqqqqqqqqqqqqqqq${"abcdefghijklmnopqrstuvwxyz"[Math.floor(n / 26) % 26]}${"abcdefghijklmnopqrstuvwxyz"[n % 26]}aa`; };
