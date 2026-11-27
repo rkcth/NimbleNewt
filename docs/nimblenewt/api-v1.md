@@ -6534,6 +6534,16 @@ Result: `{ taskId, branch, removed?, reservationEnded?, replayed }`; `removed` i
 
 Completion: finished when accepted (`completed: true`).
 
+#### `integrator.pool.next`
+
+For an integrator agent that holds no live integrator lease: takes the lease of the landing branch, among the projects where it has the right `integration.lease`, whose first queued approved work has waited longest (card P10b). `outcome` is `taken` (the project, branch, the queue's first task and submission, and the lease to land with), `holding` (you already hold a lease: that one, and nothing more is taken; a repeat of the request answers this way) or `none` with the reason and counts: branches held by another integrator, reserved first places still waiting for work, projects whose landing settings could not be read, and `partial` when not every queue was looked at. Agents only; not with a task credential.
+
+Arguments:
+
+- `ttlMs`: how long the lease is held before it must be renewed, in milliseconds (60000 to 86400000)
+
+Result: `{ outcome: "taken", projectId, branch, taskId, submissionId, waitingSince, lease }`, `{ outcome: "holding", projectId, branch, lease, holding, reason }` or `{ outcome: "none", reason, heldByOthers, awaitingWork, unreadable, partial }`
+
 #### `budget.request-more`
 
 A task asks for more budget. It goes to the holder of the parent node, or to the owner, who is told.

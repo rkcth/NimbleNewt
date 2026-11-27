@@ -21452,3 +21452,55 @@ Plain words first. Until now a run of an experiment said which environment it us
 - Tests added (each closes a gap a breakage showed). Someone without rights who names another agent's revision, a missing one, or a broken one of its own is told `forbidden`. Revision 500 and 20 observed extensions are accepted shapes. A service, host or client principal gets `not_found`. The `field` of a refusal is checked: `environment` from verify, and `observed` from A08's activate. `unavailable` comes before rights. For a run the owner reported, the status view names the environment's agent.
 - 20 deliberate breakages (built `dist`, each alone, restored and checked by SHA-256), all different from the earlier 37. 10 were caught at first and 18 once the tests were added. Caught at first: the not-found text differing for a missing revision; revision 0 accepted; verify's refusal code changed; only the first problem named; observed left out of the payload; the environment words naming the reporter; the status view showing the experiment's revision; the old environment words dropped; verify sent no observed; A08's refusal text changed. Caught once the tests were added: the bound at 500; the bound at 20; verify's field; activate's field; verify before the rights check; `unavailable` only inside the command; the status view naming the reporter; a service principal allowed. Not caught: the manifest-digest problem listed last instead of first (wording order), and dropping the stored revision's agentId/revision cross-check (defensive; storage keys make it unreachable).
 - Residual (accepted; ASSUMPTION already recorded): skills are judged for the reporter. If the owner puts a skill the agent may not use into the agent's manifest, the agent's own runs are refused (fail-closed).
+
+## P10b first slice: free integrators take the next project with queued work (Claude agent, Opus 5.5, 2026-11-27 EST; branch `card-p10b` from main 32695e4d; card P10b NOT flipped and stays planned; task-plan files unchanged; not pushed; no workflow dispatched; no model or network call made)
+
+Blockers P10, H03, A10b and R05 are all implemented, so the coordinator's build-ahead rule was not needed. Before this slice P10b had nothing on main. `landing/lease-p10b.test.ts` is P10's second slice, and branch `card20-p10b` was unrelated PostgreSQL work.
+
+**Slice boundary: the card's first clause only.** It covers "Free integrators take the next project with queued work".
+- `IntegratorPool.next` (`landing/integrator-pool.ts`) is a new agent-only command, `integrator.pool.next { ttlMs }`. It is in the state API and `api-v1.md`.
+- An integrator agent is *free* while it holds no live integrator lease on any project where it still has the right `integration.lease`. A hold on a project where the right was taken away does not count: P10 refuses that landing anyway, and the hold runs out by itself.
+- A free integrator asks the pool. The pool reads every landing queue that holds entries (`queuesWithEntries`) and keeps only the queues of projects where the caller has the exact right `integration.lease`. A grant for every project (`*`) serves every project. Projects without the right are neither looked at nor counted.
+- The queues are ordered by how long their first place has waited: the queue's `front.since`. If the front mark names another task, or is missing, the first entry's `queuedAt` is used. An unreadable time sorts last. Ties go by project ID, then branch.
+- For the first usable queue, the pool takes that landing branch's lease through `IntegratorLeaseOps.acquire`, so P10's rules hold unchanged: only the landing branch the policy names, one holder per branch, and a retired holder's hold ended first. The lease is worked under the queue's first task.
+- The answer is one of:
+  - `taken`: project, branch, the first task, its submission, `waitingSince` and the lease.
+  - `holding`: the caller already holds a lease, so nothing more is taken. One project at a time, and a repeat of the same command ID answers this way.
+  - `none`: a reason plus counts the caller may know: `heldByOthers`, `awaitingWork` (a reserved first place without approved work), `unreadable` (landing settings unreadable, or a queue record whose first task is not in the queue's project) and `partial`.
+- `IntegratorLeaseService.heldBy(holder)` is new: a bounded scan (50 pages of 200) of the caller's live leases, oldest first, with `partial`.
+
+**Fail closed and bounded.**
+- An incomplete read of the caller's own holds is refused with `unavailable`, and nothing is taken.
+- An incomplete queue walk, or hitting a limit, is reported as `partial`.
+- Each request reads at most 100 landing policies (`POOL_LIMITS.policyReads`) and tries at most 10 leases (`POOL_LIMITS.tries`).
+- The owner is refused with `forbidden` (the owner uses `integrator.lease.acquire` with `holder`). So are task credentials, at both the operation and the service, and non-agents.
+- Unknown arguments, a bad `ttlMs` and a bad command ID are refused with `invalid_command`.
+- A lost race (`unavailable`) moves on to the next queue. `forbidden` and `not_found` skip the queue. Any other error is thrown.
+- A lease answer that is not the caller's live hold of that exact project and branch is not counted as taken. This covers a replayed command, or a door answering for another project.
+- A queue record whose first task belongs to another project is passed over before any lease is asked for. Found by the first test run: without this check, the answer named the record's project while the lease door took the task's own project.
+
+**Owner controls and chat.** No new owner control and no interpreter prompt text; the chat sources are unchanged (prompt still 156,553 of 156,560). The new command is agent-only (like `integrator.lease.renew`, which has no chat entry). The composed test asserts it is not in `CHAT_OPS`. The owner keeps P10's existing controls: taking a lease for a named agent and ending a lease by chat.
+
+**ASSUMPTION lines (smallest reversible product choices).**
+- ASSUMPTION: an integrator serves one project at a time. A pool request while it holds a lease answers that hold instead of taking a second.
+- ASSUMPTION: "next project" means the landing queue whose first place has waited longest. Priority between projects is not invented here; later slices can add weights.
+- ASSUMPTION: the pool lease is held under the queue's first task. P10 requires a task of the project. That task's hand-off does not move the lease, because the hand-off moves only the sender's own holds.
+- ASSUMPTION: a reserved first place without approved work is not landable, so the pool passes over that queue and counts it in `awaitingWork`.
+
+**Tests.**
+- `landing/integrator-pool-p10b.test.ts`: 5 tests on each of the four backends (reference, SQLite, SQLite on a worker thread, PostgreSQL), 20 in all. Covers order across three projects, one project at a time, repeats, release and expiry freeing a branch, rights scoping and counts, all refusals, passing over with reasons, a retired holder's branch, a race of five integrators over three projects on separate doors, bounds, partial reads, hostile records, and the pool's own checks before and after the lease door.
+- `api/start-p10b-pool.test.ts`: the composed controller. Approvals in two projects are queued by the controller itself, integrators take through the state API, and the refusals are checked.
+- 22 deliberate breakages, each applied alone to `integrator-pool.ts` or `integrator-lease.ts`, rebuilt, run, then restored and checked by sha256 (script `/tmp/claude-1000/p10b/breakages.py`).
+  - First run: 20 caught, one of them by tsc.
+  - Not caught at first: dropping the pool's own off-branch skip (the lease door refused for it) and dropping the post-check of the lease's project and branch (the pre-check made it unreachable). Both are caught by the two tests added afterwards, so 22 of 22.
+
+**Limits stated (follow-ups, not hidden).**
+- The free check is a read before the take, not part of the lease write. The same agent asking twice at the very same moment can end with two holds (never the same branch twice). The race test states this.
+- The pool does not renew or release for the agent.
+- Queue records past the 10,000-record scan are not seen (`partial`).
+
+**What remains of P10b, in the card's order.**
+1. "Another is woken through admission and budget, with reserved capacity". The controller should wake a free integrator when a landing branch has queued work and no live lease: through H03 admission, with a place reserved for landing like inquiries and reviews, and through an R05 budget reservation.
+2. "Credentials and context are fresh per project (no data crosses between projects, test)". At a pool take: issue the A10b task credential for the project's task, start a fresh harness context per project, and test that nothing crosses between projects.
+3. "A full queue of author attempts does not starve landing". The admission reservation from item 1, with a saturation test.
+4. "When no capacity is left, work waits with a visible reason". The pool's `none` reason covers the integrator's side. The owner still needs a reason shown in the status view, read-only so that no chat text is needed.
