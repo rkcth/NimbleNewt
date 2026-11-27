@@ -77,6 +77,34 @@ export interface RecoveryPending { readonly action: RecoveryAction; readonly run
 
 export interface RecoveryStep { readonly n: number; readonly action: RecoveryAction; readonly by: string; readonly at: string; readonly level: number | "owner"; readonly text?: string; readonly to?: string; readonly warnings?: readonly string[]; /** The rung was passed, not taken (the actor could not take it, or the service refused it on a precondition); `reason` says why. */ readonly skipped?: boolean; readonly reason?: string; /** The caller's (scoped) command ID, so a repeat is answered as recorded. */ readonly cmd?: string; /** Taken by the controller's automatic stepping (the owner's `autoStep` setting) because `by`, the holder, had not answered in time; `by`'s own rights applied. */ readonly auto?: true }
 
+/** What `onConcern` is told (card B02, second slice). */
+export interface ConcernEvent {
+  readonly stage: "confirmed" | "recovered";
+  readonly concernId: string;
+  /** The concern's `reopened` count at that moment: which episode of the concern this is. */
+  readonly episode: number;
+  readonly taskId: string;
+  readonly projectId: string;
+  readonly kind: StallKind;
+  /** Confirmed: who decided. */
+  readonly by?: string;
+  /** Confirmed: the decider's reason; recovered: why the concern cleared. */
+  readonly reason: string;
+  /** The recovery steps actually taken in this episode (not those passed), oldest first. */
+  readonly steps: readonly RecoveryAction[];
+}
+
+/**
+ * Whether a concern's clearing is a recovery worth telling: the signals recovered (or, for a confirmed failure, the task was finished) after a failure was confirmed or a recovery step was actually
+ * taken. A concern that was only suspected and cleared by itself, or cleared because the task waits, is paused, stopped running, was cancelled or moved to another owner, is not.
+ */
+const recoveryOf = (before: ConcernBody, clearedBecause: string): boolean => {
+  const taken = (before.recoverySteps ?? []).some((st) => st.skipped !== true);
+  if (before.state === "confirmed") return clearedBecause === "archived: the task is done";
+  return before.state === "suspected" && taken && clearedBecause === "the signals recovered";
+};
+const stepsOf = (c: ConcernBody): RecoveryAction[] => (c.recoverySteps ?? []).filter((st) => st.skipped !== true).map((st) => st.action);
+
 export interface EscalationStep { readonly level: number; readonly to: string; readonly at: string; readonly skipped?: readonly { readonly id: string; readonly reason: string }[] }
 const TRAIL_KEEP = 20;
 const SKIPPED_KEEP = 10;
@@ -123,6 +151,12 @@ export interface StallOptions extends RunnerOptions {
   /** Told of something the log should keep (a recovery step whose effect was made but could not be marked done, an abandoned step that may have been made). */
   readonly onNote?: (message: string) => void;
   readonly ladderDamaged?: (notice: { id: string; detail: string }) => Promise<void>;
+  /**
+   * Told after a concern is confirmed as a failure, and after one clears because its task got better following a confirmed failure or a recovery step actually taken (card B02, second slice), so the
+   * controller can keep it as an observation. Best effort: called after the concern's write, and again when a repeat of a confirmation is answered as recorded (so a crash before the call is made good by
+   * repeating the decision); a throw is told to `onNote` and never undoes or fails the concern's change. It is told facts only and can change nothing here.
+   */
+  readonly onConcern?: (event: ConcernEvent) => Promise<void>;
   /** Whether a pause gate (card L01) applies to the task. A paused task is assessed as `paused`: its silence is expected, and a concern already suspected is cleared. */
   readonly isPaused?: (taskId: string) => Promise<boolean>;
 }
@@ -336,6 +370,7 @@ export class StallService {
   readonly #recoveryPolicy: (() => Promise<RecoveryPolicy>) | undefined;
   readonly #recoveryEffects: RecoveryEffects | undefined;
   readonly #onNote: ((message: string) => void) | undefined;
+  readonly #onConcern: ((event: ConcernEvent) => Promise<void>) | undefined;
   readonly #ladderDamaged: ((notice: { id: string; detail: string }) => Promise<void>) | undefined;
   /** The start time of the current episode of an unreadable ladder setting (undefined: the setting reads fine, or the owner has not been told yet). */
   #damageEpisode: string | undefined;
@@ -358,6 +393,7 @@ export class StallService {
     this.#recoveryPolicy = options.recoveryPolicy;
     this.#recoveryEffects = options.recoveryEffects;
     this.#onNote = options.onNote;
+    this.#onConcern = options.onConcern;
     if (!Number.isSafeInteger(this.#escalateAfterMs) || this.#escalateAfterMs < 1000) throw new DomainError("invalid_command", "escalateAfterMs: must be a whole number of at least 1000", { field: "escalateAfterMs" });
     this.#isPaused = options.isPaused;
     if (!Number.isSafeInteger(this.#hostStaleAfterMs) || this.#hostStaleAfterMs < 1000) throw new DomainError("invalid_command", "hostStaleAfterMs: must be a whole number of at least 1000", { field: "hostStaleAfterMs" });
@@ -536,8 +572,10 @@ export class StallService {
         const moved = facts.generation !== undefined && found.generation !== facts.generation;
         if (!ended && !moved) continue;
         try {
-          await this.#write(by, found.id, found.revision, { ...found, state: "cleared", clearedBecause: ended ? `archived: the task is ${task.state}` : "archived: the task has a new owner", lastChangedAt: this.#runner.now() });
+          const because = ended ? `archived: the task is ${task.state}` : "archived: the task has a new owner";
+          await this.#write(by, found.id, found.revision, { ...found, state: "cleared", clearedBecause: because, lastChangedAt: this.#runner.now() });
           counts.cleared++;
+          if (recoveryOf(found, because)) await this.#tellConcern("recovered", found, undefined, because);
         } catch (error) { if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "command_conflict")) counts.contended++; else throw error; }
       }
       // Suspected concerns the signals no longer support (or that belong to another generation, or a task that is not running) are cleared.
@@ -553,6 +591,7 @@ export class StallService {
         try {
           await this.#write(by, found.id, found.revision, { ...body, state: "cleared", clearedBecause: because, lastChangedAt: this.#runner.now() });
           counts.cleared++;
+          if (recoveryOf(body, because)) await this.#tellConcern("recovered", body, undefined, because);
         } catch (error) { if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "command_conflict")) counts.contended++; else throw error; }
       }
     }
@@ -579,7 +618,7 @@ export class StallService {
     if (!(by.kind === "owner" || (!isOwner(assignment?.owner, by.id) && (supervisor || manager)))) throw new DomainError("forbidden", `${by.id} may not decide on that concern`);
     const ref: AggregateRef = { kind: "stall-concern", id: found.id };
     // The revision and state are checked inside the command, so a repeat of one that already applied is answered with its recorded result, not refused as stale.
-    return this.#runner.command(`stall.${command.decision}`, { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
+    const decided = await this.#runner.command(`stall.${command.decision}`, { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
       payload: { concernId: found.id, expectedRevision: command.expectedRevision, decision: command.decision, reason },
       build: async () => {
         const current = await this.#runner.get(ref.kind, ref.id);
@@ -594,6 +633,20 @@ export class StallService {
         return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject }], detail: { taskId: body.taskId, kind: body.kind, state: next.state, generation: body.generation } };
       },
     }));
+    // Told from the stored record, so a repeat (answered as recorded) tells the same facts again, and an observation keyed on them is made once.
+    if (command.decision === "confirm") {
+      const stored = await this.#concern(found.id);
+      if (stored !== undefined && stored.decidedBy === by.id && (stored.state === "confirmed" || stored.state === "cleared")) await this.#tellConcern("confirmed", stored, stored.decidedBy, stored.decision ?? reason);
+    }
+    return decided;
+  }
+
+  /** `onConcern`, best effort: a failure is told to `onNote` and goes no further. The episode is the concern's `reopened` count as it was at the event. */
+  async #tellConcern(stage: ConcernEvent["stage"], c: ConcernBody & { id: string }, decidedBy: string | undefined, reason: string): Promise<void> {
+    if (this.#onConcern === undefined) return;
+    try {
+      await this.#onConcern({ stage, concernId: c.id, episode: c.reopened, taskId: c.taskId, projectId: c.projectId, kind: c.kind, ...(decidedBy === undefined ? {} : { by: decidedBy }), reason, steps: stepsOf(c) });
+    } catch (error) { this.#onNote?.(`the ${stage} concern ${c.id} could not be told on (${error instanceof Error ? error.message : String(error)}); the concern itself is recorded`); }
   }
 
   /**

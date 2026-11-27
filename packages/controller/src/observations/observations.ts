@@ -14,6 +14,8 @@ import { clean, cut, invalid, optionalPlain, plain, whole } from "../standups/sh
 /**
  * Observations (card B02, first slice): what the controller saw go wrong or get put right in a project's work (a correction, a failure, a recovery, friction, an approval that stalled, a prompt that was
  * asked again, a review that failed), and the friction agents report themselves. They are the raw material of lessons (B03): nothing here changes work, grants anything or creates a task.
+ * The controller's sources (wired in `api/start.ts`): a denied request (correction), a failed review (failed-review), and, since the second slice, a stall concern confirmed as a failure (failure) and a
+ * concern that cleared after a confirmed failure or a recovery step actually taken (recovery), each cited as the concern with its event.
  *
  * - **Provenance, not wording, decides what is the same.** Each observation names the records it comes from (`sources`). Records that ARE an event (a submission, a review request, another observation)
  *   are its provenance: a second report of the same event, by the controller or by any agent, in any words and of any kind, joins the first observation (`reports` goes up, the reporter is listed) and is
@@ -32,12 +34,18 @@ export type ObservationKind = (typeof OBSERVATION_KINDS)[number];
 export type ObservationDisposition = "open" | "promoted" | "dismissed" | "resolved";
 const DISPOSITIONS: readonly ObservationDisposition[] = ["open", "promoted", "dismissed", "resolved"];
 
-/** Records an observation may name. The first three are context; the last three are events, and decide what counts as the same observation. */
-export const SOURCE_KINDS = ["task", "artifact", "desk-record", "submission", "review", "observation"] as const;
+/**
+ * Records an observation may name. The first three are context; the rest are events, and decide what counts as the same observation. A `stall-concern` (card V02, second slice of B02) is cited only by the
+ * controller and always with `event`: one concern is confirmed, clears and comes back over its life, so the event is the stage and the episode (`confirmed.<n>` or `recovered.<n>`, `n` the concern's
+ * `reopened` count), and the same stage of the same episode told twice is one observation while a failure and its later recovery are two.
+ */
+export const SOURCE_KINDS = ["task", "artifact", "desk-record", "submission", "review", "observation", "stall-concern"] as const;
 export type SourceKind = (typeof SOURCE_KINDS)[number];
-const EVENT_KINDS: readonly SourceKind[] = ["submission", "review", "observation"];
-const ID_PREFIX: Readonly<Record<SourceKind, string>> = { task: "task", artifact: "art", "desk-record": "dsk", submission: "sbm", review: "rev", observation: "obs" };
-export interface SourceRef { readonly kind: SourceKind; readonly id: string }
+/** What an agent may cite: a stall concern is the controller's own account of a task, and an agent tells it again by citing the observation made of it. */
+const AGENT_SOURCE_KINDS: readonly SourceKind[] = ["task", "artifact", "desk-record", "submission", "review", "observation"];
+const EVENT_KINDS: readonly SourceKind[] = ["submission", "review", "observation", "stall-concern"];
+const ID_PREFIX: Readonly<Record<SourceKind, string>> = { task: "task", artifact: "art", "desk-record": "dsk", submission: "sbm", review: "rev", observation: "obs", "stall-concern": "stl" };
+export interface SourceRef { readonly kind: SourceKind; readonly id: string; /** Only with `stall-concern`, and required there: `confirmed.<n>` or `recovered.<n>`. */ readonly event?: string }
 
 export interface ObservationBody {
   readonly projectId: string;
@@ -92,6 +100,11 @@ export type RecordOutcome = { readonly outcome: "created" | "joined"; readonly i
 
 const OBSERVATION_ID = /^obs-[a-z2-7]{20}$/;
 const SOURCE_ID = /^[a-z]{3,4}-[a-z2-7]{20}$/;
+/** The stall service's concern IDs: the task's part, the generation (ten digits) and the kind. */
+const CONCERN_ID = /^stl-[a-z2-7]{20}-[0-9]{10}-(?:loop|repeated-errors|silent|stuck-request|budget)$/;
+/** A concern's event: the stage and the episode (its `reopened` count, at most nine digits, no leading zero). */
+const CONCERN_EVENT = /^(?:confirmed|recovered)\.(?:0|[1-9][0-9]{0,8})$/;
+const sourceKey = (s: SourceRef): string => `${s.kind}:${s.id}${s.event === undefined ? "" : `#${s.event}`}`;
 const AGENT = /^agent:[a-z0-9][a-z0-9-]{0,39}$/;
 interface IndexBody { readonly ids: readonly string[] }
 /** How far ahead of this controller's own hour a recorded hour is still trusted: a clock more than a day ahead (or a damaged record) must not hold everyone's counts in a far-off hour. */
@@ -103,6 +116,7 @@ const TRUSTED_AHEAD_MS = 86_400_000;
 const later = (hour: string, recorded: string | undefined): string => (recorded !== undefined && recorded > hour && Date.parse(recorded) - Date.parse(hour) <= TRUSTED_AHEAD_MS ? recorded : hour);
 const nextHour = (hour: string): string => new Date(Date.parse(hour) + 3_600_000).toISOString().slice(11, 16);
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
+const copySource = (s: SourceRef): SourceRef => ({ kind: s.kind, id: s.id, ...(s.event === undefined ? {} : { event: s.event }) });
 
 export class ObservationService {
   readonly #runner: CommandRunner;
@@ -130,7 +144,7 @@ export class ObservationService {
     if (typeof command.summary !== "string" || command.summary.trim() === "") invalid("summary", "is required");
     const summary = cut(command.summary, OBSERVATION_LIMITS.summary);
     const detail = command.detail === undefined ? undefined : (typeof command.detail === "string" ? cut(command.detail, OBSERVATION_LIMITS.detail) : invalid("detail", "must be text"));
-    const sources = this.#refs(command.sources, 1);
+    const sources = this.#refs(command.sources, 1, SOURCE_KINDS);
     const resolved = await this.#resolve(sources, undefined);
     return this.#tell(by, "controller", command.commandId, { projectId: resolved.projectId, kind, summary, ...(detail === undefined || detail === "" ? {} : { detail }), sources, ...(resolved.taskId === undefined ? {} : { taskId: resolved.taskId }) }, resolved.joins);
   }
@@ -145,7 +159,7 @@ export class ObservationService {
     if (!inTaskScope(by, projectId) || !(allows(by, "meeting.agenda", projectId) || allows(by, "meeting.manage", projectId)) || (await this.#runner.get("project", projectId)) === undefined) throw new DomainError("forbidden", `${by.id} may not report friction in that project`);
     const summary = plain(command.summary, "summary", OBSERVATION_LIMITS.summary);
     const detail = optionalPlain(command.detail, "detail", OBSERVATION_LIMITS.detail);
-    const sources = this.#refs(command.sources ?? [], 0);
+    const sources = this.#refs(command.sources ?? [], 0, AGENT_SOURCE_KINDS);
     const resolved = sources.length === 0 ? { projectId, joins: undefined, taskId: undefined } : await this.#resolve(sources, by);
     if (resolved.projectId !== projectId) invalid("sources", "must be records of this project that you may read");
     return this.#tell(by, "agent", command.commandId, { projectId, kind: "friction", summary, ...(detail === undefined ? {} : { detail }), sources, ...(resolved.taskId === undefined ? {} : { taskId: resolved.taskId }) }, resolved.joins);
@@ -243,12 +257,12 @@ export class ObservationService {
   /** Creates the observation, or joins the one with the same provenance, under the storm limits, in one write with the index and the rate record. Retried on a lost race with the same command ID. */
   async #tell(by: Principal, origin: "controller" | "agent", commandId: unknown, fields: { projectId: string; kind: ObservationKind; summary: string; detail?: string; sources: readonly SourceRef[]; taskId?: string }, joins: string | undefined): Promise<RecordOutcome> {
     const scoped = scopedCommandId(by.id, commandId);
-    const events = fields.sources.filter((s) => EVENT_KINDS.includes(s.kind) && s.kind !== "observation").map((s) => `${s.kind}:${s.id}`).sort();
+    const events = fields.sources.filter((s) => EVENT_KINDS.includes(s.kind) && s.kind !== "observation").map(sourceKey).sort();
     // Events are the same whoever tells them; context alone is the same only from the same reporter in the same words.
-    const provenance = digest(events.length > 0 ? `event\0${fields.projectId}\0${events.join("\0")}` : `context\0${fields.projectId}\0${fields.kind}\0${by.id}\0${fields.sources.map((s) => `${s.kind}:${s.id}`).sort().join("\0")}\0${fields.summary.toLowerCase().replace(/\s+/g, " ").trim()}`);
+    const provenance = digest(events.length > 0 ? `event\0${fields.projectId}\0${events.join("\0")}` : `context\0${fields.projectId}\0${fields.kind}\0${by.id}\0${fields.sources.map(sourceKey).sort().join("\0")}\0${fields.summary.toLowerCase().replace(/\s+/g, " ").trim()}`);
     const id = joins ?? derivedId("obs", provenance);
     const result = await this.#retrying(() => this.#runner.command(origin === "agent" ? "observation.submit" : "observation.record", { commandId: scoped, actor: by.id }, async () => ({
-      payload: clean({ ...fields, sources: fields.sources.map((s) => ({ kind: s.kind, id: s.id })), joins }),
+      payload: clean({ ...fields, sources: fields.sources.map(copySource), joins }),
       build: async () => {
         const nowIso = this.#runner.now();
         const rateFound = await this.#runner.get("observation-rate", fields.projectId);
@@ -274,7 +288,7 @@ export class ObservationService {
           const { detail: _d, owner: _o, taskId: _t, ...base } = body;
           void _d; void _o; void _t;
           const told: ObservationBody = origin === "controller" && body.origin === "agent"
-            ? { ...base, kind: fields.kind, summary: fields.summary, ...(fields.detail === undefined ? {} : { detail: fields.detail }), sources: fields.sources.map((x) => ({ kind: x.kind, id: x.id })), ...(fields.taskId === undefined ? {} : { taskId: fields.taskId }), origin: "controller", reportedBy: by.id, ...(body.owner === undefined || body.owner === body.reportedBy ? {} : { owner: body.owner }) }
+            ? { ...base, kind: fields.kind, summary: fields.summary, ...(fields.detail === undefined ? {} : { detail: fields.detail }), sources: fields.sources.map(copySource), ...(fields.taskId === undefined ? {} : { taskId: fields.taskId }), origin: "controller", reportedBy: by.id, ...(body.owner === undefined || body.owner === body.reportedBy ? {} : { owner: body.owner }) }
             : body;
           const changes: Change[] = [{ type: "update", ref, expectedRevision: found.revision, body: clean({ ...told, reporters, reports: body.reports + 1, lastSeenAt: nowIso }) }];
           if (origin === "agent") changes.push(rateChange({ ...rate, byReporter: counted() }));
@@ -300,15 +314,21 @@ export class ObservationService {
     return { outcome: result.revision === 1 ? "created" : "joined", id: result.id, replayed: result.replayed };
   }
 
-  #refs(value: unknown, min: number): SourceRef[] {
+  #refs(value: unknown, min: number, kinds: readonly SourceKind[]): SourceRef[] {
     if (!Array.isArray(value) || value.length < min || value.length > OBSERVATION_LIMITS.sources) return invalid("sources", `must be a list of ${min} to ${OBSERVATION_LIMITS.sources} records`);
     const out: SourceRef[] = [];
     for (const [i, raw] of value.entries()) {
       if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return invalid(`sources[${i}]`, "must be an object with kind and id");
-      onlyKnown(raw, ["kind", "id"]);
-      const s = raw as { kind?: unknown; id?: unknown };
-      if (typeof s.kind !== "string" || !(SOURCE_KINDS as readonly string[]).includes(s.kind) || typeof s.id !== "string" || !SOURCE_ID.test(s.id) || !s.id.startsWith(`${ID_PREFIX[s.kind as SourceKind]}-`)) return invalid(`sources[${i}]`, `must be one of ${SOURCE_KINDS.join(", ")} with its ID`);
-      if (!out.some((x) => x.kind === s.kind && x.id === s.id)) out.push({ kind: s.kind as SourceKind, id: s.id });
+      onlyKnown(raw, ["kind", "id", "event"]);
+      const s = raw as { kind?: unknown; id?: unknown; event?: unknown };
+      const known = typeof s.kind === "string" && (kinds as readonly string[]).includes(s.kind) && typeof s.id === "string";
+      const concern = known && s.kind === "stall-concern";
+      const idOk = known && (concern ? CONCERN_ID.test(s.id as string) : SOURCE_ID.test(s.id as string) && (s.id as string).startsWith(`${ID_PREFIX[s.kind as SourceKind]}-`));
+      if (!idOk) return invalid(`sources[${i}]`, `must be one of ${kinds.join(", ")} with its ID`);
+      // The event names which moment of a concern this is; nothing else carries one.
+      if (concern ? typeof s.event !== "string" || !CONCERN_EVENT.test(s.event) : s.event !== undefined) return invalid(`sources[${i}].event`, concern ? "a stall concern names its event: confirmed.<n> or recovered.<n>" : "only a stall concern names an event");
+      const ref: SourceRef = { kind: s.kind as SourceKind, id: s.id as string, ...(concern ? { event: s.event as string } : {}) };
+      if (!out.some((x) => sourceKey(x) === sourceKey(ref))) out.push(ref);
     }
     return out;
   }
@@ -347,6 +367,8 @@ export class ObservationService {
       case "submission": return body["submittedBy"] === by.id || taskRead(taskId);
       case "review": return (body["binding"] as { requester?: unknown } | undefined)?.requester === by.id || taskRead(taskId);
       case "observation": return this.#mayRead(by, projectId) || ((body["reporters"] as readonly string[] | undefined) ?? []).includes(by.id);
+      // Never cited by an agent (`AGENT_SOURCE_KINDS`); refused here too, so a change there cannot open it.
+      case "stall-concern": return false;
     }
   }
 

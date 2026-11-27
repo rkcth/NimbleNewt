@@ -11,7 +11,7 @@ import { ContractService } from "../planning/contracts.js";
 import { GrantService, PrincipalService, type Grant, type Principal } from "../security/index.js";
 import type { Difficulty } from "../planning/contracts.js";
 import { ownerLoadReport, readAuditLog } from "./owner-load.js";
-import { EscalationLadderService, RECOVERY_ACTIONS, RecoveryLadderService, StallService, type RecoveryAction, type RecoveryEffects, assessStall, DEFAULT_THRESHOLDS, type StallEvent, type StallOptions } from "./index.js";
+import { EscalationLadderService, RECOVERY_ACTIONS, RecoveryLadderService, StallService, type ConcernEvent, type RecoveryAction, type RecoveryEffects, assessStall, DEFAULT_THRESHOLDS, type StallEvent, type StallOptions } from "./index.js";
 
 after(stopServer);
 
@@ -1664,5 +1664,106 @@ for (const backend of backends) {
     assert.deepEqual(s1!.reached.map((x) => [x.taskId, x.projectId, x.sameProject]), [[second, c.other, false]], "the second stall, in another project, opened while the first was open");
     assert.deepEqual([s2!.taskId, s2!.endState, s2!.reached.length], [second, "cleared", 0]);
     assert.equal(report.stallsReachingUnrelatedWork, 1);
+  });
+  suite("onConcern is told a confirmed failure and a recovery after a confirmed failure or a step actually taken, from the stored record, per episode; a dismissal, a concern that clears by itself and other clearings are not; a failing hook never undoes the change (card B02, second slice)", async (c) => {
+    const told: ConcernEvent[] = [];
+    const notes: string[] = [];
+    let fail = false;
+    const setting = RecoveryLadderService.withEpoch(c.storage, c.projects.epoch, options);
+    const made: string[] = [];
+    // A rebrief is refused on a precondition, so the rung is passed (recorded as skipped), not taken.
+    const effects: RecoveryEffects = { run: async (action) => { if (action === "rebrief") throw new DomainError("invalid_transition", "the task has no brief to send again"); made.push(action); return {}; }, unavailable: async () => "not here" };
+    const svc = c.service({ onConcern: async (e) => { if (fail) throw new Error("the observations are down"); told.push(e); }, onNote: (m) => notes.push(m), recoveryPolicy: () => setting.policy(), recoveryEffects: effects });
+    const h = await c.host("h1");
+    const loop = async (t: string) => { for (let i = 0; i < 6; i++) await c.send(h, t, step("run tests", "tests")); };
+    const concernOf = async (t: string) => (await svc.list(c.owner, { taskId: t })).items[0]!;
+    const confirm = (id: string, revision: number, commandId = cid("d"), reason = "looping on the same failing test") => svc.decide(c.owner, { commandId, concernId: id, expectedRevision: revision, decision: "confirm", reason });
+    const task = async (t: string) => (await c.projects.getTask(t))!;
+
+    // Confirmed: told once with who and why, the episode (0) and no steps; a repeat of the decision tells the same facts again (the observation's own command ID makes that a replay).
+    const t1 = await c.work();
+    await loop(t1); await svc.scan(c.owner);
+    const k1 = await concernOf(t1);
+    await confirm(k1.id, k1.revision, "conf-1");
+    const first: ConcernEvent = { stage: "confirmed", concernId: k1.id, episode: 0, taskId: t1, projectId: c.project, kind: "loop", by: c.owner.id, reason: "looping on the same failing test", steps: [] };
+    assert.deepEqual(told, [first]);
+    assert.equal((await confirm(k1.id, k1.revision, "conf-1")).replayed, true);
+    assert.deepEqual(told, [first, first]);
+    told.length = 0;
+    // That confirmed failure is a recovery once its task is done; a confirmed one whose task is cancelled is not.
+    await c.projects.transitionTask({ commandId: cid("dn"), actor: c.owner.id, taskId: t1, expectedRevision: (await task(t1)).revision, to: "done" });
+    await svc.scan(c.owner);
+    assert.deepEqual(told, [{ stage: "recovered", concernId: k1.id, episode: 0, taskId: t1, projectId: c.project, kind: "loop", reason: "archived: the task is done", steps: [] }]);
+    told.length = 0;
+    const t2 = await c.work();
+    await loop(t2); await svc.scan(c.owner);
+    const k2 = await concernOf(t2);
+    await confirm(k2.id, k2.revision);
+    told.length = 0;
+    await c.projects.transitionTask({ commandId: cid("cn"), actor: c.owner.id, taskId: t2, expectedRevision: (await task(t2)).revision, to: "cancelled" });
+    await svc.scan(c.owner);
+    assert.equal((await svc.get(c.owner, k2.id))!.state, "cleared");
+    assert.equal(told.length, 0, "a cancelled task did not recover");
+
+    // A dismissal is not a failure; a suspected concern that clears with no step taken is not a recovery. It comes back as episode 1, and that confirmation says so.
+    const t3 = await c.work();
+    await loop(t3); await svc.scan(c.owner);
+    const k3 = await concernOf(t3);
+    await svc.decide(c.owner, { commandId: cid("d"), concernId: k3.id, expectedRevision: k3.revision, decision: "dismiss", reason: "a long retry on purpose" });
+    const t4 = await c.work();
+    await loop(t4); await svc.scan(c.owner);
+    const k4 = await concernOf(t4);
+    await c.send(h, t4, { type: "evidence", item: "tests green" });
+    await svc.scan(c.owner);
+    assert.equal((await svc.get(c.owner, k4.id))!.clearedBecause, "the signals recovered");
+    assert.equal(told.length, 0);
+    await loop(t4); await svc.scan(c.owner);
+    const back = await concernOf(t4);
+    assert.equal(back.reopened, 1);
+    await confirm(back.id, back.revision);
+    assert.deepEqual(told.map((e) => [e.stage, e.episode]), [["confirmed", 1]]);
+    told.length = 0;
+
+    // A step actually taken, then the signals recover: a recovery, with the step named. A passed step does not count.
+    const t5 = await c.work();
+    await loop(t5); await svc.scan(c.owner);
+    let k5 = await concernOf(t5);
+    await svc.recover(c.owner, { commandId: cid("rc"), concernId: k5.id, expectedRevision: k5.revision, action: "nudge", text: "please report" });
+    assert.deepEqual(made, ["nudge"]);
+    assert.equal(told.length, 0, "a step is not a recovery by itself");
+    await c.send(h, t5, { type: "evidence", item: "tests green" });
+    await svc.scan(c.owner);
+    k5 = (await svc.get(c.owner, k5.id))!;
+    assert.equal(k5.state, "cleared");
+    assert.deepEqual(told, [{ stage: "recovered", concernId: k5.id, episode: 0, taskId: t5, projectId: c.project, kind: "loop", reason: "the signals recovered", steps: ["nudge"] }]);
+    told.length = 0;
+    // A scan with nothing new tells nothing again.
+    await svc.scan(c.owner);
+    assert.equal(told.length, 0);
+    // Only a passed step, then the signals recover: nothing was done, so it is not a recovery.
+    const t8 = await c.work();
+    await loop(t8); await svc.scan(c.owner);
+    const k8 = await concernOf(t8);
+    const passed = await svc.recover(c.owner, { commandId: cid("rc"), concernId: k8.id, expectedRevision: k8.revision, action: "rebrief", text: "read it again" });
+    assert.equal(passed.step?.skipped, true);
+    await c.send(h, t8, { type: "evidence", item: "tests green" });
+    await svc.scan(c.owner);
+    assert.equal((await svc.get(c.owner, k8.id))!.clearedBecause, "the signals recovered");
+    assert.equal(told.length, 0, "a passed step is not a recovery step");
+
+    // The hook failing: the decision stands, the failure is noted, nothing is thrown at the decider.
+    fail = true;
+    const t6 = await c.work();
+    await loop(t6); await svc.scan(c.owner);
+    const k6 = await concernOf(t6);
+    assert.equal((await confirm(k6.id, k6.revision)).replayed, false);
+    assert.equal((await svc.get(c.owner, k6.id))!.state, "confirmed");
+    assert.ok(notes.some((m) => m.includes(k6.id) && /could not be told on \(the observations are down\)/.test(m)), notes.join("\n"));
+    // Without a hook nothing is told and nothing fails.
+    const plainSvc = c.service();
+    const t7 = await c.work();
+    await loop(t7); await plainSvc.scan(c.owner);
+    const k7 = (await plainSvc.list(c.owner, { taskId: t7 })).items[0]!;
+    assert.equal((await plainSvc.decide(c.owner, { commandId: cid("d"), concernId: k7.id, expectedRevision: k7.revision, decision: "confirm", reason: "yes" })).replayed, false);
   });
 }

@@ -29,6 +29,8 @@ interface Ctx {
   submission(project: string, task: string, by?: string): Promise<string>;
   review(project: string, task: string, requester: string): Promise<string>;
   improvement(project: string): Promise<string>;
+  /** A stall concern record as the stall service names it (card V02): the task's part, the generation, the kind. */
+  concern(project: string, task: string, generation?: number, kind?: string): Promise<string>;
 }
 
 for (const backend of backends) {
@@ -56,6 +58,7 @@ for (const backend of backends) {
         const submission: Ctx["submission"] = async (project, task, by = "agent:dev") => { const id = derivedId("sbm", cid("s")); await put("submission", id, { projectId: project, taskId: task, kind: "review", submittedBy: by }); return id; };
         const review: Ctx["review"] = async (project, task, requester) => { const id = derivedId("rev", cid("r")); await put("review", id, { binding: { projectId: project, taskId: task, requester } }); return id; };
         const improvement: Ctx["improvement"] = async (project) => { const id = derivedId("imp", cid("i")); await put("improvement-item", id, { projectId: project }); return id; };
+        const concern: Ctx["concern"] = async (project, task, generation = 1, kind = "loop") => { const id = `stl-${task.slice(5)}-${String(generation).padStart(10, "0")}-${kind}`; await put("stall-concern", id, { projectId: project, taskId: task, generation, kind: kind.replace("-", "_"), state: "confirmed", reopened: 0 }); return id; };
         const make = (o: ObservationOptions = {}) => ObservationService.withEpoch(world.storage, epoch, { ...options, ...o });
         await body({
           owner, host: await enroll("host", "h1", []),
@@ -66,7 +69,7 @@ for (const backend of backends) {
           reader: await enroll("agent", "reader", [{ action: "meeting.read", project: a }]),
           bare: await enroll("agent", "bare", [{ action: "task.read", project: a }]),
           eve: await enroll("agent", "eve", [{ action: "meeting.manage", project: b }, { action: "meeting.agenda", project: b }, { action: "task.read", project: b }]),
-          a, b, taskA, taskB, obs: make(), storage: world.storage, epoch, make, submission, review, improvement,
+          a, b, taskA, taskB, obs: make(), storage: world.storage, epoch, make, submission, review, improvement, concern,
         });
       } finally { await world.close(); }
     });
@@ -305,5 +308,76 @@ for (const backend of backends) {
     assert.equal(outcomes.filter((o) => o.outcome === "suppressed").length, 5);
     const rate = (await c.obs.open(c.owner, c.a))?.rate;
     assert.deepEqual([rate?.created, rate?.suppressed], [4, 5]);
+  });
+  suite("a stall concern is an event by its stage and episode: a failure and its recovery are two observations, each told once; only the controller cites one; malformed citations are refused; text is redacted; nothing is granted (card B02, second slice)", async (c) => {
+    const stl = await c.concern(c.a, c.taskA);
+    const src = (event: string) => [{ kind: "stall-concern" as const, id: stl, event }];
+    const before = await c.storage.getAggregate({ kind: "stall-concern", id: stl });
+    const failed = await c.obs.record(c.host, { commandId: `obs-stall:${stl}:confirmed.0`, kind: "failure", summary: "owner:rob confirmed that task one is stalled (loop).", detail: "looping on the same test", sources: src("confirmed.0") });
+    assert.equal(failed.outcome, "created");
+    const fid = idOf(failed);
+    // A second controller telling the same stage of the same episode, under another command and kind, joins it; the same command again is answered as recorded.
+    const twice = await c.make().record(c.host, { commandId: "another-controller", kind: "correction", summary: "the same confirmation", sources: src("confirmed.0") });
+    assert.deepEqual([twice.outcome, idOf(twice)], ["joined", fid]);
+    const replay = await c.make().record(c.host, { commandId: `obs-stall:${stl}:confirmed.0`, kind: "failure", summary: "owner:rob confirmed that task one is stalled (loop).", detail: "looping on the same test", sources: src("confirmed.0") });
+    assert.deepEqual([idOf(replay), replay.replayed], [fid, true]);
+    // The recovery of that episode, and the failure of the next episode, are other events.
+    const recovered = await c.obs.record(c.host, { commandId: `obs-stall:${stl}:recovered.0`, kind: "recovery", summary: "Task one recovered from a loop stall after 1 recovery step(s) (nudge).", detail: "the signals recovered", sources: src("recovered.0") });
+    const again = await c.obs.record(c.host, { commandId: `obs-stall:${stl}:confirmed.1`, kind: "failure", summary: "it came back", sources: src("confirmed.1") });
+    assert.equal(new Set([fid, idOf(recovered), idOf(again)]).size, 3);
+    // The same concern named with its event twice is one source; with the same event and another context record it is still the same event.
+    const dup = await c.obs.record(c.host, { commandId: cid("x"), kind: "failure", summary: "x", sources: [...src("confirmed.0"), ...src("confirmed.0"), { kind: "task", id: c.taskA }] });
+    assert.deepEqual([dup.outcome, idOf(dup)], ["joined", fid]);
+    const got = (await c.obs.get(c.mgr, fid))!;
+    assert.deepEqual([got.kind, got.origin, got.taskId, got.reports, got.sources], ["failure", "controller", c.taskA, 3, [{ kind: "stall-concern", id: stl, event: "confirmed.0" }]]);
+    const list = (await c.obs.open(c.mgr, c.a))!;
+    assert.deepEqual(list.items.map((x) => x.kind).sort(), ["failure", "failure", "recovery"]);
+    assert.equal(list.rate.created, 3);
+
+    // Only the controller cites a concern: an agent may not, whatever its rights, and is told the kinds it may cite. It retells the failure by citing the observation, which joins it.
+    for (const by of [c.dev, c.mgr]) await refuses("invalid_command", () => c.obs.submit(by, { commandId: cid("x"), projectId: c.a, summary: "the stall was mine", sources: src("confirmed.0") }), /task, artifact, desk-record, submission, review, observation with its ID/);
+    // dev may not read the project's observations, so it may not cite this one; a manager may, and its retelling joins.
+    await refuses("invalid_command", () => c.obs.submit(c.dev, { commandId: cid("x"), projectId: c.a, summary: "I was stuck on that test", sources: [{ kind: "observation", id: fid }] }), /of this project that you may read/);
+    const retold = await c.obs.submit(c.mgr, { commandId: cid("f"), projectId: c.a, summary: "I was stuck on that test", sources: [{ kind: "observation", id: fid }] });
+    assert.deepEqual([retold.outcome, idOf(retold)], ["joined", fid]);
+    assert.equal((await c.obs.get(c.mgr, fid))!.reports, 4);
+
+    // Malformed citations are refused before anything is read: the event is required with a concern, has one shape, and nothing else carries one; concern IDs have one shape.
+    // Each refused by its own check (the message says which), so a looser check is not hidden by a later one.
+    const hostile: [unknown[], RegExp | undefined][] = [
+      [[{ kind: "stall-concern", id: stl }], /names its event: confirmed/],
+      ...["confirmed", "recovered.", "confirmed.01", "confirmed.-1", "confirmed.1000000000", "failed.1", "confirmed.1\n", "Confirmed.1", "confirmed.1.2", " confirmed.1", "", "confirmed.१"].map((event): [unknown[], RegExp] => [[{ kind: "stall-concern", id: stl, event }], /names its event: confirmed/]),
+      ...[1, null, { stage: "confirmed" }].map((event): [unknown[], RegExp] => [[{ kind: "stall-concern", id: stl, event }], /names its event: confirmed/]),
+      [[{ kind: "submission", id: await c.submission(c.a, c.taskA), event: "confirmed.0" }], /only a stall concern names an event/], [[{ kind: "task", id: c.taskA, event: "confirmed.0" }], /only a stall concern names an event/],
+      ...[`stl-${c.taskA.slice(5)}-0000000001-other`, `stl-${c.taskA.slice(5)}-000000001-loop`, `stl-${c.taskA.slice(5)}-0000000001-repeated_errors`, `stl-../../${c.taskA.slice(5)}-0000000001-loop`, `stl-${c.taskA.slice(5).toUpperCase()}-0000000001-loop`, `${stl}\n`, `${stl}-x`, `stl-${"a".repeat(19)}-0000000001-loop`, c.taskA].map((id): [unknown[], RegExp] => [[{ kind: "stall-concern", id, event: "confirmed.0" }], /with its ID/]),
+      [[{ kind: "stall-concern", id: stl, event: "confirmed.0", extra: true }], undefined],
+    ];
+    for (const [sources, why] of hostile) await refuses("invalid_command", () => c.obs.record(c.host, { commandId: cid("x"), kind: "failure", summary: "x", sources: sources as never }), why);
+    // One command ID is one event: the same ID telling another episode is a conflict, not a replay of the first.
+    await c.obs.record(c.host, { commandId: "obs-stall:conflict", kind: "failure", summary: "x", sources: src("confirmed.7") });
+    await refuses("command_conflict", () => c.obs.record(c.host, { commandId: "obs-stall:conflict", kind: "failure", summary: "x", sources: src("confirmed.8") }));
+    // A well-formed concern that does not exist, or of another project than the other sources, is refused like any source.
+    const ghost = `stl-${c.taskA.slice(5)}-0000000007-silent`;
+    await refuses("invalid_command", () => c.obs.record(c.host, { commandId: cid("x"), kind: "failure", summary: "x", sources: [{ kind: "stall-concern", id: ghost, event: "confirmed.0" }] }), /same project/);
+    const foreign = await c.concern(c.b, c.taskB, 1, "stuck-request");
+    await refuses("invalid_command", () => c.obs.record(c.host, { commandId: cid("x"), kind: "failure", summary: "x", sources: [{ kind: "stall-concern", id: foreign, event: "confirmed.0" }, { kind: "task", id: c.taskA }] }), /same project/);
+    // A concern of the other project is that project's observation, unseen from here.
+    const there = idOf(await c.obs.record(c.host, { commandId: cid("x"), kind: "failure", summary: "elsewhere", sources: [{ kind: "stall-concern", id: foreign, event: "confirmed.0" }] }));
+    assert.equal(await c.obs.get(c.mgr, there), undefined);
+    assert.equal((await c.obs.open(c.mgr, c.a))!.items.some((x) => x.id === there), false);
+
+    // The decider's words are the detail: credential-shaped text and control characters are made safe, length is cut.
+    const secret = `ghp_${"a1B2c3D4e5".repeat(4)}`;
+    const said = await c.obs.record(c.host, { commandId: cid("x"), kind: "failure", summary: `confirmed with token ${secret}\nnext line`, detail: `reason: use ${secret}\u0007${"x".repeat(5000)}`, sources: src("confirmed.5") });
+    const shown = (await c.obs.get(c.owner, idOf(said)))!;
+    assert.ok(!shown.summary.includes(secret) && !(shown.detail ?? "").includes(secret), JSON.stringify(shown).slice(0, 300));
+    assert.ok(!shown.summary.includes("\n"));
+    assert.ok([...(shown.detail ?? "")].length <= 2000);
+
+    // An observation changes nothing it cites and grants nothing: the concern is as it was, and the agents' rights are unchanged.
+    const after = await c.storage.getAggregate({ kind: "stall-concern", id: stl });
+    assert.deepEqual([after?.revision, after?.body], [before?.revision, before?.body]);
+    await refuses("invalid_command", () => c.obs.submit(c.scribe, { commandId: cid("x"), projectId: c.a, summary: "x", sources: [{ kind: "task", id: c.taskA }] }), /of this project that you may read/);
+    assert.equal(await c.obs.get(c.bare, fid), undefined, "being cited gives no read");
   });
 }
