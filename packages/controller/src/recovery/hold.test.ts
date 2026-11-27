@@ -249,6 +249,11 @@ test("more running attempts of the fenced controller than are listed: the rest a
   assert.deepEqual([h.attempts.length, h.truncated], [WORKERS_HOLD_LIMITS.attempts, true]);
   const gate = workersHoldGate(s, succ, h, now);
   assert.equal(await gate.heldForReaccept(ids.at(-1)!), true, "an attempt beyond the list is held as well");
+  // Second review: an attempt beyond the list is not taken over (a takeover would stamp it with this epoch and the hold would stop seeing it); a listed one is, and the successor's own is not judged.
+  assert.match((await gate.adoptReason({ attemptId: ids.at(-1)!, primaryEpoch: old }))!, /beyond the attempts the hold lists; it is not taken over/);
+  assert.match((await gate.adoptReason({ attemptId: ids.at(-2)! }))!, /beyond the attempts the hold lists/, "an attempt without an epoch beyond the list is held back too");
+  assert.equal(await gate.adoptReason({ attemptId: ids[0]!, primaryEpoch: old }), undefined, "a listed attempt without a stored result is taken over as before");
+  assert.equal(await gate.adoptReason({ attemptId: "att-new", primaryEpoch: succ }), undefined);
   assert.match(text(h), /200\+ attempts of the fenced controller were running/);
   // every listed attempt ends; the two beyond the list still run
   for (const id of ids.slice(0, WORKERS_HOLD_LIMITS.attempts)) await put(s, succ, dispatchRef(id), { ...running(id, "local", old), state: "finished" });
@@ -291,11 +296,14 @@ test("an attempt at the fence epoch is the fenced controller's; another host's p
   const hosts = ["host:h1", "host:h2", "host:h3", "host:h4", "host:h5", "host:h6"];
   await put(s, e.successor, DISPATCH_LIVE, { ids: ["att-a", "att-b", "att-c", "att-d", "att-o", "att-f", "att-x", ...hosts.map((h) => `att-${h.slice(5)}`)] });
   await put(s, e.successor, dispatchRef("att-f"), running("att-f", "host:r3", e.fence));
+  await put(s, e.successor, placementRef("att-f"), placement("att-f", "host:r3", "completed", { sessionId: "s-r3" }));
   await put(s, e.successor, dispatchRef("att-x"), running("att-x", "host:r3", e.old));
   await put(s, e.successor, placementRef("att-x"), placement("att-x", "host:r9", "completed", { sessionId: "s-r9", result: { status: "completed" } }));
   for (const h of hosts) await put(s, e.successor, dispatchRef(`att-${h.slice(5)}`), running(`att-${h.slice(5)}`, h, e.old));
   const hold = await beginWorkersHold(s, e.successor, now) as WorkersHold;
   assert.ok(hold.attempts.some((a) => a.attemptId === "att-f"), "a record at the fence epoch itself is not the successor's");
+  // Second review: a completed placement that holds no result is not counted as a stored result.
+  assert.deepEqual(((f) => [f.placementState, f.storedResult])(hold.attempts.find((a) => a.attemptId === "att-f")!), ["completed", false]);
   const x = hold.attempts.find((a) => a.attemptId === "att-x")!;
   assert.deepEqual([x.storedResult, x.placement, x.placementState, x.sessions], [false, null, null, []], "another host's placement is not this attempt's evidence");
   assert.equal(hold.hosts.length, 10);

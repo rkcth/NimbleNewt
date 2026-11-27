@@ -139,7 +139,13 @@ test("after a promotion the successor's workers stay stopped until reconciled: n
     assert.equal((await dispatchOf(second, s.attemptId))!.state, "running");
 
     // nothing starts while the hold stands; the accepted run is taken over (its worker still has to be told)
-    tick = await second.dispatch!.dispatcher.tick();
+    // Second review: the adoption gate is told the epoch the attempt ran under (without it every attempt of an earlier process would count as the fenced controller's).
+    const ranUnder = (await dispatchOf(second, s.attemptId))!.primaryEpoch;
+    assert.equal(typeof ranUnder, "number");
+    const adoptArgs: { attemptId: string; primaryEpoch?: number }[] = [];
+    WorkersHoldGate.prototype.adoptReason = async function (this: WorkersHoldGate, a: Parameters<WorkersHoldGate["adoptReason"]>[0]) { adoptArgs.push(a); return adoptAsked.call(this, a); };
+    try { tick = await second.dispatch!.dispatcher.tick(); } finally { WorkersHoldGate.prototype.adoptReason = adoptAsked; }
+    assert.deepEqual(adoptArgs.filter((a) => a.attemptId === s.attemptId).map((a) => a.primaryEpoch), [ranUnder]);
     assert.ok(!tick.started.includes(next.attemptId), JSON.stringify(tick.started));
     assert.ok(tick.skipped.some((x) => x.attemptId === next.attemptId && /its workers stay stopped until they are reconciled: 1 worker host is not reconciled yet \(host:r1\)/.test(x.reason)), JSON.stringify(tick.skipped));
     assert.deepEqual(tick.adopted, [s.attemptId], JSON.stringify(tick));

@@ -200,6 +200,9 @@ export class WorkersHoldGate {
     if (r === undefined) return undefined;
     if (r === "unreadable") return "the record of the workers held after the controller promotion cannot be read";
     if (!isOld(attempt.primaryEpoch, r.hold.fenceEpoch)) return undefined;
+    // Beyond a cut list there is no evidence to reconcile the attempt against, and a takeover would stamp it with this controller's epoch, so the hold would stop seeing it and could be released before anyone
+    // decided on it (after which a reconnecting worker under `auto` would take it up by itself). It is not taken over while the workers are held: its lease ends it, which reconciles it.
+    if (r.hold.truncated && !r.hold.attempts.some((a) => a.attemptId === attempt.attemptId)) return `attempt ${attempt.attemptId} ran under the fenced controller beyond the attempts the hold lists; it is not taken over while the workers are held and ends by its lease`;
     const p = obj((await this.storage.getAggregate({ kind: PLACEMENT_KIND, id: attempt.attemptId }))?.body);
     if (p?.["state"] === "completed" && p["result"] !== undefined) return `attempt ${attempt.attemptId} has a result from the fenced controller's time; it is kept as evidence and not taken while the workers are held`;
     return undefined;
