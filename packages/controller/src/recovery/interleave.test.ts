@@ -15,6 +15,8 @@ import { promoteDatabaseWith } from "./promotion.js";
 // whole manifest, or a mix a promotion refuses with B's manifest.json still in place (so A stops at its next look and B's next round writes a whole one again).
 
 const T = "2026-11-27T10:00:00.000Z";
+/** Windows has no POSIX permission bits (a file reads 0o666, or 0o444 when read-only): the owner-only mode is checked off Windows only. */
+const POSIX = process.platform !== "win32";
 const FILES = ["manifest.json", "aggregates.jsonl", "blobs.jsonl"] as const;
 const tmp = (): string => mkdtempSync(join(tmpdir(), "nn-k04i-"));
 const gone = (d: string): void => rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
@@ -148,7 +150,7 @@ test("two writers in one process never share a staging folder, and the manifest.
     assert.match([...seen][0]!, new RegExp(`^m\\.partial-${process.pid}-[0-9a-f]{12}$`));
     assert.equal(readRecoveryManifest(m).manifest.watermark.epoch, 1, "the later swap's manifest is whole");
     assert.deepEqual(readdirSync(dir), ["m"]);
-    for (const f of FILES) assert.equal(statSync(join(m, f)).mode & 0o777, 0o600, f);
+    if (POSIX) for (const f of FILES) assert.equal(statSync(join(m, f)).mode & 0o777, 0o600, f);
     // a manifest.json put in the slot after the move-aside: the plain writer keeps it and puts back the files it names
     const other = join(dir, "other");
     await writeRecoveryManifest(src(9), other);
@@ -232,7 +234,7 @@ test("late-change re-check: a link refused for want of hard links falls back to 
     const written = await withLink(() => { refusedLinks++; eperm(); }, () => writeRecoveryManifest(src(3), m));
     assert.equal(refusedLinks, 1);
     assert.equal(readRecoveryManifest(m).manifest.sha256, written.sha256);
-    assert.equal(statSync(join(m, RECOVERY_MANIFEST_FILE)).mode & 0o777, 0o600);
+    if (POSIX) assert.equal(statSync(join(m, RECOVERY_MANIFEST_FILE)).mode & 0o777, 0o600);
     // no hard links and the name taken in the moment before the link: kept, as with EEXIST, never renamed over
     const keep = text(join(other, RECOVERY_MANIFEST_FILE));
     const m2 = join(dir, "m2");
