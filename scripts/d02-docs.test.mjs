@@ -18,6 +18,8 @@ export const GUIDES = [
   "docs/nimblenewt/security-guide.md", "docs/nimblenewt/troubleshooting.md",
   // Card D01: the owner's user guide is held to the same checks.
   "docs/nimblenewt/user-guide.md",
+  // The owner's real-hardware sign-off checklists for the QA checkpoints Y02 and Y03: every command, path, option and link they name must exist.
+  "docs/nimblenewt/signoff/README.md", "docs/nimblenewt/signoff/y02-checklist.md", "docs/nimblenewt/signoff/y03-checklist.md",
 ];
 
 function walk(dir, keep, out = []) {
