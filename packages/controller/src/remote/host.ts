@@ -113,7 +113,10 @@ export class RemoteWorkerHost implements WorkerHost {
     const waitMs = Math.min(3_600_000, request.checks.reduce((n, c) => n + c.timeoutMs, 0) + 60_000);
     const answer = await this.remote.askVerify(this.by, this.hostId, requestId, attemptId, scope, request, { waitMs });
     if (!answer.ok) throw new DomainError("unavailable", answer.reason);
-    return reportOf(answer.detail, request);
+    const report = reportOf(answer.detail, request);
+    // Second review: the check not carried says so itself, so the done's refusal names the reason (a remote host), not only that no list came back.
+    const kept = given.checks.filter((c) => c.changedTests === true).map((c) => ({ name: c.name, state: "not-run" as const, reason: `${this.hostId} is a remote host, which does not run a check of the changed test files yet (its list does not cross the wire), so this check cannot pass there` }));
+    return kept.length === 0 ? report : { ...report, checks: [...report.checks, ...kept] };
   }
 
   /**

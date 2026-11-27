@@ -13,8 +13,11 @@ export const CLAUSE_PLAN_LIMITS = { lines: 2_000, line: 2_000, stepsPerClause: 5
 const STEP = /^[ \t]{0,12}(?:[-*+]|\d{1,4}[.)])[ \t]+\[([ xX])\][ \t]+(.*)$/;
 /** The clause a step is for: `C<n>` at its start, after optional emphasis or brackets (`**C3**`, `(C3)`, `` `C3` ``). */
 const CLAUSE_AT_START = /^[\s*_`([]{0,6}[Cc](\d{1,3})(?!\d)/;
-/** Quoted text in a step: straight double, single or back quotes, or typographic double quotes. Linear: each body excludes its own closing quote and line ends. */
-const QUOTED = /"([^"\r\n]{1,400})"|'([^'\r\n]{1,400})'|`([^`\r\n]{1,400})`|\u201c([^\u201d\r\n]{1,400})\u201d/g;
+/**
+ * Quoted text in a step: straight double, typographic double, back or single quotes. Each style is read on its own (second review: one alternation let an apostrophe earlier in the step, "can't", pair with one in the name and swallow the
+ * opening double quote, so a correctly quoted name was not seen). Linear: each body excludes its own closing quote and line ends.
+ */
+const QUOTED: readonly RegExp[] = [/"([^"\r\n]{1,400})"/g, /\u201c([^\u201d\r\n]{1,400})\u201d/g, /`([^`\r\n]{1,400})`/g, /'([^'\r\n]{1,400})'/g];
 
 interface Step { readonly ticked: boolean; readonly text: string; readonly quotes: ReadonlySet<string> }
 
@@ -33,9 +36,12 @@ function stepsOf(text: string): Map<number, Step[]> {
     const list = out.get(n) ?? [];
     if (list.length >= CLAUSE_PLAN_LIMITS.stepsPerClause) continue;
     const quotes = new Set<string>();
-    for (const q of body.matchAll(QUOTED)) {
-      if (quotes.size >= CLAUSE_PLAN_LIMITS.quotesPerStep) break;
-      quotes.add((q[1] ?? q[2] ?? q[3] ?? q[4])!);
+    for (const style of QUOTED) {
+      let taken = 0;
+      for (const q of body.matchAll(style)) {
+        if (taken++ >= CLAUSE_PLAN_LIMITS.quotesPerStep) break;
+        quotes.add(q[1]!);
+      }
     }
     list.push({ ticked: m[1] !== " ", text: body, quotes });
     out.set(n, list);

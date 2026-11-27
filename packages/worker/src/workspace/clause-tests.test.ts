@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -184,6 +184,19 @@ test("changedTests lists the test files the change adds or changes (not deleted,
     ]);
     // Reading changes nothing in the checkout.
     assert.equal(execFileSync("git", ["--git-dir", made.gitDir, "--work-tree", c, "status", "--porcelain", "--", "src/a.ts"], { encoding: "utf8" }).trim(), "M src/a.ts");
+  } finally { await w.done(); }
+});
+
+test("changedTests lists a test file the change moves as added at its new path (second review: read as a rename, it would be neither added nor modified and never run)", { skip }, async () => {
+  const w = await world();
+  try {
+    const scope = { taskId: "tsk-moved", projectId: "prj-one" };
+    const made = await w.ws.ensure(scope);
+    const c = made.checkout;
+    await rename(join(c, "src", "gone.test.ts"), join(c, "src", "moved.test.ts"));
+    const got = await w.ws.changedTests(scope);
+    assert.deepEqual(got?.files.map((f) => ({ path: f.path, titles: f.titles })), [{ path: "src/moved.test.ts", titles: ["gone"] }]);
+    assert.equal(got?.count, 1);
   } finally { await w.done(); }
 });
 

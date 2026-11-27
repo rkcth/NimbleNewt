@@ -21090,3 +21090,43 @@ origin/main had not moved (34e45aec is the merge base), so there was nothing to 
 - Tests inside a skipped `describe`, a `t.skip()` inside the body, a call after code on a comment line longer than 200 characters, and a block comment's inner lines that do not start with `*` still count. The check stays file- and name-level, as the slice says.
 - A stale built file, one not rebuilt after its source changed, runs if no build check comes before.
 - Other runners' option syntax is covered only by the leading-dash rule.
+
+### W09 second slice, second review (Claude agent, Opus 5.5, 2026-11-27 EST; card W09 NOT flipped; not pushed; no network, model or workflow)
+
+origin/main had not moved (34e45aec is still the merge base), so there was nothing to merge.
+
+**Problems found and fixed.**
+- (Medium) **An apostrophe could hide a correctly quoted test name.** The step's quotes were read with one alternation, so an apostrophe earlier in the step paired with one inside the name and swallowed the opening double quote. Two examples: `- [x] C1: it can't break: src/a.test.ts "doesn't cut a pair"`, and `"cuts whole" (it's fine)` after a "Bob's". A correct mapping was refused, and the refusal cost a go-on. Both measured before the fix.
+  - Fix: `clause-plan.ts` reads each quote style on its own pass: double, typographic, back quotes, then single. Each style has its own bound of 40.
+- (Low) **The reason for an unmade check was dropped.** When the host gave no list, the refusal said only "the host did not list them". The host's own reason never reached the agent or the owner: no checkout, a listing that failed, or a remote host.
+  - Fix: the dispatcher now names the reason, redacted and quoted to 300 characters.
+  - The remote host (`remote/host.ts verify`) now adds the check it did not carry back as `not-run`, with "<host> is a remote host, which does not run a check of the changed test files yet (its list does not cross the wire), so this check cannot pass there". The done on a remote host stays `unknown` and is never a pass, as before, and now it says why.
+- **Weak tests strengthened** (each first survived a breakage):
+  - Dropping `--no-renames` survived. Without it, a test file the change moves is read as a rename, which is neither added nor modified, so it is never run. New real-checkout test: a moved test is listed as added at its new path.
+  - A change with no test file read as `unknown` instead of `failed` survived, because the clause line also failed it. New: with no clauses, it is `failed`.
+
+**Checked and found sound** (measured on Node 22.23.0 and 24.21.0).
+- File names that `node --test` might read some other way all ran the named failing file and exited 1. Tried: a leading `#`, spaces, `:`, a `file:` folder, `~`, `+`, `@`, `|`, `$`, a dot folder, and `!` alone or mid-name. A committed `node_modules/` test gives "Could not find" and exits 1, so it fails closed.
+- `test.only` without `--test-only` still runs every test on both versions. The agent cannot pass node options: the command is argv from the contract, and the sandbox env is fresh.
+- Bubblewrap uses `--unshare-all` (its own pid namespace) and `--die-with-parent`, so a test's children cannot outlive the check.
+- 22,248 is the largest fixed part that `windowCanStartTask(36864, ...)` admits: 22,249 is refused, and 36,863 refuses 22,248. The fixed part is measured at 22,233.
+- Hostile input stays bounded. A 64 KiB hostile plan is judged in at most 5 ms per pattern. `testTitles` on a megabyte of hostile text takes at most 52 ms.
+- An unknown or failed done counts toward the go-ons. A contract change by the attempt's own agent does not count.
+
+**Deliberate breakages** (own, different from the earlier 24 and 21). 24 breakages of the built files, each restored by sha256. 21 were caught.
+- Neutral: dropping the extra `redactText` on the host's reason, because `quoted()` already redacts.
+- Neutral: allowing `!` in a run name. A lone `!` is not special to Node's glob, as measured, so the rule is only conservative.
+- Neutral: dropping the list from the no-checkout report. Without a checkout there is also no list.
+
+**Runs** (one at a time per slot through the test slot, the sandbox required, the offline guard, TMPDIR /tmp/claude-1000/w09s2-r2). The same 172 files as the first review.
+- Node 22.23.0: 3,897 tests, 3,895 passing, 0 failing, 2 Windows-only skips.
+- Node 24.21.0: the same.
+- `npm ci --ignore-scripts --offline`, `tsc --build --force`, api:docs:write (no change), check:deps, licenses:check and roadmap:check are clean, and plan.test passes 6 of 6.
+
+**Residual (not fixed).**
+- A done can pass when no test of the clause actually ran. Examples: only skipped tests, an empty `describe`, a file that calls `process.exit(0)`, or a test that asserts nothing all exit 0.
+  - Counting `pass N` in the output would not help much. An empty test passes anyway, the check's reporter and runner are the contract's choice (not always node's TAP), and the output is cut.
+  - The check stays file- and name-level, as the slice says.
+- A built file the agent edits by hand after the build is newer than its source, so an incremental `tsc --build` leaves it. The run then executes a test that differs from the source reviewers read. A contract can avoid this with a forced build.
+- In single quotes, a name that holds an apostrophe stays ambiguous. The done note's form uses double quotes.
+- At a landing, a `changedTests` check runs bare. A bare `node --test` runs every JavaScript test of the export (recorded on the field as the first slice's ASSUMPTION).

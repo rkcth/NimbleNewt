@@ -1226,7 +1226,8 @@ export class DispatcherService {
         if (c.changedTests === true) {
           // Card W09 second slice: the check runs the test files the change adds or changes. The host lists them; a host that does not (an older or a remote one) leaves the check unmade, never passed.
           const t = changedTestsOf(report.changedTests);
-          if (t === undefined) { ran.push({ name: c.name, state: "not-run" }); cannot(`Check ${quoted(c.name, 80)} runs the test files your change adds or changes, and the host did not list them, so it could not be made.`); continue; }
+          // Second review: the host's own reason (no checkout, a listing that failed, a remote host) is named, redacted and bounded, as for any check it could not run.
+          if (t === undefined) { ran.push({ name: c.name, state: "not-run" }); cannot(`Check ${quoted(c.name, 80)} runs the test files your change adds or changes, and the host did not list them, so it could not be made${r?.state === "not-run" && typeof r.reason === "string" && r.reason !== "" ? `: ${quoted(redactText(r.reason), 300)}` : ""}.`); continue; }
           if (t.count === 0) { ran.push({ name: c.name, state: "failed" }); fail(`Check ${quoted(c.name, 80)} runs the test files your change adds or changes, and it adds or changes none (a file named *.test.* or *.spec.*): write tests for what the task asks and end again.`); continue; }
           if (t.count > t.files.length) { ran.push({ name: c.name, state: "failed" }); fail(`Check ${quoted(c.name, 80)} runs the test files your change adds or changes, and it has ${t.count} of them, more than the ${t.files.length} one check runs.`); continue; }
           const unbuilt = t.files.filter((f) => f.built === null);

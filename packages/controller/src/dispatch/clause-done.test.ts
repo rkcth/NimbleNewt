@@ -87,18 +87,33 @@ for (const backend of backends) {
         verdicts.push(await w.dispatcher.verifyDone(w.dispatcherPrincipal, attemptId, { key: "k1" }));
         next = { ...report({}), changedTests: { count: 1, files: [{ path: "", built: null, titles: [] }], plan: { text: "" } } };
         verdicts.push(await w.dispatcher.verifyDone(w.dispatcherPrincipal, attemptId, { key: "k2" }));
+        // Second review: the host's own reason for not listing them is named, redacted.
+        next = report({ tests: null, run: { name: "the tests your change adds", state: "not-run", reason: "r1 is a remote host, which does not run a check of the changed test files yet; key sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" } });
+        verdicts.push(await w.dispatcher.verifyDone(w.dispatcherPrincipal, attemptId, { key: "k2b" }));
       });
-      for (const v of verdicts) {
+      assert.equal(verdicts.length, 3);
+      for (const [i, v] of verdicts.entries()) {
         assert.equal(v.state, "unknown");
-        if (v.state === "unknown") assert.match(v.message, /Check "the tests your change adds" runs the test files your change adds or changes, and the host did not list them, so it could not be made\./);
+        if (v.state === "unknown" && i < 2) assert.match(v.message, /Check "the tests your change adds" runs the test files your change adds or changes, and the host did not list them, so it could not be made\./);
+        if (v.state === "unknown" && i === 2) {
+          assert.match(v.message, /and the host did not list them, so it could not be made: "r1 is a remote host, which does not run a check of the changed test files yet; key /);
+          assert.ok(!v.message.includes("AAAAAAAAAAAAAAAAAAAAAAAA"), v.message);
+        }
       }
       const { taskId: plain } = await w.task("no clauses", ann);
       await contract(w, plain, []);
       next = report({ tests: { count: 1, files: FILES, plan: { why: "there is no PLAN.md at the top of your checkout" } } });
       let content = "";
       const more: DoneVerdict[] = [];
-      await turn(w, async (attemptId, c) => { content = c; more.push(await w.dispatcher.verifyDone(w.dispatcherPrincipal, attemptId, { key: "k3" })); });
+      await turn(w, async (attemptId, c) => {
+        content = c;
+        more.push(await w.dispatcher.verifyDone(w.dispatcherPrincipal, attemptId, { key: "k3" }));
+        // Second review: with no clauses, a change with no test file is still refused as failed (the agent can fix it), not as a check that could not be made.
+        next = report({ tests: { count: 0, files: [], plan: { why: "none" } }, run: { name: "the tests your change adds", state: "not-run", reason: "the change's test files cannot be run as they are" } });
+        more.push(await w.dispatcher.verifyDone(w.dispatcherPrincipal, attemptId, { key: "k4" }));
+      });
       assert.equal(more[0]!.state, "passed", "no clauses: the plan is not judged (the old behaviour), only the tests");
+      assert.equal(more[1]!.state, "failed", "no test file: failed, not unknown");
       assert.ok(content.includes("runs the test files your change adds or changes") && !content.includes("clause(s)"), content);
     } finally { await store.close(); }
   });

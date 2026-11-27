@@ -147,7 +147,9 @@ for (const backend of backends) {
     responder.handle(listed);
     const got = await pending;
     assert.equal("changedTests" in got, false, "a list the host sends anyway is not carried back");
-    assert.ok(!got.checks.some((x) => x.name === "changed tests"));
+    // Second review: the check not carried comes back not run, with the reason, so the refusal says why (never a pass).
+    assert.deepEqual(got.checks.filter((x) => x.name === "changed tests"), [{ name: "changed tests", state: "not-run", reason: "host:r1 is a remote host, which does not run a check of the changed test files yet (its list does not cross the wire), so this check cannot pass there" }]);
+    assert.equal(got.checks.length, request.checks.length + 1);
   });
 
   suite("a host that cannot check, fails, or sends a report that does not fit gives no report: the dispatcher is told it could not look, never a pass (card H12a)", async (c) => {

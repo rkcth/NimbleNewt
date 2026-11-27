@@ -28,6 +28,17 @@ test("every clause with a ticked step naming a test file of the change and one o
   assert.equal(clausePlanProblem(["x"], report("- [ ] C1: later\r\n- [x] C1: packages/controller/src/chat/chat.test.ts \"a preview is one line\"\r\n")), undefined);
 });
 
+test("an apostrophe in the step or in the name does not hide a name quoted in another style (second review: one alternation paired can't with doesn't and swallowed the opening double quote)", () => {
+  const f: ChangedTestsReport["files"] = [{ path: "src/a.test.ts", built: "dist/a.test.js", titles: ["doesn't cut a pair", "cuts whole"] }];
+  for (const step of [
+    `- [x] C1: it can't break: src/a.test.ts "doesn't cut a pair"`,
+    `- [x] C1: Bob's case, src/a.test.ts "cuts whole" (it's fine)`,
+    `- [x] C1: the helper's test, src/a.test.ts \`cuts whole\` isn't skipped`,
+    `- [x] C1: won't split, src/a.test.ts \u201cdoesn't cut a pair\u201d, that's all`,
+  ]) assert.equal(clausePlanProblem(["one"], report(step, f)), undefined, step);
+  assert.match(clausePlanProblem(["one"], report(`- [x] C1: can't, src/a.test.ts "doesn't cut" a pair'`, f))!, /names "src\/a\.test\.ts" but none of its tests by name in quotes/);
+});
+
 test("each kind of gap is named for its clause, in the contract's order, with the clause quoted and what would satisfy it", () => {
   const plan = [
     "- [ ] C1: packages/controller/src/chat/commands.test.ts \"a label is quoted\"",
