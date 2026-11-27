@@ -1799,4 +1799,70 @@ for (const backend of backends) {
     const k7 = (await plainSvc.list(c.owner, { taskId: t7 })).items[0]!;
     assert.equal((await plainSvc.decide(c.owner, { commandId: cid("d"), concernId: k7.id, expectedRevision: k7.revision, decision: "confirm", reason: "yes" })).replayed, false);
   });
+  suite("onConcern in the scan: a failing hook never fails the scan or its clearing; the steps taken are named oldest first; a clearing write that loses to a concurrent decision tells nothing (card B02, second slice)", async (c) => {
+    const told: ConcernEvent[] = [];
+    const notes: string[] = [];
+    let fail = false;
+    const setting = RecoveryLadderService.withEpoch(c.storage, c.projects.epoch, options);
+    const effects: RecoveryEffects = { run: async () => ({}), unavailable: async () => "not here" };
+    const more: StallOptions = { onConcern: async (e) => { if (fail) throw new Error("the observations are down"); told.push(e); }, onNote: (m) => notes.push(m), recoveryPolicy: () => setting.policy(), recoveryEffects: effects };
+    const svc = c.service(more);
+    const h = await c.host("h1");
+    const loop = async (t: string) => { for (let i = 0; i < 6; i++) await c.send(h, t, step("run tests", "tests")); };
+    const concernOf = async (t: string) => (await svc.list(c.owner, { taskId: t })).items[0]!;
+    const nudge = async (id: string, action: RecoveryAction = "nudge") => { const k = (await svc.get(c.owner, id))!; return svc.recover(c.owner, { commandId: cid("rc"), concernId: id, expectedRevision: k.revision, action, text: "please report" }); };
+
+    // Two steps taken: the recovery names both, oldest first.
+    const t1 = await c.work();
+    await loop(t1); await svc.scan(c.owner);
+    const k1 = await concernOf(t1);
+    await nudge(k1.id); await nudge(k1.id, "rebrief");
+    await c.send(h, t1, { type: "evidence", item: "tests green" });
+    await svc.scan(c.owner);
+    assert.deepEqual(told.map((e) => [e.stage, e.concernId, e.steps]), [["recovered", k1.id, ["nudge", "rebrief"]]]);
+    told.length = 0;
+
+    // The hook failing in the scan: the concern is cleared and counted, the failure noted, the scan goes on.
+    fail = true;
+    const t2 = await c.work();
+    await loop(t2); await svc.scan(c.owner);
+    const k2 = await concernOf(t2);
+    await nudge(k2.id);
+    await c.send(h, t2, { type: "evidence", item: "tests green" });
+    const report = await svc.scan(c.owner);
+    assert.equal(report.cleared, 1);
+    assert.equal((await svc.get(c.owner, k2.id))!.clearedBecause, "the signals recovered");
+    assert.ok(notes.some((m) => m.includes(k2.id) && /recovered concern .* could not be told on \(the observations are down\)/.test(m)), notes.join("\n"));
+    fail = false;
+
+    // The clearing write loses to a confirmation made meanwhile: the scan counts it contended and tells no recovery (the confirmation stands).
+    const t3 = await c.work();
+    await loop(t3); await svc.scan(c.owner);
+    const k3 = await concernOf(t3);
+    await nudge(k3.id);
+    await c.send(h, t3, { type: "evidence", item: "tests green" });
+    let armed = true;
+    const racing = new Proxy(c.storage, {
+      get(target, prop) {
+        if (prop === "applyOperation") {
+          return async (input: { changes: readonly { ref: { kind: string; id: string }; body?: { state?: string } }[] }) => {
+            if (armed && input.changes.some((ch) => ch.ref.kind === "stall-concern" && ch.ref.id === k3.id && ch.body?.state === "cleared")) {
+              armed = false;
+              const now3 = (await c.stall.get(c.owner, k3.id))!;
+              await c.stall.decide(c.owner, { commandId: cid("race"), concernId: k3.id, expectedRevision: now3.revision, decision: "confirm", reason: "confirmed meanwhile" });
+            }
+            return target.applyOperation(input as never);
+          };
+        }
+        const value = Reflect.get(target, prop, target) as unknown;
+        return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    const raced = StallService.withEpoch(racing, c.projects.epoch, c.assignments, c.waits, { ...options, hostStaleAfterMs: 60_000, ...more });
+    const lost = await raced.scan(c.owner);
+    assert.equal(armed, false, "the race was run");
+    assert.equal(lost.contended, 1);
+    assert.equal((await svc.get(c.owner, k3.id))!.state, "confirmed");
+    assert.equal(told.length, 0, "a clearing that was not written is not a recovery");
+  });
 }

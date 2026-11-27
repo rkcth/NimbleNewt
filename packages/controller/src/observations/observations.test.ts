@@ -349,7 +349,7 @@ for (const backend of backends) {
       [[{ kind: "stall-concern", id: stl }], /names its event: confirmed/],
       ...["confirmed", "recovered.", "confirmed.01", "confirmed.-1", "confirmed.1000000000", "failed.1", "confirmed.1\n", "Confirmed.1", "confirmed.1.2", " confirmed.1", "", "confirmed.१"].map((event): [unknown[], RegExp] => [[{ kind: "stall-concern", id: stl, event }], /names its event: confirmed/]),
       ...[1, null, { stage: "confirmed" }].map((event): [unknown[], RegExp] => [[{ kind: "stall-concern", id: stl, event }], /names its event: confirmed/]),
-      [[{ kind: "submission", id: await c.submission(c.a, c.taskA), event: "confirmed.0" }], /only a stall concern names an event/], [[{ kind: "task", id: c.taskA, event: "confirmed.0" }], /only a stall concern names an event/],
+      [[{ kind: "submission", id: await c.submission(c.a, c.taskA), event: "confirmed.0" }], /only a stall concern names an event/], [[{ kind: "task", id: c.taskA, event: "confirmed.0" }], /only a stall concern names an event/], [[{ kind: "observation", id: fid, event: "confirmed.0" }], /only a stall concern names an event/],
       ...[`stl-${c.taskA.slice(5)}-0000000001-other`, `stl-${c.taskA.slice(5)}-000000001-loop`, `stl-${c.taskA.slice(5)}-0000000001-repeated_errors`, `stl-../../${c.taskA.slice(5)}-0000000001-loop`, `stl-${c.taskA.slice(5).toUpperCase()}-0000000001-loop`, `${stl}\n`, `${stl}-x`, `stl-${"a".repeat(19)}-0000000001-loop`, c.taskA].map((id): [unknown[], RegExp] => [[{ kind: "stall-concern", id, event: "confirmed.0" }], /with its ID/]),
       [[{ kind: "stall-concern", id: stl, event: "confirmed.0", extra: true }], undefined],
     ];
