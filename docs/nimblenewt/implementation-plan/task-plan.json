@@ -7115,12 +7115,30 @@
       ],
       "deliverable": "Split from U09 (2026-10-31): the replay service, its API operations and the chat view exist, with outcome, branch and supersedes accepted on `activity.record`, but nothing yet fills them. Left: a web view in packages/ui over the `activity.replay.*` contract (summary first, step-through, lanes shown side by side, thinking collapsed and labelled as model output); the producers (dispatcher, tool bridge, messaging, meetings, branches, owner corrections) set outcome, branch and supersedes; the controller composes `ThinkingService` and the retention marker from K06c so `activity.replay.thinking` works and the removed-by-retention wording is real; links resolved to messages, diffs and comments the reader may read; a rerun or simulation as a separate command in an isolated scope (P07); the validation with a task branch, provider switch, compressed history, failed tool and a later owner correction run through the running controller",
       "acceptance_and_verification": "The scenario of U09 replays through the running controller and the web view with zero effects asserted against the effect ledger, router and outbox; the producers' steps carry honest outcomes; the owner expands thinking in the composed controller and after K06c's deletion sees only the retention notice, with the timeline and audit records unchanged; a rerun is refused inside replay and runs only as a separate simulation command",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "771b0a37",
+          "58258c4d",
+          "9ace5e77",
+          "c1f346a8",
+          "cdfa762c",
+          "0a38229a",
+          "adf821a8"
+        ],
+        "ci_runs": [
+          "45944124327",
+          "45935395027"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "The replay is finished: a Replay tab in the web view (summary first, step-through, lines side by side with the 'happened side by side' label, one step with its resolved links, search, thinking collapsed behind a button and labelled as model output, a simulate button that asks first; owner session, CSRF and Idempotency-Key on every POST, text only); producers set outcome, line and supersedes honestly (dispatcher tool calls and route choices including a provider switch, tool bridge writes, jobs, maintenance requests and service operations, messages, meeting decisions, branches, compaction, reviews, submissions, the owner's correction with replaces); the composed controller holds ThinkingService and the K06c retention marker, so the owner's look is one recorded write and after retention only 'removed by retention' is shown with the timeline and audit records unchanged; links resolve messages, submissions (identity only, no diff lines), reviews, artifacts and side lines for the reader, agent text marked untrusted; activity.replay.rerun is always refused and activity.replay.simulate is a separate owner-only command recorded in the task's P07 simulation scope with no effect, delivery or model call. Proof: api/start-replay-producers (the card's scenario with every step from its real producer, SQLite and PostgreSQL), api/start-replay-finish (zero effects against the effect ledger, the outbox and its counter, the operations write log and counting model stand-ins; retention), activity/replay-finish (four backends), dispatcher-outcome and the dispatcher suites, toolbridge/service, start-jobs, start-maintenance-bridge, start-p03b-bridge, start-meeting-record, ui replay. Limits: no real browser drives the page (route tests and the served script on a fake document only); no live thinking from a real model and no Pi-side copy of K06c's deletion; zero router calls is shown through a counting stand-in per model client (no router object is exposed); the composed scenario runs on SQLite and PostgreSQL only (the two stores startController takes; the services have four-backend suites); the dispatcher's tool-call and route steps stay on the main line while a side line is open (the controller does not know which line a call served); a maintenance.request approved at once by a standing permission still shows 'proposed' (it understates and never shows done; recorded as an ASSUMPTION); the 'uncertain' step written for an attempt that stopped without a clean end is not pinned by a test."
+      }
     },
     {
       "id": "U08",
