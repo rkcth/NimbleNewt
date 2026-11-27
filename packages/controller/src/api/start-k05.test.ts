@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, createHmac } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { DatabaseSync } from "node:sqlite";
+import { holdDatabaseLocked, makeForeignDatabase } from "../storage/sqlite/testing/raw-db.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -159,11 +159,10 @@ test("a restore the old controller staged BEFORE the fence is not swapped in at 
     const fenced = await state();
     // K05 re-check: another program holding the database locked past the epoch read's timeout refuses the start; nothing is moved and the restore is not recorded as failed (it was not decided)
     const pendingBefore = readFileSync(join(d, PENDING_FILE), "utf8");
-    const holderDb = new DatabaseSync(dbPath);
+    const letGo = holdDatabaseLocked(dbPath);
     try {
-      holderDb.exec("PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE");
       await assert.rejects(startController(base as never), /in use by another program/);
-    } finally { holderDb.exec("ROLLBACK"); holderDb.close(); }
+    } finally { letGo(); }
     assert.equal(readFileSync(join(d, PENDING_FILE), "utf8"), pendingBefore, "the marker is as it was");
     assert.deepEqual(await state(), fenced, "nothing was moved while the database was held");
     // the old controller's restart: the restore is not swapped in and the start check refuses it
@@ -198,13 +197,12 @@ test("the live SQLite epoch is read without leaving anything behind: a real cont
     writeFileSync(junk, "not a database at all, just some bytes that are long enough to be read".repeat(20));
     assert.equal(readSqliteEpoch(junk), undefined, "not a database");
     const other = join(d, "other.sqlite");
-    const o = new DatabaseSync(other); o.exec("CREATE TABLE t (x)"); o.close();
+    makeForeignDatabase(other);
     assert.equal(readSqliteEpoch(other), undefined, "a database without the state table");
-    const h = new DatabaseSync(p);
+    const letGoOfIt = holdDatabaseLocked(p);
     try {
-      h.exec("PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE");
       assert.throws(() => readSqliteEpoch(p), /in use by another program/);
-    } finally { h.exec("ROLLBACK"); h.close(); }
+    } finally { letGoOfIt(); }
     assert.equal(readSqliteEpoch(p), epoch, "readable again once let go");
   } finally { rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); }
 });
