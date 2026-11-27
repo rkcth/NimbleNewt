@@ -125,7 +125,7 @@ function findCheckout(workRoot) {
 
 const TESTS = 'import { test } from "node:test"; import assert from "node:assert/strict"; import { b } from "./b.mjs";\ntest("b equals two", () => assert.equal(b, 2));\ntest("b is a number", () => assert.equal(typeof b, "number"));\n';
 
-test("end to end on the real worker: a done with no test of its own is refused, then one whose PLAN.md leaves a clause unmapped, each with its reason as the work.end answer; the done that maps both clauses to passing tests is taken and verified (W09 second slice)", async (t) => {
+test("end to end on the real worker: a done with no test of its own is refused, then one whose PLAN.md leaves a clause unmapped, each with its reason as the work.end answer; the done that maps both clauses to passing tests is questioned about each clause its report does not show tested (W09 third slice), answered, and taken and verified (W09 second slice)", async (t) => {
   const s = await sandboxUsable();
   if (!s.usable) { if (required && process.platform === "linux") assert.fail(`NIMBLENEWT_REQUIRE_SANDBOX=1 but the sandbox is unusable: ${s.why}`); return t.skip("bubblewrap or a node install it can mount is unusable"); }
   const parent = tmp("e2e");
@@ -140,6 +140,9 @@ test("end to end on the real worker: a done with no test of its own is refused, 
       if (i === 1) { writeFileSync(join(checkout, "src", "b.mjs"), "export const b = 2;\n"); writeFileSync(join(checkout, "PLAN.md"), "- [x] add b\n"); return end(); }
       if (i === 2) { writeFileSync(join(checkout, "src", "b.test.mjs"), TESTS); writeFileSync(join(checkout, "PLAN.md"), '- [x] C1: src/b.test.mjs "b equals two"\n- [ ] C2: later\n'); return end(); }
       if (i === 3) { writeFileSync(join(checkout, "PLAN.md"), '- [x] C1: src/b.test.mjs "b equals two"\n- [x] C2: src/b.test.mjs "b is a number"\n'); return end(); }
+      // W09 third slice: the report names no clause, so the second agent's supported is held back with the controller's question per clause; the agent answers both and ends again.
+      if (i === 4) return callReply("nimblenewt__work-answer", { answers: ['src/b.test.mjs "b equals two" ok 1', 'src/b.test.mjs "b is a number" ok 2'] });
+      if (i === 5) return end();
       return textReply("Ended: src/b.mjs and its tests are added.");
     };
     const fetch = async (url, init) => {
@@ -161,8 +164,11 @@ test("end to end on the real worker: a done with no test of its own is refused, 
     assert.ok(first.includes("The contract has 2 clause(s), in this order: C1 ") && first.includes("Whatever the input, `b` is a number."), first.slice(0, 3000));
     assert.ok(allText(bodies[1]).includes("runs the test files your change adds or changes, and it adds or changes none"), "the first refusal: no test of its own");
     assert.ok(allText(bodies[2]).includes("PLAN.md does not map 1 of the contract's 2 clause(s) to a test of your change: C2"), "the second refusal: C2 not mapped");
+    const held = allText(bodies[3]);
+    assert.ok(held.includes("a second agent questions your report") && held.split("your report does not show this clause tested").length === 3 && /C1 .{0,12}b equals|C1 /.test(held) && held.includes("C2 "), held.slice(-1500));
     assert.equal(r.outcome, "verified-finish", `${r.reason} ${JSON.stringify(r.worker)}`);
-    assert.deepEqual(r.worker.verifications, ["failed", "failed", "passed"], "two refused dones, neither a finish, then the verified one");
+    assert.deepEqual(r.worker.verifications, ["failed", "failed", "passed", "passed"], "two refused dones, neither a finish, then the verified one, checked again at the work.end after the answers (W09 third slice)");
+    assert.deepEqual([r.worker.questioning, r.worker.questions], ["supported", 2], "one question per clause the report did not show tested, then supported");
     assert.deepEqual(r.worker.lastChecks, [{ name: "the build", state: "passed" }, { name: "the tests your change adds or changes", state: "passed" }]);
     assert.equal(r.hidden.passed, true);
   } finally { try { execFileSync("chmod", ["-R", "u+rwX", parent]); } catch { /* none */ } rmSync(parent, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
