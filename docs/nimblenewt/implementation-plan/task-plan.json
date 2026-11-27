@@ -9287,12 +9287,31 @@
       ],
       "deliverable": "Split from P03 (2026-10-31). Agent-facing tools in the protected tool bridge (T06) and the Pi extension for artifact.publish, deliverable.draft/submit and service.operate/observe, chat commands for the owner to grant, narrow and read a per-resource service right and to see an operation's outcome, and a ServiceTarget connector for a real system class beyond the simulated sandbox target",
       "acceptance_and_verification": "An agent in a real attempt publishes its research or design output, drafts and submits the deliverable and repairs a service through the bridge, with the same scope, fence and effect-ledger rules as the API; the owner narrows a service right in chat at once and widening is proposed; the connector reads the real system back before an effect is confirmed; a real-model trial on a non-code task is recorded",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "d14b4436",
+          "c1f8f699",
+          "a2ab13d3",
+          "f9187858",
+          "52277d21",
+          "374d887e",
+          "59d88185",
+          "b092b48c",
+          "ce5e7ceb"
+        ],
+        "ci_runs": [
+          "45926151243"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Agents publish findings, draft and submit deliverables and repair a service through the protected tool bridge with the API's scope, fence and effect-ledger rules; the owner is proposed a right on one service resource in chat and granted it only on yes, and taking one back in chat applies at once; the chat says what each operation did; a real ServiceTarget connector (the files of one bound folder) confirms an effect only by reading the file back. Real-model trial (clause 4): 2026-11-26 22:52 EST on the local server, model qwen3.8-flash-next-iq4r, 21 model requests, 73 s, attempt succeeded, one confirmed and read-back operation (replicas 3 on disk, neighbour unchanged), findings published, report and operational outcome submitted (evidence/p03b-radiance-run1*.json; its modelCalls 0 counts the scripted stand-in and is explained in the note). Limits: no independent Q01 reviewer verdict on the trial's deliverables (the test closes its controller before any review); one trial run on one model; the trial rig cannot send a server key (a loopback forwarder was used) and its evidence keeps neither tool answers nor refusals; the folder connector is the only real kind and refuses on Windows; no configuration key binds a folder at launch and the owner cannot bind one by chat; binary artifacts and deliverable.revise / deliverable.version.new through the bridge are not built; a process with the controller's own rights could swap the service folder between checks; Y02 remains a planned dependency of P03."
+      }
     },
     {
       "id": "P04",
