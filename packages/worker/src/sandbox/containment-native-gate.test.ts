@@ -5,9 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, test } from "node:test";
-import { REQUIRED_CASE_IDS, assessRelease, isLinkRightInconclusive, parseReport, type CaseResult, type ContainmentReport, type NativeWindowsEvidence } from "./containment.js";
+import { AFTER_SIGNOUT_REQUIRED, REQUIRED_CASE_IDS, afterSignOutProblems, assessRelease, isLinkRightInconclusive, parseReport, type AfterSignOutEvidence, type CaseResult, type ContainmentReport, type NativeWindowsEvidence } from "./containment.js";
 import { redactReport } from "./containment-windows-evidence.js";
-import { PACKAGED_CONTROLLER_EXISTS, attachNativeWindowsEvidence, collectNativeEvidence, grantsReadBackOf, nativeWindowsEvidence, type NativeEvidenceInput } from "./containment-windows-native-evidence.js";
+import { AFTER_SIGNOUT_SCHEMA, PACKAGED_CONTROLLER_EXISTS, attachNativeWindowsEvidence, collectNativeEvidence, grantsReadBackOf, nativeWindowsEvidence, parseAfterSignOut, type NativeEvidenceInput } from "./containment-windows-native-evidence.js";
 
 // Card A03b: the Windows release gate on AppContainer-era evidence (owner decision 2026-11-26: keep the AppContainer launcher, no Windows Sandbox).
 // The fixtures below are the owner's real-PC run (own-hardware run 45881452017, commit 276883c4, Windows 10.0.26200 x64, home-desktop mode), copied byte for byte from its redacted results zip:
@@ -72,6 +72,9 @@ const without = (r: ContainmentReport, key: "nativeWindows" | "trustedHost"): Co
 const withNative = (r: ContainmentReport, change: (n: NativeWindowsEvidence) => NativeWindowsEvidence): ContainmentReport => ({ ...r, nativeWindows: change(r.nativeWindows!) });
 const withCase = (r: ContainmentReport, id: string, change: (c: CaseResult) => CaseResult | undefined): ContainmentReport =>
   ({ ...r, cases: r.cases.flatMap((c) => (c.id === id ? (change(c) === undefined ? [] : [change(c)!]) : [c])) });
+/** What `run-g05.ps1 -AfterSignIn` writes when the sign-out check holds (windows-native-signout.ts afterSignIn): the task stopped by the sign-out, swept, recorded as interrupted. */
+const GOOD_AFTER: AfterSignOutEvidence = { held: true, newLogon: true, taskRunningAfter: false, profileLeftBeforeSweep: true, sweepProblems: 0, leftoverAfterSweep: 0, grantsAfter: "clean", interruptedRecorded: true };
+const afterRaw = (over: Partial<Record<keyof AfterSignOutEvidence, unknown>> = {}): string => JSON.stringify({ schema: AFTER_SIGNOUT_SCHEMA, afterSignOut: { ...GOOD_AFTER, ...over } });
 const hosted = (): ContainmentReport => withEvidence({ ...robReport(), cases: robReport().cases.map((c) => ({ ...c, verdict: "pass", detail: "held; the same attempt got through without the sandbox" })) }, fullInput({ symlinkRight: true }));
 
 describe("A03b Windows release gate: what passes", () => {
@@ -386,7 +389,9 @@ describe("A03b native Windows evidence: the info line as the launcher writes it 
 
 describe("A03b Windows release gate: every single-field change of the owner's real-shape report (table-driven)", () => {
   type Json = null | boolean | number | string | Json[] | { [k: string]: Json };
-  const base = (): Json => JSON.parse(JSON.stringify(withEvidence(robReport()))) as Json;
+  /** The fixture fuzzed: the owner's real-shape report, and the same with a sign-out check that holds (`withAfter`). */
+  let withAfter = false;
+  const base = (): Json => JSON.parse(JSON.stringify(withAfter ? withEvidence(robReport(), fullInput({ afterSignOutRaw: afterRaw() })) : withEvidence(robReport()))) as Json;
   /** Every path to a value of the report (arrays by index). */
   const paths = (v: Json, at: (string | number)[] = []): (string | number)[][] => {
     if (Array.isArray(v)) return v.flatMap((x, i) => [[...at, i], ...paths(x, [...at, i])]);
@@ -432,6 +437,9 @@ describe("A03b Windows release gate: every single-field change of the owner's re
     if (key === "nativeWindows.sessionId") return typeof after === "number" && after !== 0;
     if (key === "nativeWindows.accountKind") return after === "standard" || after === "administrator-filtered";
     if (key === "nativeWindows.packagedControllerWorkingDirectory.passed") return typeof after === "boolean";
+    // The sign-out check: optional while AFTER_SIGNOUT_REQUIRED is false (removing it whole is today's report), and whether the held profile was still there before the sweep is not judged.
+    if (key === "nativeWindows.afterSignOut") return after === undefined && !AFTER_SIGNOUT_REQUIRED;
+    if (key === "nativeWindows.afterSignOut.profileLeftBeforeSweep") return typeof after === "boolean";
     return false;
   };
   test("the unchanged report passes (two link cases and the working-directory check accepted)", () => {
@@ -440,7 +448,7 @@ describe("A03b Windows release gate: every single-field change of the owner's re
     const g = gate(p.report);
     assert.deepEqual([g.ok, g.accepted.length], [true, 3]);
   });
-  test("every removal or change of one field is refused (by parseReport or by the gate) unless the gate deliberately does not judge that field", () => {
+  const fuzz = (): { tried: number; refusedCount: number; slipped: string[] } => {
     let tried = 0, refusedCount = 0;
     const slipped: string[] = [];
     for (const p of paths(base())) {
@@ -454,8 +462,22 @@ describe("A03b Windows release gate: every single-field change of the owner's re
         if (!free(p, before, m.value)) slipped.push(`${p.join(".")} ${m.name}`);
       }
     }
+    return { tried, refusedCount, slipped };
+  };
+  test("every removal or change of one field is refused (by parseReport or by the gate) unless the gate deliberately does not judge that field", () => {
+    const { tried, refusedCount, slipped } = fuzz();
     assert.deepEqual(slipped, [], `passed the gate although they should not: ${slipped.join(" | ")}`);
     assert.ok(tried > 1500 && refusedCount > tried * 0.8, `${refusedCount} of ${tried} refused`);
+  });
+  test("the same over the report with a sign-out check that holds: every change of a judged sign-out field is refused, removing the whole check is today's report", () => {
+    withAfter = true;
+    try {
+      const p = parseReport(JSON.stringify(base()));
+      assert.ok("report" in p && p.report.nativeWindows?.afterSignOut !== undefined && gate(p.report).ok, "the base passes");
+      const { tried, refusedCount, slipped } = fuzz();
+      assert.deepEqual(slipped, [], `passed the gate although they should not: ${slipped.join(" | ")}`);
+      assert.ok(tried > 1700 && refusedCount > tried * 0.8, `${refusedCount} of ${tried} refused`);
+    } finally { withAfter = false; }
   });
   test("whole-report forms: array, a second report, cases reordered, the report repeated in one file, a huge report", () => {
     assert.ok("error" in parseReport(JSON.stringify([base()])));
@@ -466,5 +488,104 @@ describe("A03b Windows release gate: every single-field change of the owner's re
     const r = withEvidence(robReport());
     assert.equal(gate({ ...r, cases: [...r.cases].reverse() }).ok, true, "order does not matter");
     assert.equal(assessRelease([r, r], { commit: ROB_COMMIT, now: NOW, platforms: ["win32"] }).ok, false, "two reports for one platform");
+  });
+});
+
+describe("A03b sign-out / restart check in the Windows release gate (optional in this slice, judged when present)", () => {
+  const withAfter = (over: Partial<Record<keyof AfterSignOutEvidence, unknown>> = {}): ContainmentReport => withEvidence(robReport(), fullInput({ afterSignOutRaw: afterRaw(over) }));
+  test("the owner's report with a check that holds passes with the same three items accepted; without the check it still passes and the check is listed as not proven", () => {
+    const g = gate(withAfter());
+    assert.deepEqual([g.ok, g.blockers, g.accepted.length], [true, [], 3]);
+    assert.deepEqual(withAfter().nativeWindows?.afterSignOut, GOOD_AFTER);
+    const made = nativeWindowsEvidence(fullInput({ afterSignOutRaw: afterRaw() }));
+    assert.ok("evidence" in made && !made.notProven.some((n) => /signs out/.test(n)), "a check that is there is not 'not proven'");
+    const plain = nativeWindowsEvidence(fullInput());
+    assert.ok("evidence" in plain && plain.notProven.some((n) => /a run attempted after the owner signs out/.test(n)) && plain.evidence.afterSignOut === undefined);
+    assert.equal(gate(withEvidence(robReport())).ok, true, "absent: today's report shape still passes (not retroactive)");
+    // The redacted report keeps the block unchanged.
+    const redacted = parseReport(JSON.stringify(redactReport(withAfter(), { users: ["robert"] })));
+    assert.ok("report" in redacted && gate(redacted.report).ok && redacted.report.nativeWindows?.afterSignOut !== undefined);
+    // Either value of profileLeftBeforeSweep is a safe outcome (the runner may have cleaned up itself before Windows ended it).
+    assert.equal(gate(withAfter({ profileLeftBeforeSweep: false })).ok, true);
+  });
+  test("present, every judged field that is bad refuses the report, each with its own reason", () => {
+    const table: [Partial<Record<keyof AfterSignOutEvidence, unknown>>, RegExp][] = [
+      [{ held: false }, /sign-out check: no confined task was seen running/],
+      [{ newLogon: false }, /sign-out check: the logon session did not change/],
+      [{ newLogon: null }, /sign-out check: whether the owner signed out .* was not recorded/],
+      [{ taskRunningAfter: true }, /sign-out check: the held task was still running/],
+      [{ sweepProblems: null }, /sign-out check: the leftover sweep after the sign-in did not run/],
+      [{ sweepProblems: 2 }, /sign-out check: the leftover sweep after the sign-in reported 2 problem/],
+      [{ leftoverAfterSweep: 1 }, /sign-out check: 1 NimbleNewtRun-\* container profile\(s\) were left after the sweep/],
+      [{ leftoverAfterSweep: null }, /sign-out check: the NimbleNewtRun-\* container profiles left after the sweep were not counted/],
+      [{ grantsAfter: "left" }, /sign-out check: an entry for the held run's container was still on a granted path/],
+      [{ grantsAfter: "not-measured" }, /sign-out check: the held run's grants were not read back/],
+      [{ interruptedRecorded: false }, /sign-out check: the held run is not recorded as interrupted/],
+    ];
+    for (const [over, why] of table) {
+      refused(withAfter(over), why);
+      assert.deepEqual(gate(withAfter(over)).accepted, [], "nothing accepted when refused");
+    }
+    // Every field bad at once: one reason per field.
+    assert.equal(afterSignOutProblems({ held: false, newLogon: false, taskRunningAfter: true, profileLeftBeforeSweep: false, sweepProblems: 1, leftoverAfterSweep: 1, grantsAfter: "left", interruptedRecorded: false }).length, 7);
+  });
+  test("AFTER_SIGNOUT_REQUIRED: false in this slice; once true, a report without the check is refused and one with it passes", () => {
+    assert.equal(AFTER_SIGNOUT_REQUIRED, false, "not required in this slice: the gate must keep passing the owner's existing report shape");
+    const required = (r: ContainmentReport) => assessRelease([r], { commit: ROB_COMMIT, now: NOW, platforms: ["win32"], afterSignOutRequired: true });
+    const g = required(withEvidence(robReport()));
+    assert.equal(g.ok, false);
+    assert.ok(g.blockers.some((b) => /sign-out \/ restart check .* is not recorded/.test(b)), g.blockers.join(" | "));
+    assert.equal(required(withAfter()).ok, true);
+    assert.equal(required(withAfter({ interruptedRecorded: false })).ok, false);
+  });
+  test("the open sign-out item cannot outlive the release decision: card D03 (release readiness) is not flipped while AFTER_SIGNOUT_REQUIRED is false", () => {
+    const plan = JSON.parse(readFileSync(fileURLToPath(new URL("../../../../docs/nimblenewt/implementation-plan/task-plan.json", import.meta.url)), "utf8")) as { tasks: { id: string; status: string }[] };
+    const d03 = plan.tasks.find((t) => t.id === "D03");
+    assert.ok(d03 !== undefined, "card D03 is in task-plan.json");
+    if (!AFTER_SIGNOUT_REQUIRED) assert.equal(d03.status, "planned", "run run-g05.ps1 -Hold, sign out, -AfterSignIn on the owner's PC, review the report, and set AFTER_SIGNOUT_REQUIRED to true before D03");
+  });
+  test("read as data: a malformed block is refused by parseReport; a malformed or unreadable check file gives no block at all (never a report without the check)", () => {
+    const base = JSON.parse(JSON.stringify(withAfter())) as { nativeWindows: { afterSignOut: Record<string, unknown> } };
+    const bad = (change: (a: Record<string, unknown>) => void): void => {
+      const copy = JSON.parse(JSON.stringify(base)) as typeof base;
+      change(copy.nativeWindows.afterSignOut);
+      const p = parseReport(JSON.stringify(copy));
+      assert.ok("error" in p && /nativeWindows/.test(p.error), JSON.stringify(copy.nativeWindows.afterSignOut));
+    };
+    for (const k of Object.keys(GOOD_AFTER)) bad((a) => { delete a[k]; });
+    bad((a) => { a["extra"] = true; });
+    bad((a) => { a["held"] = "true"; });
+    bad((a) => { a["taskRunningAfter"] = null; });
+    bad((a) => { a["sweepProblems"] = -1; });
+    bad((a) => { a["sweepProblems"] = 0.5; });
+    bad((a) => { a["leftoverAfterSweep"] = "0"; });
+    bad((a) => { a["leftoverAfterSweep"] = 100_001; });
+    bad((a) => { a["grantsAfter"] = "unreadable"; });
+    bad((a) => { a["interruptedRecorded"] = 1; });
+    bad((a) => { a["newLogon"] = "yes"; });
+    // The file: exactly { schema, afterSignOut }.
+    for (const raw of ["{", "[]", JSON.stringify({ schema: "other/1", afterSignOut: GOOD_AFTER }), JSON.stringify({ schema: AFTER_SIGNOUT_SCHEMA }), JSON.stringify({ schema: AFTER_SIGNOUT_SCHEMA, afterSignOut: GOOD_AFTER, note: "x" }),
+      afterRaw({ held: "yes" }), JSON.stringify({ schema: AFTER_SIGNOUT_SCHEMA, afterSignOut: { ...GOOD_AFTER, extra: 1 } }), "x".repeat(70_000)]) {
+      assert.ok("error" in parseAfterSignOut(raw), raw.slice(0, 80));
+      const m = nativeWindowsEvidence(fullInput({ afterSignOutRaw: raw }));
+      assert.ok("error" in m && /sign-out check file/.test(m.error), raw.slice(0, 80));
+    }
+  });
+  test("the collector reads the file --after-sign-out names; one that cannot be read is an error, not 'not given'", (t) => {
+    const root = mkdtempSync(join(tmpdir(), "nn-a03b-after-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const bin = join(root, "bin"), control = join(root, "control");
+    for (const d of [bin, join(control, "records"), join(control, "hold"), join(root, "Packages")]) mkdirSync(d, { recursive: true });
+    writeFileSync(join(bin, "nn-launcher.exe"), "launcher bytes");
+    writeFileSync(join(bin, "nn-launcher.record.json"), ROB_RECORD);
+    writeFileSync(join(control, "info.txt"), ROB_INFO);
+    writeFileSync(join(control, "hold", "after-sign-out.json"), afterRaw());
+    const src = { infoFile: join(control, "info.txt"), launcher: join(bin, "nn-launcher.exe"), controlDir: control, packagesDir: join(root, "Packages"), since: new Date("2026-11-26T19:10:00Z") };
+    const ok = collectNativeEvidence({ ...src, afterSignOutFile: join(control, "hold", "after-sign-out.json") }, join);
+    assert.ok(!("error" in ok) && ok.afterSignOutRaw === afterRaw());
+    const missing = collectNativeEvidence({ ...src, afterSignOutFile: join(control, "hold", "none.json") }, join);
+    assert.ok("error" in missing && /sign-out check file could not be read/.test(missing.error));
+    const none = collectNativeEvidence(src, join);
+    assert.ok(!("error" in none) && none.afterSignOutRaw === undefined);
   });
 });

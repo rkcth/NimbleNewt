@@ -28,6 +28,15 @@ The repository is public, and a runner executes whatever a workflow tells it to,
 
 With the runner idle: Actions tab, **Own hardware**, **Run workflow**, branch `main`. The probe checks out the repository, installs from the lockfile, records the machine (OS, architecture, Node) and runs the test suite once. The result is in the job summary and in the `own-hardware-*` artifact. Then stop the runner.
 
+**The Windows sign-out check (card A03b), by hand, not through the workflow.** This shows what a sign-out or restart does to a running confined task. The workflow cannot do it, because signing out also stops the runner. Download the artifact `windows-g05-owner-bundle` and extract it to a folder of its own in Downloads, as for the ten cases. In a normal (not elevated) PowerShell window in that folder:
+
+1. `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run-g05.ps1 -Hold` (starts one confined idle task; it ends by itself after 30 minutes at the latest).
+2. Sign out of Windows and sign back in (or restart instead).
+3. `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run-g05.ps1 -AfterSignIn` (checks the task is gone, sweeps what it left, checks again, then runs the ten cases).
+4. Send `nn-g05-results.zip` from the Desktop.
+
+While a hold is recorded, a plain `run-g05.ps1` refuses and says to run `-AfterSignIn`. If `-AfterSignIn` says the task is still running, you have not signed out since step 1: sign out and in, then repeat step 3.
+
 **Leftovers of the removed Windows Sandbox tests.** Runs before 2026-11-26 may have left folders `%ProgramData%\nn-wsb-real-XXXXXX` and `%ProgramData%\nn-wsb-host-XXXXXX`, records in `%LOCALAPPDATA%\NimbleNewt\wsb-records`, and `nn-g05-wsb` under the runner's temporary folder (which the runner empties at the start of each job). Nothing removes them automatically any more. To remove them by hand: list them with `dir /q %ProgramData%\nn-wsb-*` (the `/q` column shows each folder's owner); leave alone any folder whose owner is not the runner's account (a runner started elevated made its folders owned by `BUILTIN\Administrators`); for one that is the runner's, for each `control*\jobs\<job>\acl.json` in it run `icacls "<parent>" /restore "<file>"` for each entry it lists, last entry first, and then delete the folder and its record.
 
 **The runner folder's access list.** On a default Windows install the drive root `C:\` lets every signed-in account (`Authenticated Users`) change any folder made under it, and `C:\actions-runner` and everything in it inherit that. That also lets any account on the machine change the runner's checkout and work files, so the fix is worth making anyway. **One-time fix**, with the runner stopped, in a command prompt or PowerShell window started with "Run as administrator" (the line works the same in both, quoted as shown), where `C:\actions-runner` is the runner's folder (use yours) and `RUNNERACCOUNT` is the account that runs `run.cmd`, written as `whoami` prints it in a normal (not elevated) prompt of that account, for example `MYPC\runner`:

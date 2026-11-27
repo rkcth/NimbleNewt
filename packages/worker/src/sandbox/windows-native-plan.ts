@@ -48,7 +48,8 @@ export const EXIT_BUSY = 75;
 export const FAILURE_PREFIX = "nn-native-failure";
 
 /** Why a launch was stopped before or after the program ran. Every kind is a typed reason, never a silent fallback. */
-export type NativeFailure = "busy" | "filesystem" | "grant" | "container" | "job" | "files" | "start" | "launcher" | "revoke" | "refused" | "channel" | "profile";
+/** `interrupted` is written only by the leftover sweep, for a run whose runner ended without its own record (killed, the owner signed out, the machine restarted). */
+export type NativeFailure = "busy" | "filesystem" | "grant" | "container" | "job" | "files" | "start" | "launcher" | "revoke" | "refused" | "channel" | "profile" | "interrupted";
 
 export type ContainerKind = "lpac" | "appcontainer";
 export type GrantMode = "ro" | "rx" | "modify" | "modify-root" | "seal";

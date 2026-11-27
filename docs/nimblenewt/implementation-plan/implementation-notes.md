@@ -20038,3 +20038,104 @@ Plain words first. One serious problem, fixed: counting the agent that holds a t
 - **Checked, no change.** Writers: `SubmissionService.record` is the only creator of `submission` records (work.end calls it, and the bridge refuses `kind: code`). It is also the only writer of `code-submission-index` and `task-code-contributors`. Backup, restore (whole tables; only artifacts are adjusted) and database transfer copy every aggregate row. Backup scope leaves out only desk records, chat turns and delivery records, and retention deletes none of these kinds. There is no project copy or import of submissions. So the mark always travels with its per-task records. Every approval and sign-off reader goes through `approvalOf`: status, waiting view, landing gate, queue, chat approved-code, and workspace commit (which re-reads at commit). The waiting view reads a not-counted approval as "waits for a reviewer" and a not-counted sign-off as "approved, with no director sign-off yet". Status shows the reason. Gate scenarios walked: a pass by D counts. C fails and then contributes: the failure stays and no older pass resurfaces. Contributor-only evidence gives `no_evidence` with the check missing. Mixed checks: a contributor-only check is missing. Multi-source: a contributor's pass is not a source, and its failure still breaks the run (now tested). No pass can come from stale data, because contributors are read at gate time. Concurrency: an approval racing its approver's own code submission is caught at read time, whatever the write order. The approval write's revision check on the record is only a backstop.
 - **Deliberate breakages (21 new ones, each applied to the compiled file and restored by sha256, all files verified restored):** caught 17: holder always counted; holder never counted for the policy pick; known submitters (`also`) dropped; stored record ignored; approval write checking only the subject's submitter; carried approval exempt; sign-off judged by its first signer; gate reads unbound; a contributor pass counted as a source; seed from a complete index not filtered by task; seed scan not filtered by task (these two were caught after two new assertions); a scan that reached the end stored as incomplete; evidence recording ignoring contributors for agents; landing QA words dropped; sign-off refusal limited to reviews; policy settling a request on the holder's evidence; reviewer pick not excluding the holder. Not caught, 4, judged acceptable: the approval write's revision check removed (a backstop to the read-time rule, hard to interleave in a test); `carriedFrom` listing a contributor-only carry and `byContributors` listing carried evidence (both bookkeeping, not counting); the status line saying "none" for a not-counted sign-off (view words only; the fields it reads are tested).
 - **Residual.** Old development data whose code predates the code index and gets no new code is still unseen (as the first review documented). Two agents who both contributed to a task leave it waiting for the owner's lever. Evidence by the holder counts for the gate but does not settle a policy review request (as before Q04).
+
+## A03b sign-out / restart check: run-g05.ps1 -Hold and -AfterSignIn, the interrupted run record, and an optional gate block (2026-11-26, Claude agent; branch `card-a03b-signout`; card NOT flipped; task-plan files unchanged; not pushed; no workflow dispatched; nothing run on Windows or PowerShell)
+
+Plain words first. The open A03b item was what a sign-out or restart does to a running confined task. This slice builds the smallest way to measure it on the owner's PC with one short step by him. He runs `run-g05.ps1 -Hold`, signs out and back in (or restarts), runs `run-g05.ps1 -AfterSignIn`, and sends the usual zip. Signing out also stops the own runner, so the workflow cannot do this; `own-hardware.yml` is unchanged. One gap was in the product, not the measurement: a run that Windows ended at sign-out never got a run record (the runner writes it in its own clean-up). The leftover sweep now writes one marked `interrupted`. The release gate judges the new block when it is present and does not require it yet.
+
+**The owner's steps** (in `run-g05.ps1`'s header and `docs/nimblenewt/own-hardware-runners.md`): (1) `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run-g05.ps1 -Hold`; (2) sign out of Windows and back in, or restart; (3) the same with `-AfterSignIn`; (4) send `nn-g05-results.zip`.
+
+**Launcher side.**
+- The sweep (`sweepLeftovers`, windows-native-job.ts) was already reachable after a sign-in: every run, every health check and `release` runs it first, from the backend's own records. Unchanged in what it revokes or deletes.
+- New: when it retires a job folder whose runner is gone and finds no run record of that run, it writes one. The record has `interrupted: true`, failure kind `interrupted` (new in `NativeFailure`), exit code null, the sweep's clean read-back, and the profile deleted and gone. This also covers a runner stopped between its clean-up and its record (both profile records gone, status file still there).
+- A record the runner wrote itself is never replaced. A run the sweep could not clean gets no record yet; the next sweep tries again. `grantsReadBackOf` reads the new record as clean.
+
+**Phase 1, `-Hold`** (`containment-evidence.mjs hold`, `startHold` in the new windows-native-signout.ts):
+- Takes the same guards as the plain run first: not elevated, the lock, the folder checks, SHA256SUMS, cleared environment.
+- Plans ONE confined idle task through the backend's own `plan` (the recipe built as the health probe builds its own): a new `nn-g05hold-*` folder under TEMP, node read-only, no network.
+- Starts the backend's own runner DETACHED, with the plan's environment only, as `SandboxLauncher` starts it. The launcher's time limit is the hold's 30 minutes (`maxRunMs`; at most 30). The idle program also exits by itself 5 minutes after that.
+- Waits up to 90 s for the confined program's own marker in its work folder.
+- Records `control\hold\state.json`: run id, job folder, profile name and SID, grants, settings, and the runner and its descendants with their start times.
+- PowerShell starts this node with NO redirected pipe; node writes `control\hold\hold.log.txt` itself. It keeps only a SHA-256 of `whoami /logonid` (`logon.sha256`), tells the owner to sign out, and exits.
+- While a hold is recorded, a plain run refuses. A second `-Hold` refuses while the first still runs.
+
+**Phase 2, `-AfterSignIn`** (`containment-evidence.mjs after-sign-in`, `afterSignIn`):
+1. Compares the logon hash: `newLogon` yes, no or unknown.
+2. Checks that nothing of the held run still runs: the same number with the same start time, plus the backend's `writerAlive` rule on the runner. A process list that cannot be read counts as running. If anything still runs, it sweeps nothing, keeps the state and stops (exit 3; PowerShell says to sign out first).
+3. Notes whether the held profile folder was still there.
+4. Runs `sweepLeftoversLocked`.
+5. Reads back every held grant with the launcher's own `check`, by the held SID (no revoke, so what the sweep left shows).
+6. Counts the `NimbleNewtRun-*` profiles left, and reads how the held run is recorded.
+7. Writes `control\hold\after-sign-out.json` and retires the state to `state-checked.json`, so one hold is judged once.
+
+PowerShell then removes the hold's TEMP folder (pattern and plain-folder check, `Directory.Delete`). It passes `--after-sign-out` to the ten-case run whenever that file exists, and redacts `hold.log.txt` and the after-sign-in output into `results\` before the zip check.
+
+**The block** (`nativeWindows.afterSignOut`, optional, exact keys):
+- `held`: the program was seen in its container, its SID was recorded, and the runner was in the process list.
+- `newLogon`: boolean or null.
+- `taskRunningAfter`: boolean.
+- `profileLeftBeforeSweep`: recorded, not judged.
+- `sweepProblems`: a number, or null when the sweep did not run.
+- `leftoverAfterSweep`: a number, or null.
+- `grantsAfter`: `clean`, `left` or `not-measured`.
+- `interruptedRecorded`: the held run's record says `interrupted` (the sweep's), or `failed` (a runner that outlived its launcher wrote it). Never succeeded or timed out.
+
+**Gate** (`assessRelease`, `afterSignOutProblems`):
+- When the block is present, each of these is a separate blocker: not held; `newLogon` not true; still running; the sweep did not run or reported problems; leftovers not 0 or not counted; grants not clean; not recorded as interrupted.
+- When absent, it is not a blocker, and the producer keeps listing the item in `notProven` exactly as before. The owner's existing report shape still passes.
+- `AFTER_SIGNOUT_REQUIRED = false` (containment.ts; `afterSignOutRequired` option for tests). Once true, absence is refused. A tripwire test keeps card D03 `planned` while it is false, like `PACKAGED_CONTROLLER_EXISTS`.
+- A check file that is given but unreadable or malformed gives no `nativeWindows` block at all, which is refused. A report never silently loses the check.
+
+- ASSUMPTION: a hold lasts at most 30 minutes (the launcher's limit), so a forgotten hold ends by itself. A hold that reached its limit before the sign-out reads `timed-out` and does not pass the check.
+- ASSUMPTION: a run recorded as `failed` by a runner that outlived its launcher at sign-out counts as stopped by the sign-out (it is not a success). Its clean-up was the runner's own, and the read-back and leftover count still apply.
+- ASSUMPTION: "a new sign-in" is a changed logon session (`whoami /logonid`, kept as a hash). A restart passes the same way. The check does not tell a sign-out from a restart.
+- ASSUMPTION: the held run's window objects (the home desktop on WinSta0, or a private station) are not checked directly. They are kernel objects whose only handles the launcher and its program held. With those processes gone and a new logon session, nothing can hold them. The product's home desktop writes nothing to WinSta0's access list. Listing a station's desktops would need a P/Invoke (Add-Type compiles code), which the script avoids.
+- ASSUMPTION: `profileLeftBeforeSweep` is not judged. Either value is a safe outcome (Windows ended the run, or the runner cleaned up first).
+- ASSUMPTION: the hold runs through the backend's `plan` and runner directly, not through `SandboxLauncher`. The launcher's process tracking would end with the node process that must exit. Job file, runner, launcher, profile, grants and Job Object are the same path.
+- ASSUMPTION: the hold's task folders are a new `nn-g05hold-*` folder under TEMP (by its long name, as the ten cases use TEMP). `-AfterSignIn` removes it after the sweep.
+- ASSUMPTION: the notProven item keeps its old wording ("a run attempted after the owner signs out is refused cleanly and leaves nothing") while absent, as the brief asked. With the owner decision that Windows work stops when nobody is signed in, nothing can attempt a run while he is signed out. The first run after the sign-in sweeps first, which is what the check measures.
+
+**Only a real sign-out can show** (not run here: no PowerShell, no Windows):
+- Whether Windows really ends the detached runner, the launcher and the confined program at sign-out. The design expects it, and the check measures it.
+- Whether Windows Terminal or the console host ends a DETACHED_PROCESS when its window closes (the script says the window may be closed).
+- Whether the launcher or runner get a console logoff event and clean up first (then `profileLeftBeforeSweep` is false and the record may be `failed`; both are handled).
+- Whether libuv's handle inheritance would have held a pipe (avoided by design).
+- Whether `whoami /logonid` prints exactly one `S-1-5-5-X-Y` line on the owner's build.
+- Whether the profile folder can still be deleted by `delete-profile` after a sign-in (expected; it is the sweep's normal path).
+
+Not changed: `own-hardware.yml` (a sign-out also stops the runner), the interpreter prompt, card statuses and task-plan files.
+
+**Tests.**
+- `containment-native-gate.test.ts`:
+  - the owner's report with a holding check passes, with the same three items accepted; without the check it still passes and the item stays in notProven;
+  - each bad field refused with its own reason;
+  - `afterSignOutRequired` both ways, and the D03 tripwire for `AFTER_SIGNOUT_REQUIRED`;
+  - the block's strict shape, and the file's shape (malformed or unreadable gives no block);
+  - the table-driven single-field fuzz run again over the report with the check (only removing the whole block and `profileLeftBeforeSweep` are free).
+- `windows-native.test.ts`, simulated Windows:
+  - the sweep's interrupted record (a killed run; a runner stopped before its record; never replacing the runner's own record; none when the sweep cannot clean), and how a held run's record reads;
+  - hold, sign-out, sign-in end to end;
+  - a restart reusing the runner's number, not signed out yet, an unreadable process list, the runner's number alive but unlisted, and the confined program outliving runner and launcher;
+  - the time limit reached, a runner that outlived its launcher, a stubborn grant, the marker never seen or no logon recorded, the minutes bounds, a second hold, and tampered state files.
+- `g05-owner-bundle.test.mjs`:
+  - the switches and their order after every guard; the plain-run refusal;
+  - `-Hold` (no pipe, time limit, own log, logon hash only, the sign-out words, exits before info) and `-AfterSignIn` (refusals, exit 3, the check file passed whenever it exists, the folder removal, redaction of the new outputs, printed fields equal the gate's keys);
+  - CLI usage and off-Windows refusals, and `--after-sign-out` without `--native-info`.
+- Three earlier assertions were updated: the `param()` line, the plain-folder list and the program-call count.
+
+**Deliberate breakages** (32, each applied to the compiled `dist` file, run-g05.ps1 or the CLI, its test run, the file restored byte-identical by sha256):
+- 31 caught:
+  - each of the seven gate rules;
+  - a present check never judged, an extra key, `newLogon` as text, the required switch ignored;
+  - a malformed check file dropped, an unreadable one taken as not given, the item still listed when present;
+  - no interrupted record, the runner's own record overwritten, the wrong failure kind;
+  - a time-limited run counted as stopped, the exact process match ignored (caught after adding the orphaned-program test);
+  - sweeping while the task runs, grants taken as clean, another job folder accepted, no hold time limit, a second hold allowed;
+  - the script: a redirected pipe in `-Hold`, the check file passed only when it reads well, no plain-run refusal, the logon written as text, the new outputs not redacted, a still-running task not stopping the run;
+  - the CLI run off Windows.
+- 1 survives, judged equivalent: an unreadable process list taken as "not running" by the exact rule is still "running" by the backend's `writerAlive` rule, which fails closed on its own.
+
+**Verification** (Linux, `/tmp/nn-slot.sh`, `NIMBLENEWT_REQUIRE_SANDBOX=1`, offline guard, short TMPDIR, one at a time):
+- `npm ci --ignore-scripts`; `tsc --build --force` clean; `api:docs:write` no change; `check:deps`, `licenses:check`, `roadmap:check` ok; `plan.test.mjs` 6/6; `git diff --check` clean.
+- Node 22.23.0 and Node 24.21.0 alike: `scripts/*.test.mjs` 511 pass, 1 skipped (Linux-only), 0 fail; worker `dist/sandbox/*.test.js` 450/450; controller environment/admin/status/web 362/362.
+- In the final Node 22 run one L02d launcher timing test failed once (`launcher.test.js`, "once the launched process has exited its process ID is never walked again"). It passed alone (34/34) and in the earlier Node 22 run. `launcher.ts` is not changed here; the same flake is noted in the owner-bundle slice above.

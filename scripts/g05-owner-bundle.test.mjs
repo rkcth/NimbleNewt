@@ -115,7 +115,7 @@ test("--prebuilt: a missing or malformed COMMIT exits 2 before anything runs; wi
     assert.equal(r.status, 2); assert.match(r.stderr, /^usage: run --out DIR \[--prebuilt\]/m, "past the COMMIT check: the missing --out is what stops it");
   }
   // Card A03b: the native-evidence flags are checked before anything runs (a bad value, a fact without --native-info, the removed Windows Sandbox flags --windows-summary and --workdir-check, a flag without its value)
-  for (const extra of [["--native-info", "f", "--account-kind", "admin"], ["--native-info", "f", "--symlink-right", "maybe"], ["--account-kind", "standard"], ["--symlink-right", "no"], ["--native-info", "f", "--windows-summary", "s"], ["--windows-summary", "s"], ["--workdir-check", "w"], ["--native-info"]]) {
+  for (const extra of [["--native-info", "f", "--account-kind", "admin"], ["--native-info", "f", "--symlink-right", "maybe"], ["--account-kind", "standard"], ["--symlink-right", "no"], ["--native-info", "f", "--windows-summary", "s"], ["--windows-summary", "s"], ["--workdir-check", "w"], ["--native-info"], ["--after-sign-out", "a"], ["--native-info", "f", "--after-sign-out"]]) {
     const r = evidence(b, "run", "--prebuilt", "--out", join(b, "results"), ...extra);
     assert.equal(r.status, 2, `${extra.join(" ")}: ${r.stdout}${r.stderr}`);
     assert.match(r.stderr, /^usage: run --out DIR .*--native-info FILE \[--account-kind standard\|administrator-filtered\] \[--symlink-right yes\|no\]/m);
@@ -149,11 +149,10 @@ test("--prebuilt from a real bundle outside any git checkout: the report carries
 const code = ps1.split(/\r?\n/).filter((l) => !/^\s*#/.test(l)).join("\n");
 const at = (needle) => { const i = code.indexOf(needle); assert.ok(i >= 0, needle); return i; };
 
-test("run-g05.ps1 is plain ASCII, Windows PowerShell 5.1 compatible in the ways a text check can see, and has no -Hold or -AfterSignIn yet", () => {
+test("run-g05.ps1 is plain ASCII, Windows PowerShell 5.1 compatible in the ways a text check can see, and takes only the two sign-out check switches", () => {
   assert.ok(/^[\x09\x0a\x0d\x20-\x7e]*$/.test(ps1), "ASCII only (Windows PowerShell 5.1 reads a file without a BOM as the ANSI code page)");
-  assert.match(code, /\[CmdletBinding\(\)\]\nparam\(\)/);
+  assert.match(code, /\[CmdletBinding\(\)\]\nparam\(\[switch\] \$Hold, \[switch\] \$AfterSignIn\)\n/);
   for (const seven of ["??", "?.", "-Parallel", "ForEach-Object -Parallel", "&&", "||", "[System.IO.Path]::GetRelativePath", "Join-Path -AdditionalChildPath", "ConvertFrom-Json -AsHashtable", "Get-FileHash"]) assert.ok(!code.includes(seven), `not in Windows PowerShell 5.1 (or not wanted): ${seven}`);
-  assert.ok(!/-Hold\b|-AfterSignIn\b|\$Hold\b|\$AfterSignIn\b/.test(code), "the hold and sign-out step is a later slice");
 });
 
 test("run-g05.ps1 refuses to run elevated, first, by the Administrators role", () => {
@@ -265,7 +264,7 @@ test("run-g05.ps1 writes the zip with ZipFile to the Desktop (Downloads when the
 test("run-g05.ps1 writes only into plain folders (a link or junction at control, raw, info, profiles or results is refused), deletes without following links, and clears node's environment options", () => {
   const kinds = code.slice(at("function Get-EntryKind"), at("New-Item -ItemType Directory"));
   assert.ok(kinds.includes("[System.IO.FileAttributes]::ReparsePoint) -ne 0) { return 'link' }"));
-  assert.ok(kinds.includes("foreach ($d in @($control, $raw, $infoDir, (Join-Path $control 'profiles'), $results))") && /if \(\$kind -eq 'link' -or \$kind -eq 'file'\) \{[^}]*REFUSED[^}]*exit 2/.test(kinds));
+  assert.ok(kinds.includes("foreach ($d in @($control, $raw, $infoDir, (Join-Path $control 'profiles'), $holdDir, $results))") && /if \(\$kind -eq 'link' -or \$kind -eq 'file'\) \{[^}]*REFUSED[^}]*exit 2/.test(kinds));
   assert.ok(kinds.includes("[System.IO.Directory]::Delete($d, $true)"));
   assert.ok(!/Remove-Item[^\n]*-Recurse/.test(code), "no Remove-Item -Recurse (Windows PowerShell 5.1 may follow a directory link)");
   assert.ok(at("foreach ($v in @('NODE_OPTIONS', 'NODE_PATH', 'NODE_PRESERVE_SYMLINKS', 'NODE_REPL_EXTERNAL_MODULE')) { [System.Environment]::SetEnvironmentVariable($v, $null, 'Process') }") < at("Invoke-Captured $launcher"));
@@ -394,7 +393,7 @@ test("second review: one run at a time (a named mutex taken before anything is w
   const inv = code.slice(at("function Invoke-Captured"), at("function Get-Field"));
   assert.ok(inv.includes("[int] $minutes)") && inv.includes("if (-not $p.WaitForExit($minutes * 60000)) {") && inv.includes("$p.Kill()") && /throw "it was still running after \$minutes minutes/.test(inv));
   const calls = [...code.matchAll(/^.*Invoke-Captured \$(launcher|node) .*$/gm)].map((m) => m[0]);
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 4);
   for (const c of calls) assert.match(c, / \$(null|src) (\d+)\)?( \}| *)$/, `a time limit: ${c}`);
 });
 
@@ -409,4 +408,74 @@ test("second review: printed clean-up commands quote every quote PowerShell ends
   assert.ok(code.includes("if (-not [System.IO.Directory]::Exists($dest)) { $dest = $control }") && !code.includes("$dest = $b"));
   // a path part that is empty ("a//b") is refused by the line check itself (a lone empty string is false in PowerShell, so the count is taken)
   assert.ok(code.includes("@($rel.Split('/') | Where-Object { $_ -eq '' -or $_ -eq '.' -or $_ -eq '..' }).Count -gt 0"));
+});
+
+// ------------------------------------------------------------------------------------------------ the sign-out / restart check (card A03b): run-g05.ps1 -Hold, a sign-out, run-g05.ps1 -AfterSignIn
+
+test("sign-out check: the two switches are separate steps, both after every guard of the plain run, and a plain run is refused while a hold is in progress", () => {
+  assert.match(code, /if \(\$Hold -and \$AfterSignIn\) \{\n\s+Write-Host 'REFUSED: [^\n]*\n\s+exit 2\n\}/);
+  const hold = at("if ($Hold) {"), after = at("if ($AfterSignIn) {");
+  for (const guard of ["$principal.IsInRole(", "New-Object System.Threading.Mutex($false, $lockName)", "foreach ($od in @($env:OneDrive", "$fsKind = (New-Object System.IO.DriveInfo($b)).DriveFormat", "$check = Test-Bundle",
+    "foreach ($d in @($control, $raw, $infoDir, (Join-Path $control 'profiles'), $holdDir, $results))", "foreach ($v in @('NODE_OPTIONS'", "if ($v -like 'NIMBLENEWT_*'", "$env:NIMBLENEWT_WIN_LAUNCHER = "]) {
+    assert.ok(at(guard) < hold && at(guard) < after, `before both phases: ${guard}`);
+  }
+  assert.match(code, /if \(-not \$Hold -and -not \$AfterSignIn -and \[System\.IO\.File\]::Exists\(\$holdState\)\) \{\n\s+Write-Host 'REFUSED: a sign-out check is in progress[^\n]*\n\s+exit 2\n\}/);
+  assert.ok(at("if (-not $Hold -and -not $AfterSignIn -and") < at("Invoke-Captured $launcher"), "before anything runs");
+  assert.ok(code.includes("$holdDir = Join-Path $control 'hold'") && code.includes("New-Item -ItemType Directory -Path $control, $raw, $infoDir, $holdDir, $results -Force"), "the hold's files stay in control\\hold (never zipped, not under SHA256SUMS)");
+});
+
+test("sign-out check, -Hold: node starts with no pipe (the detached runner could inherit one) and a time limit, logs to its own file, the logon is kept only as a hash, the owner is told to sign out, and it ends before info, cases and zip", () => {
+  const h = code.slice(at("if ($Hold) {"), at("$afterSignOutArgs = @()"));
+  assert.ok(h.includes("@('--import', './scripts/offline-guard.mjs', 'scripts\\containment-evidence.mjs', 'hold', '--log', $holdLog)"), "the offline guard first, the hold command, its own log");
+  assert.ok(h.includes("$psi.UseShellExecute = $false") && !/Redirect/.test(h), "no redirected handle");
+  assert.ok(h.includes("if (-not $hp.WaitForExit(5 * 60000)) { try { $hp.Kill() } catch { }; throw"), "a time limit");
+  assert.ok(h.includes("[System.IO.File]::WriteAllText($holdLogon, $logonHash, $utf8)") && !/\$t\b/.test(h), "only the hash is written");
+  assert.match(h, /Write-Host 'NOW: sign out of Windows[^\n]*\n\s+Write-Host '  powershell\.exe -NoProfile -ExecutionPolicy Bypass -File \.\\run-g05\.ps1 -AfterSignIn'/);
+  assert.ok(/ends by itself at \$until at the latest/.test(h) && /A restart instead of the sign-out works the same/.test(h));
+  assert.match(h.trimEnd(), /\n\s+exit 0\n\}$/, "it exits after the hold");
+  assert.ok(!/Invoke-Captured|CreateFromDirectory|Remove-Item|Set-|New-Service/.test(h), "no info, no cases, no zip, no change to the machine");
+  assert.ok(/if \(\$holdCode -eq 2 -or \$null -eq \$st\) \{[^}]*REFUSED[^}]*exit 2/.test(h) && /FAILED: the task was started but was not seen running[^\n]*\n[^\n]*-AfterSignIn \(no sign-out needed\)[^\n]*\n\s+exit 1/.test(h));
+  const lh = code.slice(at("function Get-LogonHash {"), at("function Read-JsonFile"));
+  assert.ok(lh.includes("Get-WhoamiText @('/logonid')") && lh.includes("-notmatch '^S-1-5-5-\\d+-\\d+$'") && lh.includes("ComputeHash($utf8.GetBytes($t.Trim()))"));
+  // The CLI's side: the hold's idle task is time-limited by the launcher, and the runner is started detached with the plan's environment only.
+  const cli = readFileSync(join(root, "scripts", "containment-evidence.mjs"), "utf8");
+  assert.ok(cli.includes('stdio: "ignore", detached: true, windowsHide: true') && cli.includes("child.unref()") && cli.includes("env: { ...plan.env }"));
+  const signout = readFileSync(join(root, "packages", "worker", "src", "sandbox", "windows-native-signout.ts"), "utf8");
+  assert.ok(signout.includes("export const MAX_HOLD_MINUTES = 30;") && signout.includes("maxRunMs: limitMs"));
+});
+
+test("sign-out check, -AfterSignIn: refused without a hold; the logon compared by hash; a still-running task stops it with nothing swept; the check file goes into the evidence run whenever it exists; the held folder is removed without following links", () => {
+  const a = code.slice(at("if ($AfterSignIn) {"), at("$rng = New-Object System.Security.Cryptography.RNGCryptoServiceProvider"));
+  assert.match(a, /if \(-not \[System\.IO\.File\]::Exists\(\$holdState\)\) \{\n\s+Write-Host 'REFUSED: no hold is recorded[^\n]*\n\s+exit 2\n\s+\}/);
+  assert.ok(a.includes("$newLogon = 'unknown'") && a.includes("if ($before -and $nowHash) { if ($before -ceq $nowHash) { $newLogon = 'no' } else { $newLogon = 'yes' } }"));
+  assert.ok(a.indexOf("[System.IO.File]::Delete($holdResult)") < a.indexOf("'after-sign-in', '--new-logon', $newLogon"), "an older result never stands for this check");
+  assert.match(a, /\$afterCode = Invoke-Captured \$node @\('--import', '\.\/scripts\/offline-guard\.mjs', 'scripts\\containment-evidence\.mjs', 'after-sign-in', '--new-logon', \$newLogon\) [^\n]* \$null 10\n/);
+  assert.match(a, /if \(\$afterCode -eq 3\) \{\n\s+Write-Host "REFUSED: the held task is still running[^\n]*\n\s+exit 1\n\s+\}/);
+  const passOn = a.indexOf("if ([System.IO.File]::Exists($holdResult)) { $afterSignOutArgs = @('--after-sign-out', $holdResult) }");
+  assert.ok(passOn > 0 && passOn < a.indexOf("if ($afterCode -ne 0 -or $null -eq $as)"), "passed whenever the file exists, before (not inside) the branch that reads it");
+  assert.ok(a.includes("Add-Problem 'the sign-out check does not hold"));
+  assert.ok(a.includes("-match '^nn-g05hold-[A-Za-z0-9]+$' -and (Get-EntryKind $root) -eq 'dir'") && a.includes("[System.IO.Directory]::Delete($root, $true)"));
+  assert.ok(code.includes("if ($afterSignOutArgs.Count -gt 0) { $evidenceArgs += $afterSignOutArgs }"));
+  assert.ok(code.includes("foreach ($name in @('info.stdout.txt', 'info.stderr.txt', 'evidence.stdout.txt', 'evidence.stderr.txt', 'hold.log.txt', 'after-sign-in.stdout.txt', 'after-sign-in.stderr.txt')) {"), "every new output is redacted into results and checked before the zip");
+  // The fields the script prints are exactly the gate's.
+  const ts = readFileSync(join(root, "packages", "worker", "src", "sandbox", "containment.ts"), "utf8");
+  const keys = /const AFTER_SIGNOUT_KEYS = \[([^\]]+)\] as const;/.exec(ts);
+  const printed = /\$facts = @\(('held'[^)]+)\) \| ForEach-Object/.exec(a);
+  assert.ok(keys && printed);
+  assert.deepEqual(printed[1].split(",").map((x) => x.trim().replace(/'/g, "")), keys[1].split(",").map((x) => x.trim().replace(/"/g, "")));
+});
+
+test("sign-out check, the command line: hold and after-sign-in refuse bad arguments, and off Windows refuse to run anything", () => {
+  for (const extra of [["hold", "--minutes"], ["hold", "--bogus", "1"], ["hold", "--log"], ["after-sign-in", "--new-logon"], ["after-sign-in", "--minutes", "1"]]) {
+    const r = evidence(bundle, ...extra);
+    assert.equal(r.status, 2, `${extra.join(" ")}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /^usage: (hold|after-sign-in)/m);
+  }
+  if (process.platform !== "win32") {
+    for (const extra of [["hold"], ["hold", "--minutes", "5"], ["after-sign-in", "--new-logon", "yes"]]) {
+      const r = evidence(bundle, ...extra);
+      assert.equal(r.status, 2, r.stdout + r.stderr);
+      assert.match(r.stderr, /Windows only \(the native launcher\); nothing was run/);
+    }
+  }
 });
