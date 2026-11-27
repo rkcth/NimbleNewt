@@ -21864,7 +21864,7 @@ ASSUMPTION: M05 build-ahead of unflipped M00, as recorded for the earlier M05 sl
 - No interpreter prompt text and no API summary text were changed. The prompt-room test is unchanged.
 
 ASSUMPTION: 200 open owner inquiries at once is far above use (only the owner opens them). Refusing the 201st is the smallest fail-closed choice. Raising the limit is a constant.
-ASSUMPTION: the list is believed when it is well formed. A well-formed list that leaves out an open inquiry can only come from a direct storage edit, since every inquiry change writes the list in the same write.
+ASSUMPTION (corrected by the first review, below): the list is believed when it is well formed. A well-formed list that leaves out an open inquiry can only come from a direct storage edit, since every inquiry change writes the list in the same write.
 
 **Tests.** `meetings/floor-inquiries.test.ts`, 12 scenarios on all four backends (48 tests):
 - open, replay, end, end again, ended with the meeting, a restart, and owner-only reads;
@@ -21891,3 +21891,20 @@ ASSUMPTION: the list is believed when it is well formed. A well-formed list that
 - The reminder's `projectId` filter still loads every listed floor (at most 200).
 - Residual: two opens racing for the last place both pass the early check. The one refused at the write resumes a vote it held itself (tested), but its owner note ("The owner opens an inquiry") stays on the record, which is append-only. Only at exactly 200 open inquiries.
 - Owner chat: no new control. The refusal reaches chat as the operation's error text.
+
+### M05 slice: first review (Claude agent, Opus 5.5, 2026-11-27 EST; clean context; review and fixes; card NOT flipped; not pushed)
+
+Checked: nothing outside `meetings/floor.ts` writes or removes `meeting-floor` records (no import, migration, retention, archive or delete path names the kind), so every inquiry change goes through `#update` and its list change. The floor and list changes are one operation, and the storage conformance suite commits an operation all or nothing on all four backends. A conflict on the list alone comes back as `stale_revision` on the floor (the runner names the floor) and `#update` retries. Backups are consistent snapshots, so a restore brings back a list and floors from the same moment. The API names no order for `meeting.floor.needs-you`. The prompt text and API docs are unchanged.
+
+Problems found and fixed (product code changed):
+- MEDIUM-HIGH, list believed while stale. Release rollback is supported (`release/activation.ts`). After a rollback, the earlier release opens and ends inquiries without the list. Once this release is back, the well-formed list was believed, and an inquiry the earlier release opened was missing from the owner's Needs-you list and the status view, and got no idle reminder. Fix: the first read after each start (`#inquiriesChecked`, per service instance) walks the floors once (same bound) and stores the list again when its set differs. The write is revision-guarded. A write that loses leaves the instance unchecked, so the next read checks again. When the walk hits its bound, a well-formed list is believed until the next start. The ASSUMPTION above is corrected by this.
+- MEDIUM, vote not held on a retry. After an open refused at the write resumed the vote it held, the same command sent again was answered from the earlier hold (same command ID). The inquiry opened saying `voteHeld: true` while the vote ran on. Fix: the motion's revision is in the hold and resume command IDs. A crash after the hold is still covered by `heldAt`, and identical concurrent requests still share one ID.
+- LOW, scheduled turn stopped. `tick` called `sweep` without a catch. With no list and more floors than the bounded walk reads, every turn refused and no meeting was driven. Now a reminder that cannot run does not stop the meetings' steps. The walk's "too many" now comes back as a value, so only the bound (not a storage error) marks the list checked.
+
+Tests added to `meetings/floor-inquiries.test.ts` (now 14 scenarios on four backends, 56 tests): a well-formed list missing an open inquiry, and one still naming an ended inquiry, put right on the first read after a start; a check whose write loses checks again; a list that matches is not written; the reminder after a start sees the left-out inquiry; the same command retried after a resume holds the vote again; and a floor walk that never ends (reads refused `unavailable` with no list, `tick` goes on, a well-formed list believed after one bounded walk and not walked again). Three earlier tests read once before planting fake IDs, since the first-read check now (correctly) replaces a planted list with the real one.
+
+Runs: `floor*`, `procedure`, `start-meeting-floor*`, `chat/meeting-controls*`, `chat/prompt-room` and `status/*` suites: 755 of 755 on Node 22.23.0 and on Node 24.21.0. `tsc --build --force`, `api:docs:write` (no diff), `check:deps`, `licenses:check`, `roadmap:check` and `plan.test` 6/6 pass.
+
+Deliberate breakages of my own (22, each applied alone to the built `dist/meetings/floor.js`, run against `floor-inquiries.test` on the reference store, restored and checked by SHA-256; script `/tmp/claude-1000/m05b-r1/breakages.py`): 19 caught before the last two tests, 21 after. Not caught, and equivalent: storing a rebuilt list of more than 200 (it is distrusted on read and rebuilt, so only the cost differs).
+
+Card not flipped.

@@ -167,6 +167,7 @@ floorSuite(test, "the list is bounded: one more inquiry than the limit is refuse
   await start(w, b);
   const fakes = Array.from({ length: FLOOR_LIMITS.openInquiries - 1 }, (_, i) => fakeId(i));
   assert.equal(new Set(fakes).size, fakes.length);
+  await w.floor.ownerPending(w.owner); // the first read after the start checks the list against the floors; the planted list below is then believed
   await plant(w, { ids: fakes });
   await open(w, a);
   assert.equal((await listed(w))!.length, FLOOR_LIMITS.openInquiries, "the last place is taken");
@@ -225,6 +226,7 @@ floorSuite(test, "two inquiries opened at the same moment for the last place: ex
   const a = (await w.meet()).rec, b = (await w.meet()).rec;
   await start(w, a);
   await start(w, b);
+  await w.floor.ownerPending(w.owner); // checked once after the start, as above
   await plant(w, { ids: Array.from({ length: FLOOR_LIMITS.openInquiries - 1 }, (_, i) => fakeId(i)) });
   const out = await Promise.allSettled([open(w, a), open(w, b)]);
   assert.equal(out.filter((o) => o.status === "fulfilled").length, 1, JSON.stringify(out.map((o) => o.status)));
@@ -263,13 +265,101 @@ floorSuite(test, "an inquiry refused at the write because the last place was tak
   for (let i = 0; i < 200 && ((await floorOf(w, rec)) as { phase?: string }).phase !== "voting"; i += 1) await w.floor.advance(w.service, { recordId: rec });
   const motion = async (): Promise<{ state: string; heldAt?: string }> => (await w.records.motion(w.owner, motionId)) as never;
   assert.equal((await motion()).state, "voting");
+  await w.floor.ownerPending(w.owner); // checked once after the start; the planted list below is then believed
   await plant(w, { ids: Array.from({ length: FLOOR_LIMITS.openInquiries - 1 }, (_, i) => fakeId(i)) });
   // another inquiry takes the last place between the early check and the write (as when two open at once)
   const records = w.records as unknown as { hold: (...a: unknown[]) => Promise<unknown> };
   const real = records.hold;
   records.hold = async (...a: unknown[]) => { const out = await real.apply(w.records, a); await plant(w, { ids: Array.from({ length: FLOOR_LIMITS.openInquiries }, (_, i) => fakeId(i)) }); return out; };
-  try { await refuses("invalid_command", () => open(w, rec)); } finally { records.hold = real; }
+  const same = cid("iq-same");
+  try { await refuses("invalid_command", () => w.floor.openInquiry(w.owner, { commandId: same, recordId: rec })); } finally { records.hold = real; }
   assert.equal((await floorOf(w, rec)).inquiry, undefined);
   assert.equal((await motion()).heldAt, undefined, "the vote this call held is resumed");
   assert.equal((await motion()).state, "voting");
+  // the owner sends the same command again once a place is free: the vote is held again, not answered from the earlier hold
+  await plant(w, { ids: [] });
+  assert.equal((await w.floor.openInquiry(w.owner, { commandId: same, recordId: rec })).voteHeld, true);
+  assert.notEqual((await motion()).heldAt, undefined, "the vote is held while the inquiry is open");
+  assert.deepEqual(await listed(w), [rec]);
+});
+
+floorSuite(test, "a well-formed list that leaves out an open inquiry (an earlier release, after a rollback, wrote the floor without the list) is put right by the first read after a start, and later reads walk no floor", async (w) => {
+  const a = (await w.meet()).rec, b = (await w.meet()).rec, c = (await w.meet()).rec;
+  for (const r of [a, b, c]) await start(w, r, { inquiryIdleMinutes: 10 });
+  await open(w, a);
+  w.clock.tick(1);
+  await open(w, b);
+  await open(w, c);
+  await end(w, c);
+  assert.deepEqual(await listed(w), [a, b]);
+  // The earlier release opened b and ended c: its list still names a and c (well formed, so not rebuilt for its form).
+  await plant(w, { ids: [a, c] });
+  const f = w.reopen();
+  assert.deepEqual((await f.ownerPending(w.owner)).items.map((i) => i.recordId), [a, b], "b is on the Needs-you list again, oldest first");
+  assert.deepEqual(await listed(w), [a, b], "and the list is stored again");
+  assert.equal(await walks(w, () => reads(w)), 0, "checked once: later reads walk no floor");
+  // the same list read again after another start is checked and left as it is
+  w.reopen();
+  const rev = (await w.storage.getAggregate(INDEX))!.revision;
+  assert.deepEqual((await w.floor.openInquiries(w.owner, 10)).items.map((i) => i.recordId), [a, b]);
+  assert.equal((await w.storage.getAggregate(INDEX))!.revision, rev, "a list that matches the floors is not written");
+  // a list that still names an inquiry the earlier release ended (c) is put right too
+  await plant(w, { ids: [a, b, c] });
+  w.reopen();
+  assert.deepEqual((await w.floor.ownerPending(w.owner)).items.map((i) => i.recordId), [a, b]);
+  assert.deepEqual(await listed(w), [a, b], "the ended one leaves the list");
+  // a check whose write loses (another write got there first) checks again on the next read
+  await plant(w, { ids: [a] });
+  const g = w.reopen();
+  const st = w.storage as unknown as { applyOperation: (op: { changes: { ref: { kind: string } }[] }) => Promise<unknown> };
+  const realApply = st.applyOperation;
+  let lost = 0;
+  st.applyOperation = async (op) => {
+    if (lost === 0 && op.changes.some((c) => c.ref.kind === INDEX.kind)) { lost += 1; await plant(w, { ids: [a] }); }
+    return realApply.call(w.storage, op);
+  };
+  try { assert.deepEqual((await g.ownerPending(w.owner)).items.map((i) => i.recordId), [a, b], "the answer is from the floors"); } finally { st.applyOperation = realApply; }
+  assert.equal(lost, 1);
+  assert.deepEqual(await listed(w), [a], "the write lost");
+  assert.ok((await walks(w, () => g.ownerPending(w.owner))) >= 1, "so the next read checks again");
+  assert.deepEqual(await listed(w), [a, b]);
+  // the idle reminder after a start also sees an inquiry the list left out
+  await plant(w, { ids: [] });
+  w.reopen();
+  w.clock.tick(11);
+  assert.deepEqual([...(await w.floor.sweep(w.service)).reminded].sort(), [a, b].sort(), "both idle inquiries are reminded");
+});
+
+floorSuite(test, "too many floor records to walk: with no list the reads are refused (unavailable) and the scheduled turn goes on; a well-formed list is then believed, and walked once a start", async (w) => {
+  const { rec } = await w.meet();
+  await start(w, rec);
+  await open(w, rec);
+  const s = w.storage as unknown as { listAggregates: (kind: string, page: { afterId?: string; limit: number }) => Promise<unknown[]> };
+  const real = s.listAggregates;
+  let pages = 0;
+  // every page of floor records is full, so the walk never reaches the end
+  s.listAggregates = async (kind, page) => {
+    if (kind !== "meeting-floor") return real.call(w.storage, kind, page);
+    pages += 1;
+    return Array.from({ length: page.limit }, (_, i) => ({ kind, id: `mfl-${String(pages).padStart(8, "0")}-${String(i).padStart(4, "0")}`, revision: 1, body: {}, createdAt: w.iso(), updatedAt: w.iso() }));
+  };
+  try {
+    await unplant(w);
+    const f = w.reopen();
+    await refuses("unavailable", () => f.ownerPending(w.owner));
+    assert.equal(pages, FLOOR_LIMITS.indexPages, "the walk stops at its bound");
+    await refuses("unavailable", () => f.sweep(w.service));
+    pages = 0;
+    const turn = await f.tick(w.service);
+    assert.deepEqual(turn.reminded, [], "the scheduled turn is not stopped by the reminder");
+    await plant(w, { ids: [rec] });
+    const g = w.reopen();
+    pages = 0;
+    assert.deepEqual((await g.ownerPending(w.owner)).items.map((i) => i.recordId), [rec], "a well-formed list is believed");
+    assert.equal(pages, FLOOR_LIMITS.indexPages, "after one bounded walk");
+    pages = 0;
+    await g.ownerPending(w.owner);
+    await g.openInquiries(w.owner, 10);
+    assert.equal(pages, 0, "and not walked again until the next start");
+  } finally { s.listAggregates = real; }
 });
