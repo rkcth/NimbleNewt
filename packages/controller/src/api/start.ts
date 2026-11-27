@@ -1338,9 +1338,9 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         const p = await principals.get(`agent:${from.id}`); if (p === undefined) return [];
         const out: string[] = [];
         const rightsOf = async (x: { id: string; kind: never; name: string; grants: never }) => grants.effective(x as never, new Date().toISOString());
-        // What the recipient may see in detail (card L03j): its rights are read once for every kind of hold below. A recipient that is not an enrolled agent sees no details.
+        // What the recipient may see in detail (card L03j): its rights are read once for every kind of hold below. A recipient that is not an enrolled, active agent sees no details (a disabled principal cannot pass the doors either).
         const tp = await principals.get(`agent:${to.id}`);
-        const teff = tp === undefined || tp.kind !== "agent" ? undefined : await rightsOf(tp as never);
+        const teff = tp === undefined || tp.kind !== "agent" || tp.state !== "active" ? undefined : await rightsOf(tp as never);
         // The sender's integrator leases for this task, a freeze left by an ended workspace request, and the operation open on the checkout (whoever started it). Each failing read is a gap, said so.
         // Only the request itself (through the recovery loop) lifts a freeze, and the operation ends itself: the hand-off names them and never ends, lifts or takes over either.
         const read = async <T,>(run: () => Promise<T>): Promise<T | typeof UNREADABLE> => { try { return await run(); } catch { return UNREADABLE; } };

@@ -99,3 +99,14 @@ test("hostile stored values stay on one bounded line and cannot add lines to the
   assert.equal(oneLine("  \n "), "?");
   assert.equal(oneLine("a".repeat(10), 5), "aa...");
 });
+
+test("format characters in a stored value are dropped, so it cannot reorder or hide the words around it; a cut never splits a surrogate pair", () => {
+  const hidden = "rel\u202Eesae\u2066x\u2069\u200B\u200F\uFEFF\u00AD";
+  assert.equal(oneLine(hidden), "relesaex");
+  const [line] = holdLines(facts({ leases: [{ branch: `\u202E${hidden}`, fence: 1, expiresAt: "t" }], frozen: undefined, open: undefined }), ALL);
+  assert.ok(!/\p{Cf}/u.test(line!), line);
+  assert.equal(oneLine("\u200B\u202E"), "?", "a value of format characters only is unknown");
+  const cut = oneLine(`ab${"\u{1F600}".repeat(5)}`, 6);
+  assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(cut), JSON.stringify(cut));
+  assert.equal(cut, "ab...");
+});

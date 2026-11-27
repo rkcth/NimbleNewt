@@ -1,5 +1,6 @@
 import { allowsExactly, inTaskScope } from "../security/access.js";
 import type { Principal } from "../security/principals.js";
+import { safeSlice } from "./handoff-cut.js";
 
 /**
  * The integrator-lease and workspace lines of a hand-off package's locks section (card L03j), limited to what the recipient may see.
@@ -34,10 +35,13 @@ export interface HoldFacts {
 /** At most this many leases are named one by one (the lease service keeps at most 8 live leases per task); any beyond are counted. */
 export const NAMED_LEASES = 8;
 
-/** One line of at most `max` characters: control characters and line breaks become spaces, so a stored value cannot start a line of its own. */
+/**
+ * One line of at most `max` characters: control characters and line breaks become spaces, so a stored value cannot start a line of its own; invisible format characters (bidi controls, zero-width
+ * characters) are dropped, so a stored value cannot reorder or hide the controller's words around it. The cut never ends between the two halves of a surrogate pair.
+ */
 export function oneLine(value: unknown, max = 120): string {
-  const s = (typeof value === "string" ? value : typeof value === "number" && Number.isFinite(value) ? String(value) : "?").replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").trim();
-  return s.length === 0 ? "?" : s.length > max ? `${s.slice(0, max - 3)}...` : s;
+  const s = (typeof value === "string" ? value : typeof value === "number" && Number.isFinite(value) ? String(value) : "?").replace(/\p{Cf}+/gu, "").replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").trim();
+  return s.length === 0 ? "?" : s.length > max ? `${safeSlice(s, max - 3)}...` : s;
 }
 
 /** What the recipient may see in detail, by the same exact rights the lease and workspace doors use. An unknown recipient sees no details. */

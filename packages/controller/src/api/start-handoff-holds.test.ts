@@ -105,6 +105,9 @@ test("composed: a recipient that may not see leases or workspace requests is tol
     await call("task.transition", { taskId: task, to: "ready", expectedRevision: 1 }, "tr1");
     assert.ok((await call("task.assign", { taskId: task, owner: { kind: "agent", id: a } }, "as1")).ok);
     const lease = await c.services.integratorLeases.acquire({ commandId: "lz1", projectId: project, branch: "integration", holder: a, taskId: task, ttlMs: 3_600_000 });
+    // The sender's lease for a task in another project is not this task's: neither counted nor named.
+    const elsewhere = (await call("task.create", { projectId: other, title: "prune", description: "Prune the orchard." }, "t2")).result.id as string;
+    await c.services.integratorLeases.acquire({ commandId: "lz-far", projectId: other, branch: "orchard-main", holder: a, taskId: elsewhere, ttlMs: 3_600_000 });
     // Another agent's lease for the same task is not the sender's: neither counted nor named.
     await c.services.integratorLeases.acquire({ commandId: "lz-other", projectId: project, branch: "release", holder: leasesOnly, taskId: task, ttlMs: 3_600_000 });
     const pending = call("workspace.request", { operation: "refresh", taskId: task, reason: "base moved" }, "w1");
@@ -117,8 +120,34 @@ test("composed: a recipient that may not see leases or workspace requests is tol
     assert.match(locks, /a workspace operation \(refresh\) is in progress; .*who started it and the request are withheld/, locks);
     for (const hidden of ["branch integration", `fence ${lease.fence}`, lease.expiresAt, "owner:rob", "wsr-"]) assert.ok(!locks.includes(hidden), `${hidden} withheld: ${locks}`);
     assert.ok(!/not tracked|none: /.test(locks), "held kinds are listed, neither a gap nor none");
+    assert.ok(!locks.includes("orchard-main"), locks);
+    assert.ok(!seen.result.item.package.sections.locks.includes("orchard-main"));
     // Cancelled: another recipient that may see leases but not workspace requests gets the lease named and the operation withheld.
     assert.ok((await call("handoff.cancel", { handoffId: seen.result.item.id }, "hc1")).ok);
+    // A recipient whose principal is disabled cannot pass the doors: it is refused before any package is written (the locks source gives such a recipient no details either, should it be disabled after preparation).
+    const gone = await agent("Gone", [["attempt.work", project], ["integration.lease", project], ["workspace.manage", project]]);
+    const gp = await c.services.principals.get(`agent:${gone}`);
+    await c.services.principals.disable(rob, { commandId: "dis-gone", principalId: `agent:${gone}`, expectedRevision: gp!.revision });
+    const toGone = await call("handoff.prepare", { taskId: task, to: { kind: "agent", id: gone }, reason: "A moves on" }, "h-gone");
+    assert.equal(toGone.ok, false, JSON.stringify(toGone));
+    // workspace.manage limited to this very task is the workspace door's right: the operation is named in full, the leases are not.
+    const taskWs = await agent("TaskWs", [["attempt.work", project]]);
+    await c.services.grants.grant(rob, { commandId: "g-taskws", grantee: `agent:${taskWs}`, action: "workspace.manage", project, resource: { kind: "task", id: task }, source: "direct", basis: "test" } as never);
+    const ws = await call("handoff.prepare", { taskId: task, to: { kind: "agent", id: taskWs }, reason: "A moves on" }, "h-taskws");
+    assert.ok(ws.ok, JSON.stringify(ws));
+    assert.match(ws.result.item.package.sections.locks, /refresh in progress, started by owner:rob \(request wsr-/, ws.result.item.package.sections.locks);
+    assert.match(ws.result.item.package.sections.locks, /^integrator leases: 1 held by the sender for this task;/m);
+    assert.ok((await call("handoff.cancel", { handoffId: ws.result.item.id }, "hc-taskws")).ok);
+    // The lease service failing to read is a gap line in the composed package, not an absence, and does not hide the workspace lines.
+    const forTask = c.services.integratorLeases.forTask;
+    (c.services.integratorLeases as { forTask: unknown }).forTask = async () => { throw new Error("storage down"); };
+    try {
+      const gap = await call("handoff.prepare", { taskId: task, to: { kind: "agent", id: leasesOnly }, reason: "A moves on" }, "h-gap");
+      assert.ok(gap.ok, JSON.stringify(gap));
+      assert.match(gap.result.item.package.sections.locks, /^integrator leases: could not be read just now, .*not absent$/m, gap.result.item.package.sections.locks);
+      assert.match(gap.result.item.package.sections.locks, /a workspace operation \(refresh\) is in progress/);
+      assert.ok((await call("handoff.cancel", { handoffId: gap.result.item.id }, "hc-gap")).ok);
+    } finally { (c.services.integratorLeases as { forTask: unknown }).forTask = forTask; }
     const half = (await call("handoff.prepare", { taskId: task, to: { kind: "agent", id: leasesOnly }, reason: "A moves on" }, "h2")).result.item;
     assert.match(half.package.sections.locks, new RegExp(`integrator lease on branch integration: held by ${a} \\(the sender, fence ${lease.fence}`));
     assert.ok(!half.package.sections.locks.includes("owner:rob") && !half.package.sections.locks.includes("wsr-"), half.package.sections.locks);
