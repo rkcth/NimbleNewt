@@ -9,6 +9,7 @@ import { PLAN_FILE } from "@nimblenewt/contracts";
 import { WorkspaceBridge, ABSENT, versionOf, type WriteResult } from "./bridge.js";
 import { WorkspaceError } from "./errors.js";
 import { collisionKey, fold, splitRelative, touchesGit } from "./names.js";
+import { BLOCK_REASON, CONTRIBUTION_LIMITS, asksSignOff, instructionKind, instructionOrder, instructionText, isIgnoreRuleFile, isIntended, isNimbleNewtState, readIntended, shortReason, type ContributionBlock, type InstructionKind } from "./contribution.js";
 import { NOFOLLOW, openedAt, resolveSafe, sameFile } from "./paths.js";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
@@ -1215,6 +1216,121 @@ export class GitBridge {
   async #blobBuffer(gitDir: string, sha: string): Promise<Buffer> {
     return new Promise((resolveBlob, reject) => {
       execFile(this.#git, [...this.#flags(), "--git-dir", gitDir, "cat-file", "blob", sha], { env: this.#env(), encoding: "buffer", maxBuffer: GIT_LIMITS.fileBytes + 1, windowsHide: true, cwd: this.#empty }, (error, stdout) => (error === null ? resolveBlob(stdout as unknown as Buffer) : reject(new WorkspaceError("invalid_path", "a file could not be read within the size limit"))));
+    });
+  }
+
+  /**
+   * Card P05: the contribution guidance and agent instruction files a repository already has at `commit` (`instructionKind`), read from the commit itself (never from the checkout an agent may have written), so the
+   * existing conventions are found without any NimbleNewt file being required or added. At most `CONTRIBUTION_LIMITS.instructionFiles` are read (the rest counted in `more`), each cut to its character bound and all of them
+   * to the total; a link, a submodule entry, a file that is not UTF-8 text, and a file the optional `scan` names are listed in `skipped` with the reason and never read out. Nothing is written anywhere.
+   */
+  async instructions(options: { gitDir: string; commit: string; scan?: (file: { path: string; bytes: Buffer }) => string | undefined | Promise<string | undefined> }): Promise<{ commit: string; files: { path: string; kind: InstructionKind; text: string; cut: boolean }[]; skipped: { path: string; kind: InstructionKind; reason: string }[]; more: number; signOff: boolean; pullRequestTemplate?: string }> {
+    if (!OBJECT.test(options.commit)) throw new WorkspaceError("invalid_path", "a commit is named by its full ID");
+    const commit = (await this.#run(["rev-parse", "--verify", `${options.commit}^{commit}`], { gitDir: options.gitDir })).stdout.trim();
+    const listed = (await this.#run(["ls-tree", "-r", "-z", "-l", "--full-tree", commit], { gitDir: options.gitDir })).stdout.split("\0").filter(Boolean);
+    if (listed.length > GIT_LIMITS.files * 10) throw new WorkspaceError("invalid_path", `the repository holds more than ${GIT_LIMITS.files * 10} files; its instructions were not looked for`);
+    const found: { path: string; kind: InstructionKind; mode: string; blob: string; size: number }[] = [];
+    for (const line of listed) {
+      const tab = line.indexOf("\t");
+      const path = line.slice(tab + 1);
+      const kind = instructionKind(path);
+      if (kind === undefined) continue;
+      const [mode = "", , blob = "", size = ""] = line.slice(0, tab).split(/\s+/);
+      found.push({ path, kind, mode, blob, size: Number(size) });
+    }
+    found.sort(instructionOrder);
+    const files: { path: string; kind: InstructionKind; text: string; cut: boolean }[] = [];
+    const skipped: { path: string; kind: InstructionKind; reason: string }[] = [];
+    let total = 0; let signOff = false; let pullRequestTemplate: string | undefined;
+    const taken = found.slice(0, CONTRIBUTION_LIMITS.instructionFiles);
+    for (const entry of taken) {
+      if (entry.mode !== "100644" && entry.mode !== "100755") { skipped.push({ path: entry.path, kind: entry.kind, reason: "a link or a submodule entry, not read" }); continue; }
+      if (!OBJECT.test(entry.blob)) { skipped.push({ path: entry.path, kind: entry.kind, reason: "could not be read" }); continue; }
+      const bytes = await this.#blobPrefix(options.gitDir, entry.blob, CONTRIBUTION_LIMITS.instructionBytes).catch(() => undefined);
+      if (bytes === undefined) { skipped.push({ path: entry.path, kind: entry.kind, reason: "could not be read" }); continue; }
+      // A cut read can end inside a character: drop the trailing bytes of a partial UTF-8 sequence before decoding.
+      let usable = bytes;
+      if (entry.size > bytes.length) { let end = usable.length; for (let back = 0; back < 3 && end > 0 && (usable[end - 1]! & 0xc0) === 0x80; back += 1) end -= 1; if (end > 0 && usable[end - 1]! >= 0xc0) end -= 1; usable = usable.subarray(0, end); }
+      if (options.scan !== undefined) {
+        let verdict: string | undefined;
+        try { verdict = await options.scan({ path: entry.path, bytes: usable }); } catch { verdict = "the scan of the file failed"; }
+        if (verdict !== undefined) { skipped.push({ path: entry.path, kind: entry.kind, reason: `held back: ${shortReason(verdict)}` }); continue; }
+      }
+      const room = Math.min(CONTRIBUTION_LIMITS.instructionChars, CONTRIBUTION_LIMITS.instructionTotalChars - total);
+      if (room <= 0) { skipped.push({ path: entry.path, kind: entry.kind, reason: "past the total length instructions are read to" }); continue; }
+      const text = instructionText(usable, room);
+      if (text === undefined) { skipped.push({ path: entry.path, kind: entry.kind, reason: "not UTF-8 text, not read" }); continue; }
+      total += text.text.length;
+      if (fold(entry.path.split("/").pop() ?? "").startsWith("dco")) signOff = true;
+      if (entry.kind !== "pull-request-template" && asksSignOff(text.text)) signOff = true;
+      if (entry.kind === "pull-request-template" && pullRequestTemplate === undefined) pullRequestTemplate = entry.path;
+      files.push({ path: entry.path, kind: entry.kind, text: text.text, cut: text.cut || entry.size > bytes.length });
+    }
+    return { commit, files, skipped, more: found.length - taken.length, signOff, ...(pullRequestTemplate === undefined ? {} : { pullRequestTemplate }) };
+  }
+
+  /**
+   * Card P05: the automated check of a contribution's actual diff before anything is committed for it or offered as a pull request. The diff is `base` (a commit) to `tree` (the submitted tree), read from git's
+   * objects, not from a checkout, so the owner's local work in the shared checkout and anything the agent left outside the submitted tree are not part of it. Each changed file is blocked, with its reasons, when it is:
+   * not intended (`intended`, `readIntended`), NimbleNewt's own state (`isNimbleNewtState`), an ignore-rule file the task did not name exactly, a link or submodule entry, larger than a file the scan can read, or named by
+   * `scan` (its content or its name). `scan` is required: without it nothing is checked (no scan, no contribution). A scan that throws blocks that file. `ok` is true only when nothing is blocked and something changed.
+   */
+  async contributionCheck(options: { gitDir: string; base: string; tree: string; intended: unknown; scan: (file: { path: string; bytes: Buffer }) => string | undefined | Promise<string | undefined> }): Promise<{ ok: boolean; base: string; tree: string; files: { path: string; op: "write" | "delete" }[]; fileCount: number; blocked: { path: string; kinds: ContributionBlock[]; reasons: string[] }[]; blockedCount: number }> {
+    if (typeof options.scan !== "function") throw new WorkspaceError("invalid_path", "a contribution check needs a scan of its files; none was given, so nothing was checked");
+    const intended = readIntended(options.intended);
+    if (!OBJECT.test(options.base) || !OBJECT.test(options.tree)) throw new WorkspaceError("invalid_path", "a contribution names its base commit and its tree by their full IDs");
+    const base = (await this.#run(["rev-parse", "--verify", `${options.base}^{commit}`], { gitDir: options.gitDir })).stdout.trim();
+    const kind = (await this.#run(["cat-file", "-t", options.tree], { gitDir: options.gitDir })).stdout.trim();
+    if (kind !== "tree") throw new WorkspaceError("invalid_path", "the contribution's tree is not a tree");
+    const raw = (await this.#run(["diff-tree", "-r", "-z", "--no-renames", "--raw", "--no-commit-id", base, options.tree], { gitDir: options.gitDir })).stdout.split("\0");
+    const changes: { path: string; op: "write" | "delete"; mode: string; oldMode: string; blob: string }[] = [];
+    for (let i = 0; i + 1 < raw.length; i += 2) {
+      const meta = raw[i]!; const path = raw[i + 1]!;
+      if (!meta.startsWith(":")) throw new WorkspaceError("unavailable", "git's list of changes could not be read; the contribution was not checked");
+      const [oldMode = "", mode = "", , blob = "", status = ""] = meta.slice(1).split(" ");
+      changes.push({ path, op: status.startsWith("D") ? "delete" : "write", mode, oldMode, blob });
+      if (changes.length > GIT_LIMITS.files) throw new WorkspaceError("invalid_path", `more than ${GIT_LIMITS.files} files changed; the contribution was not checked`);
+    }
+    const blocked: { path: string; kinds: ContributionBlock[]; reasons: string[] }[] = [];
+    const special = (m: string): boolean => m === "120000" || m === "160000";
+    for (const change of changes) {
+      const kinds: ContributionBlock[] = []; const reasons: string[] = [];
+      const add = (k: ContributionBlock, reason: string): void => { if (!kinds.includes(k)) { kinds.push(k); reasons.push(shortReason(reason)); } };
+      const inBase = change.oldMode !== "000000";
+      if (isNimbleNewtState(change.path, inBase)) add("nimblenewt-state", BLOCK_REASON["nimblenewt-state"]);
+      if (isIgnoreRuleFile(change.path) && !intended.files.has(change.path)) add("ignore-rule", BLOCK_REASON["ignore-rule"]);
+      if (!isIntended(change.path, intended)) add("unrelated", BLOCK_REASON.unrelated);
+      if (special(change.mode) || special(change.oldMode)) add("link", BLOCK_REASON.link);
+      const scanOne = async (file: { path: string; bytes: Buffer }, label: string): Promise<void> => {
+        let verdict: string | undefined;
+        try { verdict = await options.scan(file); } catch { verdict = "the scan of the file failed"; }
+        if (verdict !== undefined) add("secret", `${label}${verdict}`);
+      };
+      await scanOne({ path: change.path, bytes: Buffer.from(change.path, "utf8") }, "its name: ");
+      if (change.op === "write" && !special(change.mode)) {
+        const size = OBJECT.test(change.blob) ? Number((await this.#run(["cat-file", "-s", change.blob], { gitDir: options.gitDir }).catch(() => ({ stdout: "" }))).stdout.trim()) : NaN;
+        const bytes = Number.isSafeInteger(size) && size <= GIT_LIMITS.fileBytes ? await this.#blobBuffer(options.gitDir, change.blob).catch(() => undefined) : undefined;
+        if (bytes === undefined) add("unreadable", `could not be read for the scan (larger than ${GIT_LIMITS.fileBytes} bytes, or missing)`);
+        else await scanOne({ path: change.path, bytes }, "");
+      }
+      if (kinds.length > 0) blocked.push({ path: change.path, kinds, reasons });
+    }
+    return {
+      ok: changes.length > 0 && blocked.length === 0, base, tree: options.tree,
+      files: changes.slice(0, CONTRIBUTION_LIMITS.listed).map((c) => ({ path: c.path, op: c.op })), fileCount: changes.length,
+      blocked: blocked.slice(0, CONTRIBUTION_LIMITS.blockedListed), blockedCount: blocked.length,
+    };
+  }
+
+  /** At most `max` bytes from the start of a blob (an instruction file larger than that is cut, not refused). */
+  async #blobPrefix(gitDir: string, sha: string, max: number): Promise<Buffer> {
+    return new Promise((resolveBlob, reject) => {
+      const child = spawn(this.#git, [...this.#flags(), "--git-dir", gitDir, "cat-file", "blob", sha], { env: this.#env(), windowsHide: true, cwd: this.#empty, stdio: ["ignore", "pipe", "ignore"] });
+      const chunks: Buffer[] = []; let size = 0; let done = false;
+      const finish = (error?: Error): void => { if (done) return; done = true; if (error !== undefined) reject(error); else resolveBlob(Buffer.concat(chunks).subarray(0, max)); };
+      child.stdout.on("data", (chunk: Buffer) => { if (size >= max) return; chunks.push(chunk); size += chunk.length; if (size >= max) { child.kill(); finish(); } });
+      child.on("error", (error) => finish(new WorkspaceError("unavailable", "git could not be run", { cause: error })));
+      child.on("close", (code) => (code === 0 || size >= max ? finish() : finish(new WorkspaceError("invalid_path", "a file could not be read"))));
     });
   }
 

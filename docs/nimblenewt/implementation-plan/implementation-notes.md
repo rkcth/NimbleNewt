@@ -20624,3 +20624,103 @@ ASSUMPTION (who cites a concern): only the controller. An agent retells a stall 
 - Tests added: stall: two steps taken named oldest first; a hook failing in the scan (concern cleared and counted, noted, scan goes on); a clearing write that loses to a confirmation made meanwhile (a storage proxy runs the decision just before the write) is counted contended and tells no recovery. Observations: an `event` on an observation citation is refused by its own message.
 - Deliberate breakages (17 own plus one re-done, on the built files, each alone, restored by SHA-256, against the B02 suites): caught at once: episode +1, telling before the decision, steps counted only if all taken, recovery told before the clearing write, the controller limited to agent kinds, the recovery's detail dropped, provenance ignoring the concern ID, the decider dropped, the steps emptied. Caught after the tests above: the scan hook's throw escaping, the steps newest first, an event on an observation citation, the recovery told when the clearing write lost, the recovery's command ID without the concern (redone on the recovery branch; on the failure branch alone it is not reachable in the test, since no two concerns share a confirmed episode there). Not caught, equivalent: the read-back's state check removed (archived concerns never reopen), the reason taken from the command, not the record (a different reason under the same command ID is a conflict). Not caught, accepted: a pending (in-flight) step counted as taken (not counting it only leaves out an uncertain recovery).
 - Runs (same 12 files): Node 22.23.0 633 of 633; Node 24.21.0 633 of 633. `api:docs:write` (no change), `check:deps`, `licenses:check`, `roadmap:check` pass; `scripts/plan.test.mjs` 6 of 6; prompt 156,553 characters (ceiling 156,560).
+
+## P05 first slice: the repository's own guidance found at the task's base, and the automated diff check of a contribution (Claude agent, Opus 5.5, 2026-11-27; branch `card-p05`; card NOT flipped; task-plan files unchanged; not pushed; no workflow dispatched)
+
+**Dependency.** P05's blocker P02 is `planned` only because its own blocker Y02 (the owner's real-hardware QA checkpoint) is planned. Its offline clauses are built and reviewed: workspace admission, the start record, proposals never cover a push, merge or deploy, the three workspace tests, remote-host admission, and the moved Q01 deliverable clause (sections "P02 open clauses", "P02 remote hosts" and "P02: work from the task workspace reaches Q01"). A06, A07, T03 and F09 are implemented.
+**ASSUMPTION:** P05 built ahead of P02, which is built and planned only for Y02 by coordinator decision; nothing of P02/Y02 is claimed.
+
+**Slice boundary (card clause order).** The first slice covers the card's first and third clauses, and the part of the fourth that needs no host:
+1. Existing contribution guides and instruction files are found and read without adding NimbleNewt conventions.
+2. An automated diff check blocks unrelated files, NimbleNewt state, ignore-rule edits and secrets before commit or PR.
+3. The checked change contains only intended files, and the owner's unrelated local work stays out of it.
+
+The second clause (the checkout's starting state is recorded) is P02's start record (`<task>/starts/<attempt>.json`), already built. Everything outward-facing (push, pull request, review and CI status) is NOT in this slice, and nothing here talks to a network or a remote.
+
+**What was built** (worker only; no controller, API, chat or prompt change):
+- `packages/worker/src/workspace/contribution.ts`: the rules that need no git.
+  - `instructionKind` names the repository's own guidance, folded for case and Unicode form:
+    - `CONTRIBUTING*` and `DCO*` at the top, in `.github/`, `docs/` or `.gitlab/`;
+    - `AGENTS.md`, `AGENT.md`, `CLAUDE.md` and `GEMINI.md` in any folder;
+    - `.cursorrules` and `.windsurfrules` at the top, and `.github/copilot-instructions.md`;
+    - pull-request and merge-request templates, single files and template folders.
+  - Git's own data in any spelling is never one of them.
+  - `isNimbleNewtState`: Git's data; anything under `.nimblenewt`, `nimblenewt-state` or `.nn`; and the agent's `PLAN.md` at the top when the base did not hold one.
+  - `isIgnoreRuleFile`: `.gitignore`, `.ignore`, `.dockerignore`, `.npmignore`, `.hgignore`, `.prettierignore`, `.eslintignore`, `.gcloudignore`, `.vercelignore`, `.slugignore`.
+  - `readIntended`: at most 200 exact paths or folders ending in `/`, under the workspace's own path rules. Git's data is refused, and a list it cannot read is refused whole. An empty list intends nothing.
+- `GitBridge.instructions({ gitDir, commit, scan? })` reads the guidance from the commit's objects, never from a checkout an agent may have written:
+  - Bounds: at most 20 files, then counted in `more`. Each file is read up to 256 KiB and kept to 16,000 characters, with 64,000 in all.
+  - Cleaning: valid UTF-8 only; line endings made `\n`; zero-width, bidirectional and C0/C1 control characters removed.
+  - Order: top first, then by depth, kind and path, so the same tree gives the same answer.
+  - Links, submodule entries, binary files, files past the total, and files the optional scan names go into `skipped` with a reason. Their text is never returned.
+  - `signOff` is true when the guidance asks for a sign-off (DCO, `Signed-off-by`, `git commit -s`) or a `DCO` file exists. `pullRequestTemplate` names the first template.
+  - Nothing is written anywhere.
+- `GitBridge.contributionCheck({ gitDir, base, tree, intended, scan })`:
+  - The diff is base commit to submitted tree, read from git's objects (`diff-tree --raw --no-renames`).
+  - Each changed file can be blocked for one or more of these reasons, each in plain words:
+    - `unrelated`: not intended;
+    - `nimblenewt-state`: blocked whatever the intended list says;
+    - `ignore-rule`: lifted only when the intended list names that exact file; a folder does not;
+    - `link`: a link or submodule entry, added, changed or deleted;
+    - `unreadable`: over the 8 MiB the scan reads, or missing;
+    - `secret`: the scan names the file's content or its name.
+  - The scan is required: without one nothing is checked. A scan that throws blocks the file, and its message is not repeated.
+  - The base must be a commit and the tree a tree, both named by full IDs. More than 10,000 changed files are refused whole.
+  - Lists are bounded and counted: 500 files and 100 blocked files listed, all of them counted.
+  - `ok` only when something changed and nothing is blocked.
+- `LocalWorkspaces.instructions(call, scan?)` reads at the task's base. `LocalWorkspaces.contributionCheck(call, scan)` refuses a base that is not the task's base. Both answer `undefined` when this host holds no checkout for the task.
+- Exported from `@nimblenewt/worker`.
+
+**ASSUMPTION:** the guidance is read from the task's base commit, not from the checkout, so an agent cannot write the rules it is then told to follow. A guidance change made by the task itself is judged by the diff check like any other file.
+**ASSUMPTION:** a `PLAN.md` that the base already holds is the project's own file, judged like any other. Only a new top-level plan is NimbleNewt state, and naming it in the intended list does not make it the project's.
+**ASSUMPTION:** an ignore-rule edit is allowed only when the task names that exact file (the design says ignore rules are never edited to hide NimbleNewt's files; a requested `.gitignore` change is a legitimate deliverable).
+**ASSUMPTION:** the file's name is scanned as well as its content (a token used as a file name is a secret in the tree).
+**ASSUMPTION:** the owner's uncommitted work in the shared checkout never enters the contribution. The task checkout is made from the shared repository's head commit (P02), and the check reads only the submitted tree. Tests show that the owner's changed and untracked files are untouched and are not in the check.
+
+**Tests.**
+- `packages/worker/src/workspace/contribution.test.ts`: 8 tests, real git, hostile inputs:
+  - path tables for every kind and look-alike;
+  - intended lists with `..`, absolute, drive, backslash, NUL, `.git`, empty and over-long entries;
+  - the guidance read from the base while the agent rewrote `CONTRIBUTING.md` in its checkout;
+  - a link, a binary file and a token-holding file skipped with their reasons, and the token in no answer;
+  - bidirectional and zero-width characters removed;
+  - the file and total bounds, the order, and an ordinary repository giving an empty answer;
+  - the diff check's six kinds, the owner's dirty and untracked work untouched and absent, and the exact-file rule for ignore files;
+  - a missing scan, a throwing scan, a wrong base, a commit given as the tree, and malformed IDs;
+  - link, submodule, over-size and deletion entries built with git plumbing;
+  - 150 unrelated files (100 listed, 150 counted), and a 10,001-file tree refused;
+  - a link in the checkout refused by the staging.
+- `packages/integration/src/p05-contribution-check.test.ts`: 1 test.
+  - An ordinary checkout cloned from a disposable bare upstream on the local disk, with no NimbleNewt files and the owner's untracked file in it.
+  - The guidance is found as written, with sign-off asked.
+  - The controller's real `createWipScanner` with a store secret blocks a fixture holding that secret's value as UTF-16, naming only the secret's name. The agent's plan is blocked as state.
+  - The fix alone then passes. The upstream's refs are unchanged, the owner's checkout is as it was, and no NimbleNewt file is in the tree.
+
+**Not done (P05 stays open; in clause order):**
+- *Applying* the guidance:
+  - give the discovered text to the agent, quoted once as data, in its first prompt or hand-off brief (C07 startup builder or W12 block; mind the fixed-part budget);
+  - use `signOff` and `pullRequestTemplate` when a contribution commit and PR body are made.
+- Where the intended list comes from: the task contract or the owner, plus the controller-side operation that runs the check on a submission and records the result. No state-API operation, chat wording or status view yet.
+- The contribution adapter: push, open and revise a PR or MR, read review and CI status.
+  - It sits behind separate action scopes (a local edit grant permits none of them), each push and PR an effect-ledger operation.
+  - Owner approval must not bypass branch protection or CI. Attribution must be accurate.
+  - The next slice builds it against a simulated host over a local bare repository only: no real GitHub, no tokens, no network, nothing pushed anywhere real; outward publication stays owner-approved and recorded.
+- Revision after review comments.
+- Multi-repository change sets: review order, partial completion, resumable, never atomic.
+- Landing on main never pushes upstream (P10c).
+- A remote worker host: the scan is a function and does not cross the worker protocol, the same limit as P02b.
+- Owner control: the slice adds none. When the controller operation is built it needs chat wording. The interpreter prompt has 7 characters of room, so the smallest route is a read-only status kind, whose description STATUS_KINDS puts in the prompt. That still needs about 120 characters cut from an existing paragraph; not done here.
+
+**Mutation check.** 22 deliberate breakages, each applied alone to the built files and restored with its sha256 checked, run against the two new test files under the offline guard with the sandbox required. All 22 were caught; one was caught only after a test was added.
+- In the diff check: the state check dropped; the ignore-rule check dropped; the link check dropped; the unrelated check dropped; a throwing scan treated as clean; the name not scanned; the content not scanned; the size bound removed; an empty diff ok; a missing scan accepted; the tree's type unchecked; the blocked list unbounded; the file bound removed.
+- In `LocalWorkspaces`: a base mismatch accepted.
+- In the guidance read: a link read; the scan's verdict ignored; the total length unbounded; hidden characters kept; DCO not counted as a sign-off.
+- In the path rules: the plan always counted as state; the intended list allowed to name Git's data.
+- Caught after a test was added: an ignore-rule file allowed because an intended folder covers it (the test now edits `src/.gitignore` with `src/` intended).
+
+**Runs** (base origin/main abf0ce54):
+- Checks: `npm ci --ignore-scripts`; `tsc --build --force` clean; `api:docs:write` (no change); `check:deps`, `licenses:check`, `roadmap:check` ok; `scripts/plan.test.mjs` 6 of 6. The interpreter prompt was not touched.
+- Through `/tmp/nn-slot.sh` with `NIMBLENEWT_REQUIRE_SANDBOX=1` and the offline guard, the same counts on both Nodes:
+  - files: the whole worker workspace suite (with the new `contribution.test.ts`), `integration/p05-contribution-check` and `integration/p02b-wip-backup` (four storage backends, real git, the controller's scan);
+  - Node 22.23.0: 230 tests, 228 passing, 0 failing, 2 Windows-only skips;
+  - Node 24.21.0: 230 tests, 228 passing, 0 failing, 2 Windows-only skips.

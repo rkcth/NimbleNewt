@@ -464,6 +464,29 @@ export class LocalWorkspaces {
     } catch { return undefined; }
   }
 
+  /**
+   * Card P05: the contribution guidance and agent instruction files of the repository at the task's base (`GitBridge.instructions`): what the project already asks of a contribution, read from the base commit, never from the
+   * checkout. `undefined`: this host holds no checkout for the task.
+   */
+  async instructions(call: { readonly taskId: string; readonly projectId: string }, scan?: (file: { path: string; bytes: Buffer }) => string | undefined | Promise<string | undefined>): Promise<Awaited<ReturnType<GitBridge["instructions"]>> | undefined> {
+    const where = this.locate(call);
+    if (where === undefined) return undefined;
+    const base = await this.#options.git.baseOf(where.gitDir);
+    return this.#options.git.instructions({ gitDir: where.gitDir, commit: base, ...(scan === undefined ? {} : { scan }) });
+  }
+
+  /**
+   * Card P05: the automated diff check of a contribution of the task (`GitBridge.contributionCheck`) over a submission's base and tree, read from the task's own git directory. The submission's base must be the task's base
+   * (a contribution is the task's own work, judged against what the task started from). `undefined`: this host holds no checkout for the task.
+   */
+  async contributionCheck(call: { readonly taskId: string; readonly projectId: string; readonly base: string; readonly tree: string; readonly intended: unknown }, scan: (file: { path: string; bytes: Buffer }) => string | undefined | Promise<string | undefined>): Promise<Awaited<ReturnType<GitBridge["contributionCheck"]>> | undefined> {
+    const where = this.locate(call);
+    if (where === undefined) return undefined;
+    const base = await this.#options.git.baseOf(where.gitDir);
+    if (call.base !== base) throw new WorkspaceError("invalid_path", "the contribution's base is not the task's base; check the submission the task made from it");
+    return this.#options.git.contributionCheck({ gitDir: where.gitDir, base: call.base, tree: call.tree, intended: call.intended, scan });
+  }
+
   async #ensure(call: { readonly taskId: string; readonly projectId: string }, shared: string): Promise<{ readonly checkout: string; readonly gitDir: string }> {
     const parent = join(this.#options.root, call.projectId);
     if (collides(this.#options.root, call.projectId) || collides(parent, call.taskId)) throw new WorkspaceError("invalid_path", "another task or project folder has a name that differs only in case or form; a case-insensitive filesystem would treat them as one, so this one is not made");
