@@ -447,7 +447,7 @@ test("card W09b: the agent reads, writes, edits, builds and tests in its own che
 test("card W09b: a checkout command still running when the agent ends is stopped by the ending's settle through the real worker, not waited for, and is left uncertain (the call H12n counts as a killed write)", async (t) => {
   const s = await sandboxUsable();
   if (!s.usable) { if (required && process.platform === "linux") assert.fail(`NIMBLENEWT_REQUIRE_SANDBOX=1 but the sandbox is unusable: ${s.why}`); return t.skip("bubblewrap or a node install it can mount is unusable"); }
-  // The product host offers no submit yet (H12t: no submitView or stage), so a submit is refused there before any settle; the ending is a plain done. That an uncertain call that is not read-only turns a submit into
+  // The agent here ends without a submit, so the ending is a plain done (the product host answers a submit's view and staging since the H12n launcher slice, but none is asked here). That an uncertain call that is not read-only turns a submit into
   // release_failed is shown by start-work-end-settle (H12n), through the real dispatcher binding.
   const run = await runOne({
     variant: "D",

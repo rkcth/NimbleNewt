@@ -42,8 +42,8 @@ for (const backend of backends) {
     runs: ScriptLaunch[];
     /** What the script runner does; the default answers `{"ok":true}`. */
     behave: { run: (launch: ScriptLaunch, signal: AbortSignal) => Promise<{ text: string; cpuMs?: number }> };
-    /** A service over another dispatcher (a restart of the controller process). */
-    serviceOver(dispatcher: DispatcherService, facts?: false): ToolExecutionService;
+    /** A service over another dispatcher (a restart of the controller process); `checkout` replaces the test's own checkout port (card W09b flip audit: the dispatcher's real one). */
+    serviceOver(dispatcher: DispatcherService, facts?: false, checkout?: NonNullable<ConstructorParameters<typeof ToolExecutionService>[0]["checkout"]>): ToolExecutionService;
     /** An agent with everything the bridge needs, including the standing grant for its own tool namespace. */
     agentFor(name: string, extra?: Grant[]): Promise<{ id: string; aid: string }>;
     /** Runs a worker script as the attempt's worker with the bridge: `send` is bound to the credential and gateway of the attempt. */
@@ -78,8 +78,8 @@ for (const backend of backends) {
         const behave: Ctx["behave"] = { run: async () => ({ text: '{"ok":true}', cpuMs: 5 }) };
         const runner: ScriptRunner = { run: async (launch, signal) => { runs.push(launch); return behave.run(launch, signal); } };
         const hostFacts = { os: "linux" as const, arch: "x64" as const, interpreters: { node: "22.19.0" }, packages: {}, cpus: 8, memoryMb: 16_384 };
-        const serviceOver = (dispatcher: DispatcherService, facts?: false): ToolExecutionService =>
-          new ToolExecutionService({ principal: w.dispatcherPrincipal, credentials: w.credentials, dispatch: dispatcher, assignments: w.assignments, catalog, hosts: w.hosts, admission: w.admission, runner, pauses: w.pauses, desks, builtins, revocationPolicy: () => { if (c.revocation.mode === "broken") throw new Error("setting unreadable"); return c.revocation.mode; }, checkout: async (call, request, signal) => { if (checkoutHost.run === undefined) throw new DomainError("unavailable", "the host cannot run the checkout tool"); return checkoutHost.run(call, request, signal); }, ...(facts === false ? {} : { facts: async () => hostFacts }), isLocalHost: () => true });
+        const serviceOver = (dispatcher: DispatcherService, facts?: false, checkout?: Parameters<Ctx["serviceOver"]>[2]): ToolExecutionService =>
+          new ToolExecutionService({ principal: w.dispatcherPrincipal, credentials: w.credentials, dispatch: dispatcher, assignments: w.assignments, catalog, hosts: w.hosts, admission: w.admission, runner, pauses: w.pauses, desks, builtins, revocationPolicy: () => { if (c.revocation.mode === "broken") throw new Error("setting unreadable"); return c.revocation.mode; }, checkout: checkout ?? (async (call, request, signal) => { if (checkoutHost.run === undefined) throw new DomainError("unavailable", "the host cannot run the checkout tool"); return checkoutHost.run(call, request, signal); }), ...(facts === false ? {} : { facts: async () => hostFacts }), isLocalHost: () => true });
         const svc = serviceOver({ get: (...a: Parameters<DispatcherService["get"]>) => c.dispatcher.get(...a), toolOperation: (...a: Parameters<DispatcherService["toolOperation"]>) => c.dispatcher.toolOperation(...a) } as never);
         const c: Ctx = Object.assign(w, {
           desks, catalog, svc, runs, behave, builtins, checkoutHost, serviceOver, revocation: { mode: "finish" as "finish" | "cancel" | "broken" },
@@ -324,6 +324,64 @@ for (const backend of backends) {
     const noHost = good(states["noHost"]!);
     assert.equal(noHost["state"], "failed");
     assert.match(String(noHost["reason"]), /cannot run the checkout tool/);
+  });
+
+  suite("card W09b flip audit: through the dispatcher's own checkoutTool, wired as the controller's start wires it, a host other than this computer's (no checkout of its own) refuses the tool in plain words, a write and a read alike, and no host method is called; this computer's worker host runs it", async (c) => {
+    const ann = await c.agentFor("ann");
+    await c.task("code it", ann);
+    // Every method the dispatcher calls on the attempt's host is counted. The scripted host has no `checkout` (as the remote host has none) until the control part below gives it one.
+    const hostCalls: string[] = [];
+    const counted = new Proxy(c.worker, { get(target, prop) {
+      const value: unknown = Reflect.get(target, prop, target);
+      return typeof value === "function" ? (...args: unknown[]) => { hostCalls.push(String(prop)); return (value as (...a: unknown[]) => unknown).apply(target, args); } : value;
+    } });
+    // As api/start.ts wires it: the bridge's checkout port is the dispatcher's checkoutTool, asked as the dispatcher for the call's attempt.
+    c.svc = c.serviceOver({ get: (...a: Parameters<DispatcherService["get"]>) => c.dispatcher.get(...a), toolOperation: (...a: Parameters<DispatcherService["toolOperation"]>) => c.dispatcher.toolOperation(...a) } as never, undefined,
+      (call, request, signal) => c.dispatcher.checkoutTool(c.dispatcherPrincipal, call.attemptId, request, signal));
+    c.dispatcher = c.restart({ replaySafe: c.svc.replaySafe, workers: [counted] });
+    const local: Array<{ attemptId: string; action: string }> = [];
+    const seen: Record<string, BridgeResponse> = {};
+    let attemptId = "";
+    let during: string[] = ["not reached"];
+    c.worker.script = c.session(async (s) => {
+      attemptId = s.attemptId;
+      const before = hostCalls.length;
+      seen["write"] = await s.send("work.checkout", { action: "write", path: "a.txt", text: "x" }, "rh-write");
+      seen["read"] = await s.send("work.checkout", { action: "read", path: "a.txt" }, "rh-read");
+      during = hostCalls.slice(before);
+      // Control: this computer's worker host (one with its own checkout) runs the same calls, through the same path.
+      Object.assign(c.worker, { checkout: async (id: string, request: CheckoutToolRequest): Promise<CheckoutToolReport> => {
+        local.push({ attemptId: id, action: request.action });
+        return request.path === "missing.txt" ? { ok: false, reason: "missing.txt: no such file in your checkout" } : { ok: true, body: "hello", facts: { lines: 1 } };
+      } });
+      try {
+        seen["localRead"] = await s.send("work.checkout", { action: "read", path: "a.txt" }, "lh-read");
+        seen["localWrite"] = await s.send("work.checkout", { action: "write", path: "a.txt", text: "x" }, "lh-write");
+        seen["localRefused"] = await s.send("work.checkout", { action: "read", path: "missing.txt" }, "lh-refused");
+      } finally { delete (c.worker as { checkout?: unknown }).checkout; }
+    });
+    await c.tick();
+    const plain = `the host this attempt runs on (host:w1) cannot run the checkout tool; it runs on this computer's worker host only`;
+    for (const k of ["write", "read"]) {
+      const r = good(seen[k]!);
+      assert.equal(r["state"], "failed", `the ${k} is a failed call (${JSON.stringify(r)})`);
+      assert.equal(r["reason"], plain, `the ${k} is refused in plain words`);
+    }
+    assert.deepEqual(during, [], "no host method is called for a refused call");
+    const ops = (await c.dispatcher.operations(c.dispatcherPrincipal, attemptId))!;
+    const rhWrite = opOf(ops, "rh-write", seen["write"]), rhRead = opOf(ops, "rh-read", seen["read"]), lhRefused = opOf(ops, "lh-refused", seen["localRefused"]);
+    assert.deepEqual([rhWrite.state, rhWrite.readOnly, rhWrite.tool.name], ["failed", false, "nimblenewt.checkout-write"]);
+    assert.deepEqual([rhRead.state, rhRead.readOnly, rhRead.tool.name], ["failed", true, "nimblenewt.checkout-read"]);
+    assert.equal(rhRead.state, lhRefused.state, "the refusal is recorded as the same kind of operation as a refusal the host itself gives");
+    assert.ok(rhWrite.diagnostics.some((d) => d.includes("it runs on this computer's worker host only")), JSON.stringify(rhWrite.diagnostics));
+    // The control: the local host's calls pass through to it, for the attempt the calls came through, and confirm; its own refusal fails with its own words.
+    assert.deepEqual(local, [{ attemptId, action: "read" }, { attemptId, action: "write" }, { attemptId, action: "read" }]);
+    assert.deepEqual(hostCalls.filter((m) => m === "checkout").length, 3, "the counting stub sees the local host's calls (so its silence above is not vacuous)");
+    const localRead = good(seen["localRead"]!), localWrite = good(seen["localWrite"]!), localRefused = good(seen["localRefused"]!);
+    assert.deepEqual([localRead["state"], localRead["body"]], ["confirmed", "hello"], JSON.stringify(localRead));
+    assert.equal(localWrite["state"], "confirmed", JSON.stringify(localWrite));
+    assert.deepEqual([localRefused["state"], localRefused["reason"]], ["failed", "missing.txt: no such file in your checkout"]);
+    assert.deepEqual([opOf(ops, "lh-read").state, opOf(ops, "lh-write").state], ["confirmed", "confirmed"]);
   });
 
   suite("two calls judged at once are never refused for a commit that names a record twice: when one call's guards read the task's pause gates before the other call's commit creates them and another of its guards reads them after, the call is judged again (CI run 45886436143)", async (c) => {
