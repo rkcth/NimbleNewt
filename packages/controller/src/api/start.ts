@@ -1803,6 +1803,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     // Maintenance windows for release updates (card K07): the dispatcher's `release.windows` sweep prepares and activates a window's release while no agent attempt runs, and tells the owner each outcome once.
     const releaseWindows = activation === undefined || options.releases === undefined ? undefined : ReleaseWindowService.withEpoch(storage, epoch, {
       activation, root: options.releases.root,
+      // The bound (K07): a window whose release this process does not run when the window closes has its switch undone, so it never starts at a later, unrelated time. Not started from a release: null.
+      runningRelease: options.releases.runningRelease ?? null,
       liveAttempts: async () => (dispatch === undefined ? 0 : (await dispatch.dispatcher.liveAttempts(dispatch.principal)).filter((x) => x.state === "running").length),
       // Quiesce and checkpoint (card K07): running attempts are suspended with the dispatcher's own Suspend and new work is held by the installation pause; the checkpoint is a verified backup.
       // `dispatch` is built later: until then there is nothing running to suspend.
