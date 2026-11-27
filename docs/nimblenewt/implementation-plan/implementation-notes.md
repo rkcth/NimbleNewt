@@ -21452,3 +21452,54 @@ Plain words first. Until now a run of an experiment said which environment it us
 - Tests added (each closes a gap a breakage showed). Someone without rights who names another agent's revision, a missing one, or a broken one of its own is told `forbidden`. Revision 500 and 20 observed extensions are accepted shapes. A service, host or client principal gets `not_found`. The `field` of a refusal is checked: `environment` from verify, and `observed` from A08's activate. `unavailable` comes before rights. For a run the owner reported, the status view names the environment's agent.
 - 20 deliberate breakages (built `dist`, each alone, restored and checked by SHA-256), all different from the earlier 37. 10 were caught at first and 18 once the tests were added. Caught at first: the not-found text differing for a missing revision; revision 0 accepted; verify's refusal code changed; only the first problem named; observed left out of the payload; the environment words naming the reporter; the status view showing the experiment's revision; the old environment words dropped; verify sent no observed; A08's refusal text changed. Caught once the tests were added: the bound at 500; the bound at 20; verify's field; activate's field; verify before the rights check; `unavailable` only inside the command; the status view naming the reporter; a service principal allowed. Not caught: the manifest-digest problem listed last instead of first (wording order), and dropping the stored revision's agentId/revision cross-check (defensive; storage keys make it unreachable).
 - Residual (accepted; ASSUMPTION already recorded): skills are judged for the reporter. If the owner puts a skill the agent may not use into the agent's manifest, the agent's own runs are refused (fail-closed).
+
+## M05 slice: cited sources are checked and follow-ups are owned in the running controller (Claude agent, Opus 5.5, 2026-11-27 EST; branch `card-m05` from main 32695e4d; card M05 NOT flipped, M00 NOT flipped; task-plan files unchanged; not pushed; no workflow dispatched; no model or network call made, the local model server is offline)
+
+ASSUMPTION: M05 build-ahead of unflipped M00. M05 already has earlier slices on main built ahead of M00 (2026-11-11 owner questions; 2026-11-14 floor control, turn limits and the chair's desk through M05b). M00's code is built and its acceptance was delegated. It stays open only for the live model-run experiments, which wait for the server. So the dependency rule is met for build work only. Neither card is flipped.
+
+**What remained of M05 (card clause order), before this slice.**
+- Needs live model runs (they wait for the local server): a real model route for `options.meetingFloor.runner` (the worker's bridge), the measured defaults (220 visible tokens, 800 hidden, 120 s are M00's proposals), and whether free wording picks the owner's controls (U03b).
+- Could be built offline: (1) "targeted answers mark stale sources". The floor had the check, but `sourceRevision` was never wired in production, so no source was ever marked stale outside tests. (2) "an unresolved question becomes an owned follow-up task". The floor's follow-up tasks were created unassigned (only the description named the owner), and only when someone called `meeting.floor.follow-ups`. (3) The ports `checkpointOf`, `persona`, `deskNotes` and `budget` (per-task and per-provider budgets during the owner's questions) have no production implementation. (4) The `work` port (participants the owner has not addressed go back to work during an inquiry and are recalled when addressed, under M04's rules) is not wired. (5) The M04h gap: an agent woken after the record opened cannot join it. (6) No console view of what a meeting waits on (chat and API only).
+
+**This slice is (1) and (2), the next two acceptance clauses in order.**
+- `meetings/floor-wiring.ts` holds the production adapters; `api/start.ts` uses them.
+  - `floorSourceRevision(storage)` reads a cited record's current revision only when two things hold: its kind is project-visible (`SHAREABLE_KINDS`, the same list a meeting may share), and the record belongs to the meeting's own project (for the `project` kind, the project itself). For anything else (a desk, scratch or other private kind, another project's record, a missing record, a malformed cite, a failed read) the answer is "not checked". So the meeting learns nothing about a record it could not see, not even that it exists. The port now receives `{ projectId, agent }`.
+  - `floorFollowUps(...)` creates the task in the meeting's project as before, then assigns it to the owning agent by bare ID (`{ kind: "agent", id }`, as meetings and chat assign) with a stable command ID. If the assignment fails (retired agent, task already owned), the task stays open, still names its owner, and `assigned` is false. An owner that is not an agent ID, such as the owner, gets no assignment attempt.
+- `floor.ts` changes:
+  - An answer to the owner lists sources it could not check: `Sources not checked (could not be confirmed current): ...` in the text, and `unchecked` on the owner-answer record. A source that cannot be checked is never shown as current.
+  - At most `FLOOR_LIMITS.sources` = 10 cited revisions are looked up per answer; the rest are counted as "N more".
+  - The cite pattern is now bounded: kind up to 40 characters, ID up to 120, revision up to 9 digits.
+  - Follow-up entries keep `assigned`.
+  - When the owner ends a meeting, the floor itself turns what the meeting left open into follow-up tasks (`#endFollowUps`, as its service; a failure never undoes the end) and records `followUpsAt`.
+  - The scheduled turn (`tick`) does the same for any ended floor that has none yet, including a meeting whose record was finished by other means (closed out first, follow-ups on the next turn). It counts each failed try (`followUpTries`). After `FLOOR_LIMITS.followUpTries` = 3 failures the owner is told once (`follow-ups-failed`, with the error code only, never the error text) and the floor stops trying; the owner can still ask through `meeting.floor.follow-ups`.
+  - An archived project's ended meeting waits, spending no tries, until the project is restored (card P06).
+  - Repeats make nothing new: follow-ups are deduplicated by key, and the task and assignment command IDs are stable.
+  - Nonurgent agenda items that were not reached are batched to the next meeting at the same moment (existing `followUps` behaviour).
+- Defect fixed: `meeting.floor.drive` through the API always failed. The operation table passes a command ID, and `drive` refused every field except `recordId` and `maxUnits`. `drive` now accepts and ignores the command ID; unknown fields are still refused.
+- `api-v1.md`: the `meeting.floor.end` summary now says the follow-ups are made. No interpreter prompt text was added: the prompt already says `meeting.floor.follow-ups` makes "owned follow-up tasks", which is now true. The prompt-room test passes unchanged.
+
+**Tests.**
+- `meetings/floor-wiring.test.ts`: 8 scenarios on all four storage backends.
+  - The source check's scope: own project, another project, a private kind, a desk record of the meeting's own project, a missing record, hostile cites, a failed read whose error text is not passed on.
+  - The follow-up maker: assigned by bare ID, a repeat makes no second task or assignment, non-agent and malformed owners are not assigned, a refused assignment is reported.
+  - A stale source and the not-checked list in an answer; another project's revision never appears.
+  - The 10-lookup bound.
+  - The owner's end makes assigned follow-ups once, also after a restart and later turns.
+  - A record finished by other means gets its follow-ups from the scheduled turn.
+  - The bounded tries and a single owner notice that carries no error text.
+  - An archived project waits.
+- `api/start-meeting-floor-wiring.test.ts`: the running controller over the API. A changed source is stale, another project's is not checked, `drive` works and still refuses an unknown field, and the owner's end makes a follow-up assigned to the agent.
+- 20 deliberate breakages, each applied alone to the built `dist`, run on the reference store and SQLite, and restored by SHA-256. 19 were caught. Not caught: removing the try limit inside `#endFollowUps`, because the scheduled turn checks the same limit before calling it, so that check is a second guard only. The private-kind breakage survived at first (the test's only private record, the agent record, has no project), and was caught after the desk-record case was added.
+
+**Not done (remaining M05, unchanged by this slice).**
+- Everything that needs live model runs (above).
+- The production `checkpointOf`, `persona`, `deskNotes` and `budget` ports, and the `work` release and recall.
+- The M04h late-join gap.
+- A console waiting-on view.
+- `openInquiries`, `ownerPending` and the reminder sweep still read every floor record.
+- A follow-up owned by the owner (a question the owner tagged) is not assigned; it names the owner.
+- A source cited from another project through an open A10 path is "not checked" rather than checked.
+
+ASSUMPTION: follow-ups are made when the meeting ends, not as items are left open, so a question answered later in the meeting never becomes a task.
+ASSUMPTION: a cited source outside the meeting's project, or of a private kind, is "not checked" even if an A10 path or the agent's own desk would allow a read. This is the smallest choice that tells the meeting nothing it could not see, and it can be widened later.
+ASSUMPTION: three tries, then one owner notice. The owner can always ask again; giving up quietly would hide lost follow-up work.

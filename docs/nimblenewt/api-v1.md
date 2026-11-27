@@ -5033,7 +5033,7 @@ Result: `{ settings }`.
 
 #### `meeting.floor.end`
 
-Owner only: ends the meeting. Nothing is asked after; nothing written is undone. The chair cannot prevent it.
+Owner only: ends the meeting. Nothing is asked after; nothing written is undone. The chair cannot prevent it. What the meeting left open then becomes follow-up tasks, each given to the agent that owns it.
 
 Arguments:
 
