@@ -309,5 +309,18 @@ for (const backend of backends) {
     assert.ok(title.length <= 200 && title.length >= 199, String(title.length));
     assert.ok(!/[\ud800-\udbff]$/.test(title), "no half of a pair at the end");
     assert.ok(await c.start(wideTask));
+    // Second review: an odd number of code units before the pairs (the prefix is 12), so a pair would end past the limit at 201: it is left out and the task is still created and starts.
+    const odd = await c.ask(c.dev2, { what: `a${"\u{1F331}".repeat(299)}` });
+    const oddTask = await c.approve(odd);
+    const oddTitle = (await c.projects.getTask(oddTask))!.title;
+    assert.equal(oddTitle.length, 199, String(oddTitle.length));
+    assert.ok(await c.start(oddTask));
+    // Second review: a request whose words run over lines (newlines are allowed in a request, not in a task title) is titled on one line with single spaces; its task is created and starts untouched.
+    const lines = await c.ask(c.dev2, { what: "  list blocked tasks\nfirst   in\n\nthe brief " });
+    const linesTask = await c.approve(lines);
+    const made = (await c.projects.getTask(linesTask))!;
+    assert.equal(made.title, "NimbleNewt: list blocked tasks first in the brief");
+    assert.match(made.description, /\nWhat: {3}list blocked tasks\nfirst {3}in\n\nthe brief \nWhy: /, "the description keeps the request's own words");
+    assert.ok(await c.start(linesTask), "not refused as changed");
   });
 }
