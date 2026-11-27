@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { canonicalJson } from "../storage/index.js";
 import type { RecoverySource, Watermark } from "./source.js";
@@ -53,11 +53,11 @@ function blobsOf(body: string | undefined): BlobRef[] {
  * manifest as it was. The swap removes the old `manifest.json` first and puts the new one in last: a crash during the swap leaves no manifest (refused), never a mix. Records of kind `artifact` name
  * the blobs; the reserved `tombstone` records are left out (a removed record is not state a recovery must find).
  */
-export async function writeRecoveryManifest(source: RecoverySource, directory: string, options: { readonly now?: () => Date; /** Called with the new manifest once its files are flushed in the staging folder and before anything in `directory` is touched; throwing leaves the earlier manifest as it was. */ readonly beforeSwap?: (manifest: RecoveryManifest) => Promise<void>; /** Called once the new files are in place, before the staging folder is removed, with the folder holding the files they displaced (absent ones are not there): the fenced writer puts a newer manifest that landed in between back from it. */ readonly afterSwap?: (manifest: RecoveryManifest, displaced: string) => Promise<void> } = {}): Promise<RecoveryManifest> {
+export async function writeRecoveryManifest(source: RecoverySource, directory: string, options: { readonly now?: () => Date; /** Called with the new manifest once its files are flushed in the staging folder and before anything in `directory` is touched; throwing leaves the earlier manifest as it was. */ readonly beforeSwap?: (manifest: RecoveryManifest) => Promise<void>; /** Called once the new files are in place, before the staging folder is removed, with the folder holding the files they displaced (absent ones are not there): the fenced writer puts a newer manifest that landed in between back from it. */ readonly afterSwap?: (manifest: RecoveryManifest, displaced: string) => Promise<void>; /** Called (synchronously) when another writer put a manifest.json in the folder after this one moved the old one aside: return to replace it, throw to keep it (the aggregates and blobs files it names are put back when this writer had displaced them). Absent: kept, and the write fails. */ readonly slotTaken?: (manifest: RecoveryManifest) => void } = {}): Promise<RecoveryManifest> {
   mkdirSync(directory, { recursive: true });
-  const staging = `${resolve(directory)}.partial-${process.pid}`;
-  rmSync(staging, { recursive: true, force: true });
-  mkdirSync(staging, { recursive: true });
+  // Second review: a random part as well as the process id, so two writers in one process never share (and remove) one staging folder with the files the other displaced.
+  const staging = `${resolve(directory)}.partial-${process.pid}-${randomBytes(6).toString("hex")}`;
+  mkdirSync(staging);
   try {
     const watermark = await source.watermark();
     const lines: string[] = [];
@@ -88,11 +88,44 @@ export async function writeRecoveryManifest(source: RecoverySource, directory: s
     for (const file of [RECOVERY_MANIFEST_FILE, RECOVERY_AGGREGATES_FILE, RECOVERY_BLOBS_FILE]) {
       try { renameSync(join(directory, file), join(displaced, file)); } catch (error) { if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error; }
     }
-    for (const file of [RECOVERY_AGGREGATES_FILE, RECOVERY_BLOBS_FILE, RECOVERY_MANIFEST_FILE]) renameSync(join(staging, file), join(directory, file));
+    for (const file of [RECOVERY_AGGREGATES_FILE, RECOVERY_BLOBS_FILE]) renameSync(join(staging, file), join(directory, file));
+    // Second review: manifest.json goes in only where none is (a hard link fails when the name is taken), so a manifest another writer put in place after the move-aside is never replaced
+    // unseen. A file system without hard links falls back to the rename.
+    let taken = false;
+    try { linkSync(join(staging, RECOVERY_MANIFEST_FILE), join(directory, RECOVERY_MANIFEST_FILE)); } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "EEXIST") taken = true;
+      else renameSync(join(staging, RECOVERY_MANIFEST_FILE), join(directory, RECOVERY_MANIFEST_FILE));
+    }
+    if (taken) {
+      try {
+        if (options.slotTaken === undefined) throw new RecoveryManifestBad("another writer put a manifest.json in the folder while this one was put in place; it was left as it is");
+        options.slotTaken(manifest);
+      } catch (error) {
+        restoreDisplacedOf(directory, displaced, manifest);
+        throw error;
+      }
+      renameSync(join(staging, RECOVERY_MANIFEST_FILE), join(directory, RECOVERY_MANIFEST_FILE));
+    }
     await options.afterSwap?.(manifest, displaced);
     return manifest;
   } finally {
     rmSync(staging, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The manifest.json now in `directory` is another writer's and is kept: its aggregates and blobs files, when this writer had moved them aside, go back in place of this writer's (only when the file
+ * there is still this writer's). Anything that cannot be read is left: a mix of files never matches the checksums, so a promotion refuses it.
+ */
+function restoreDisplacedOf(directory: string, displaced: string, ours: RecoveryManifest): void {
+  let theirs: Record<string, unknown>;
+  try { theirs = JSON.parse(readFileSync(join(directory, RECOVERY_MANIFEST_FILE), "utf8")) as Record<string, unknown>; } catch { return; }
+  const shaOf = (path: string): string | undefined => { try { return sha256(readFileSync(path)); } catch { return undefined; } };
+  for (const [name, key, mine] of [[RECOVERY_AGGREGATES_FILE, "aggregates", ours.aggregates.sha256], [RECOVERY_BLOBS_FILE, "blobs", ours.blobs.sha256]] as const) {
+    const want = (theirs[key] as { sha256?: unknown } | undefined)?.sha256;
+    if (typeof want !== "string" || shaOf(join(displaced, name)) !== want) continue;
+    const now = shaOf(join(directory, name));
+    if (now === undefined || now === mine) renameSync(join(displaced, name), join(directory, name));
   }
 }
 

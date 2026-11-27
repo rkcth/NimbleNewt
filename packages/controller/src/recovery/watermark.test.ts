@@ -390,6 +390,10 @@ test("the owner's lines: schedule, the latest watermark, what it does not cover,
   assert.match(text({ everyMs: 900_000, epoch: 4, fenced: false, manifest: ok, notCovered: { auditEntries: 1, deliveries: 3, earlierEpoch: false } }), /1 more audit entry and 3 more deliveries; a promotion checked against it cannot vouch/);
   const fenced = text({ everyMs: 900_000, epoch: 4, fenced: true, manifest: ok, notCovered: { auditEntries: 5, deliveries: 0, earlierEpoch: true }, last: { at: T, outcome: "refused", refusal: "stale_epoch", reason: "another controller took the epoch", withdrawn: true } });
   assert.match(fenced, /no longer the primary, so it writes no more recovery manifests/); assert.match(fenced, /earlier epoch/); assert.match(fenced, /was refused: another controller took the epoch \(the manifest it had put in place was taken away again\)/);
+  // second review: fenced by a newer manifest in the folder, which a store restored from an older copy also meets: not said to be a takeover
+  const byNewer = text({ everyMs: 900_000, epoch: 4, fenced: true, manifest: ok, last: { at: T, outcome: "refused", refusal: "manifest_newer", reason: "the manifest in the folder was written under epoch 7" } });
+  assert.match(byNewer, /writes no more recovery manifests until it is restarted: the folder holds one newer than its store \(written by a controller that took over, or before this store was restored from an older copy\)/);
+  assert.doesNotMatch(byNewer, /found it is no longer the primary/);
   const long = text({ everyMs: 900_000, epoch: 4, fenced: false, manifest: { state: "unreadable", reason: "y".repeat(5000) }, last: { at: T, outcome: "failed", reason: "z".repeat(5000) } });
   assert.match(long, /cannot be used/); assert.match(long, /failed: z/);
   assert.ok(long.length < 1200, String(long.length));

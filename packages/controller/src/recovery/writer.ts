@@ -1,4 +1,5 @@
-import { existsSync, lstatSync, renameSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, lstatSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import type { ControllerStorage } from "../storage/index.js";
 import { RECOVERY_AGGREGATES_FILE, RECOVERY_BLOBS_FILE, RECOVERY_MANIFEST_FILE, RECOVERY_FORMAT, RecoveryManifestBad, readManifestText, writeRecoveryManifest, type RecoveryManifest } from "./manifest.js";
@@ -142,6 +143,8 @@ export async function writeFencedRecoveryManifest(options: FencedWriteOptions): 
         refuseIfAhead(existing.watermark, epoch, manifest.watermark);
         looked = existing.text;
       },
+      // Second review: a manifest.json another writer put in place after the move-aside is kept when it is ahead of this one (or unreadable); an older one is replaced.
+      slotTaken: (manifest) => { refuseIfAhead(existingManifest(directory).watermark, epoch, manifest.watermark); },
       afterSwap: async (manifest, displaced) => keepNewerDisplaced(directory, displaced, looked, epoch, manifest),
     });
   } finally { await source.close(); }
@@ -152,5 +155,16 @@ export async function writeFencedRecoveryManifest(options: FencedWriteOptions): 
     if (error instanceof RecoveryWriteRefused) throw new RecoveryWriteRefused(error.reason, `${error.message}; the manifest it had just put in place ${ours ? "was taken away again" : "had already been replaced and was left alone"}`, ours);
     throw error;
   }
+  // Second review: a manifest.json that is no longer this writer's was put there after the swap: one ahead of this one (or unreadable) is refused here as at the last look, not counted as
+  // written. Another writer's rename in the same moment can also leave this manifest.json beside its aggregates or blobs file: a promotion refuses that folder, so it is a failure, not a write.
+  if (!stillOurs(directory, written.sha256)) {
+    refuseIfAhead(existingManifest(directory).watermark, epoch, written.watermark);
+    throw new Error("another writer replaced the manifest just put in place with an older one or none; the next round writes again");
+  } else if (!filesMatch(directory, written)) throw new Error("another writer changed the manifest folder while this manifest was put in place, so its files no longer match it (a promotion refuses that folder); the next round writes again");
   return written;
+}
+
+function filesMatch(directory: string, manifest: RecoveryManifest): boolean {
+  const shaOf = (file: string): string | undefined => { try { return createHash("sha256").update(readFileSync(join(directory, file))).digest("hex"); } catch { return undefined; } };
+  return shaOf(manifest.aggregates.file) === manifest.aggregates.sha256 && shaOf(manifest.blobs.file) === manifest.blobs.sha256;
 }

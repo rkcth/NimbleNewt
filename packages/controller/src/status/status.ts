@@ -556,7 +556,10 @@ export function recoveryWatermarkLines(st: RecoveryWatermarkStatus, ref: Cite): 
   const lines: Line[] = [];
   const minutes = Math.round(st.everyMs / 60_000);
   lines.push(line(st.fenced
-    ? "This controller found it is no longer the primary, so it writes no more recovery manifests; the controller that took over writes them."
+    ? st.last?.refusal === "manifest_newer"
+      // Second review: a newer manifest in the folder also means this store was restored from an older copy, with no other controller running.
+      ? "This controller writes no more recovery manifests until it is restarted: the folder holds one newer than its store (written by a controller that took over, or before this store was restored from an older copy)."
+      : "This controller found it is no longer the primary, so it writes no more recovery manifests; the controller that took over writes them."
     : `The recovery manifest (what a promoted standby or a restored copy must hold) is written every ${minutes} minute${minutes === 1 ? "" : "s"} by this controller while it is the primary (epoch ${st.epoch}).`, ref));
   const m = st.manifest;
   if (m.state === "absent") lines.push(line("No recovery manifest has been written yet, so a standby promotion would be refused for want of one.", ref));
