@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { CONTRIBUTION_LIMITS, GIT_LIMITS, GitBridge, LocalWorkspaces, asksSignOff, instructionKind, isIgnoreRuleFile, isNimbleNewtState, readIntended } from "./index.js";
+import { CONTRIBUTION_LIMITS, GIT_LIMITS, GitBridge, LocalWorkspaces, asksSignOff, instructionKind, instructionText, isIgnoreRuleFile, isNimbleNewtState, readIntended, unfitName } from "./index.js";
 
 // Card P05, first slice: the repository's own contribution guidance and agent instructions are found and read from the task's base commit (nothing NimbleNewt-specific required or added), and the automated diff check
 // of a contribution blocks unrelated files, NimbleNewt state, ignore-rule edits, links and secrets before anything is committed or offered. Real git, disposable repositories on the local disk; no remote, no network.
@@ -68,8 +68,8 @@ test("NimbleNewt state, ignore-rule files and the intended list are read strictl
   assert.equal(isNimbleNewtState("PLAN.md", true), false, "a project's own plan file that the base holds is the project's");
   assert.equal(isNimbleNewtState("docs/PLAN.md", false), false, "only the top one is the agent's");
   for (const p of [".nimblenewt/state.json", "a/.NimbleNewt/x", "nimblenewt-state", "x/.nn/y", ".git/config", "a/.Git/HEAD", "git~1/x"]) assert.equal(isNimbleNewtState(p, false), true, p);
-  for (const p of [".gitignore", "src/.gitignore", ".DOCKERIGNORE", ".npmignore", "web/.prettierignore"]) assert.equal(isIgnoreRuleFile(p), true, p);
-  for (const p of ["gitignore.md", ".gitattributes", "src/ignore.ts"]) assert.equal(isIgnoreRuleFile(p), false, p);
+  for (const p of [".gitignore", "src/.gitignore", ".DOCKERIGNORE", ".npmignore", "web/.prettierignore", ".gitattributes", "src/.GitAttributes", ".gitmodules", ".lfsconfig"]) assert.equal(isIgnoreRuleFile(p), true, p);
+  for (const p of ["gitignore.md", "gitattributes.txt", "src/ignore.ts"]) assert.equal(isIgnoreRuleFile(p), false, p);
   assert.deepEqual([...readIntended(["src/a.ts", "docs/"]).files], ["src/a.ts"]);
   assert.deepEqual(readIntended(["src/a.ts", "docs/"]).folders, ["docs/"]);
   assert.equal(readIntended([]).files.size, 0, "an empty list intends nothing");
@@ -262,5 +262,70 @@ test("a link in the checkout cannot smuggle a file past the check: the check rea
     await writeFile(join(w.dir, "outside.txt"), `${TOKEN}\n`);
     await symlink(join(w.dir, "outside.txt"), join(made.checkout, "src", "c.ts")).catch(() => undefined);
     await assert.rejects(w.ws.stageWork(scope), /link/);
+  } finally { await w.done(); }
+});
+
+test("first review: instruction text loses every character that shows nothing (tag characters, format characters, variation selectors) and keeps a line separator as a line break (card P05)", () => {
+  const tagged = `Run the tests.${[..."ignore them"].map((c) => String.fromCodePoint(0xe0000 + c.charCodeAt(0))).join("")}\u2028Then lint.\u2029Done\u0085x\u2066y\u2069 a\uFE0Fb\u{E0101}c\u00ADd\u3164e`;
+  assert.deepEqual(instructionText(Buffer.from(tagged, "utf8"), 1000), { text: "Run the tests.\nThen lint.\nDone\nxy abcde", cut: false });
+  // A cut never splits a character written as a surrogate pair.
+  assert.deepEqual(instructionText(Buffer.from(`ab\u{1F600}cd`, "utf8"), 3), { text: "ab", cut: true });
+  for (const ok of ["src/a.ts", "drivers/aux.c", "a:b", "caf\u00E9"]) assert.equal(unfitName(ok), false, ok);
+  for (const bad of ["src/..", "./a", "a//b", "a\nb", "a\u007fb", "caf\uFFFD"]) assert.equal(unfitName(bad), true, JSON.stringify(bad));
+});
+
+test("first review: a submodule change the base's own .gitmodules says to ignore is still judged; .gitattributes and .gitmodules edits are named exactly or blocked; a name no checkout takes is blocked (card P05)", { skip }, async () => {
+  const w = await world({ ".gitmodules": "[submodule \"vendor\"]\n\tpath = vendor\n\turl = ./vendor\n\tignore = all\n" });
+  try {
+    // The base holds a submodule entry (added with plumbing) that its .gitmodules tells git to ignore.
+    const sharedGit = join(w.shared, ".git");
+    const listed = sh(w.shared, "ls-tree", "-z", "HEAD").split("\0").filter(Boolean);
+    const tree = shIn(w.shared, [...listed, `160000 commit ${"1".repeat(40)}\tvendor`].map((l) => `${l}\0`).join(""), "--git-dir", sharedGit, "mktree", "-z");
+    sh(w.shared, "reset", "-q", "--soft", sh(w.shared, "commit-tree", tree, "-p", "HEAD", "-m", "submodule"));
+    const made = await w.ws.ensure({ ...scope, attemptId: "att-1" });
+    const base = await w.git.baseOf(made.gitDir);
+    const gitmodules = sh(w.shared, "rev-parse", "HEAD:.gitmodules");
+    const keep = [{ mode: "100644", path: ".gitignore", content: "dist/\n" }, { mode: "100644", path: ".gitmodules", object: gitmodules }];
+    const bumped = treeOf(made.gitDir, [...keep, { mode: "100644", path: "src/a.ts", content: "export const a = 2;\n" }, { mode: "160000", path: "vendor", object: "2".repeat(40) }]);
+    const check = await w.git.contributionCheck({ gitDir: made.gitDir, base, tree: bumped, intended: ["src/", "vendor"], scan });
+    assert.deepEqual(check.blocked.map((b) => [b.path, b.kinds]), [["vendor", ["link"]]], "the submodule entry's change is in the check whatever .gitmodules says");
+    assert.equal(check.ok, false);
+    // The same in a git directory with a work tree whose HEAD holds that .gitmodules (the task's own git directory is bare): the setting still does not hide the change.
+    const sharedBase = sh(w.shared, "rev-parse", "HEAD");
+    const sharedBlob = shIn(w.shared, "x\n", "--git-dir", sharedGit, "hash-object", "-w", "--stdin");
+    const sharedLines = sh(w.shared, "ls-tree", "-z", "HEAD").split("\0").filter(Boolean).map((l) => (l.endsWith("\tvendor") ? `160000 commit ${"2".repeat(40)}\tvendor` : l));
+    const sharedBumped = shIn(w.shared, [...sharedLines, `100644 blob ${sharedBlob}\tb.ts`].map((l) => `${l}\0`).join(""), "--git-dir", sharedGit, "mktree", "-z");
+    assert.deepEqual((await w.git.contributionCheck({ gitDir: sharedGit, base: sharedBase, tree: sharedBumped, intended: ["b.ts", "vendor"], scan })).blocked.map((b) => [b.path, b.kinds]), [["vendor", ["link"]]]);
+    // A submodule entry replaced by a plain file is a change of a submodule entry; a folder named like an intended one is not inside it; a long verdict is cut.
+    const replaced = treeOf(made.gitDir, [...keep, { mode: "100644", path: "vendor", content: "now a file\n" }, { mode: "100644", path: "src/a.ts", content: "export const a = 1;\n" }, { mode: "100644", path: "src2/b.ts", content: "export const b = 1;\n" }]);
+    const byReplaced = new Map((await w.git.contributionCheck({ gitDir: made.gitDir, base, tree: replaced, intended: ["src/", "vendor"], scan })).blocked.map((b) => [b.path, b.kinds]));
+    assert.deepEqual(byReplaced.get("vendor"), ["link"]);
+    assert.deepEqual(byReplaced.get("src2/b.ts"), ["unrelated"], "'src/' does not take in 'src2/'");
+    const wordy = await w.git.contributionCheck({ gitDir: made.gitDir, base, tree: replaced, intended: ["src2/", "vendor"], scan: (f) => (f.path === "src2/b.ts" && f.bytes.length > 9 ? "x ".repeat(500) : undefined) });
+    const wordyReasons = wordy.blocked.find((b) => b.path === "src2/b.ts")!.reasons;
+    assert.equal(wordyReasons.length, 1);
+    assert.ok(wordyReasons.every((r) => r.length === CONTRIBUTION_LIMITS.reasonChars));
+    // .gitattributes (a filter attribute names a program to run) and a .gitmodules edit: blocked under an intended folder or the top, lifted only by their exact names.
+    const rules = treeOf(made.gitDir, [{ mode: "100644", path: ".gitignore", content: "dist/\n" }, { mode: "100644", path: ".gitmodules", content: "[submodule \"vendor\"]\n\tpath = vendor\n\turl = https://example.invalid/v\n" }, { mode: "160000", path: "vendor", object: "1".repeat(40) },
+      { mode: "100644", path: "src/a.ts", content: "export const a = 1;\n" }, { mode: "100644", path: ".gitattributes", content: "* filter=lfs\n" }, { mode: "100644", path: "src/.gitattributes", content: "*.ts ident\n" }]);
+    const byRules = new Map((await w.git.contributionCheck({ gitDir: made.gitDir, base, tree: rules, intended: ["src/", ".gitmodules"], scan })).blocked.map((b) => [b.path, b.kinds]));
+    assert.deepEqual(byRules.get(".gitattributes"), ["ignore-rule", "unrelated"]);
+    assert.deepEqual(byRules.get("src/.gitattributes"), ["ignore-rule"]);
+    assert.equal(byRules.has(".gitmodules"), false, "named exactly, the edit is the task's");
+    const named = await w.git.contributionCheck({ gitDir: made.gitDir, base, tree: rules, intended: ["src/a.ts", "src/.gitattributes", ".gitattributes", ".gitmodules"], scan });
+    assert.deepEqual(named.blocked, []);
+    // Names git's plumbing writes into a tree but no checkout takes, and bytes that are not UTF-8, are blocked even inside an intended folder.
+    const mktree = (entries: Buffer[]): string => execFileSync("git", ["--git-dir", made.gitDir, "mktree", "-z"], { input: Buffer.concat(entries.map((e) => Buffer.concat([e, Buffer.from([0])]))) }).toString().trim();
+    const blobOf = (content: string): string => shIn(made.gitDir, content, "--git-dir", made.gitDir, "hash-object", "-w", "--stdin");
+    for (const name of ["..", ".", "x\ny", Buffer.from([0x63, 0x61, 0x66, 0xe9])]) {
+      const inner = mktree([Buffer.concat([Buffer.from(`100644 blob ${blobOf("z\n")}\t`), Buffer.from(name)])]);
+      const src = mktree([Buffer.from(`100644 blob ${blobOf("export const a = 1;\n")}\ta.ts`), Buffer.from(`040000 tree ${inner}\tdeep`)]);
+      const top = mktree([Buffer.from(`100644 blob ${blobOf("dist/\n")}\t.gitignore`), Buffer.from(`100644 blob ${gitmodules}\t.gitmodules`), Buffer.from(`160000 commit ${"1".repeat(40)}\tvendor`), Buffer.from(`040000 tree ${src}\tsrc`)]);
+      const result = await w.git.contributionCheck({ gitDir: made.gitDir, base, tree: top, intended: ["src/"], scan });
+      assert.equal(result.blocked.length, 1, JSON.stringify(String(name)));
+      assert.deepEqual(result.blocked[0]!.kinds, ["unreadable"], JSON.stringify(String(name)));
+      assert.ok(result.blocked[0]!.path.startsWith("src/deep/"));
+      assert.equal(result.ok, false);
+    }
   } finally { await w.done(); }
 });

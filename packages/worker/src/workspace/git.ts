@@ -9,7 +9,7 @@ import { PLAN_FILE } from "@nimblenewt/contracts";
 import { WorkspaceBridge, ABSENT, versionOf, type WriteResult } from "./bridge.js";
 import { WorkspaceError } from "./errors.js";
 import { collisionKey, fold, splitRelative, touchesGit } from "./names.js";
-import { BLOCK_REASON, CONTRIBUTION_LIMITS, asksSignOff, instructionKind, instructionOrder, instructionText, isIgnoreRuleFile, isIntended, isNimbleNewtState, readIntended, shortReason, type ContributionBlock, type InstructionKind } from "./contribution.js";
+import { BLOCK_REASON, CONTRIBUTION_LIMITS, asksSignOff, instructionKind, instructionOrder, instructionText, isIgnoreRuleFile, isIntended, isNimbleNewtState, readIntended, shortReason, unfitName, type ContributionBlock, type InstructionKind } from "./contribution.js";
 import { NOFOLLOW, openedAt, resolveSafe, sameFile } from "./paths.js";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
@@ -1282,7 +1282,8 @@ export class GitBridge {
     const base = (await this.#run(["rev-parse", "--verify", `${options.base}^{commit}`], { gitDir: options.gitDir })).stdout.trim();
     const kind = (await this.#run(["cat-file", "-t", options.tree], { gitDir: options.gitDir })).stdout.trim();
     if (kind !== "tree") throw new WorkspaceError("invalid_path", "the contribution's tree is not a tree");
-    const raw = (await this.#run(["diff-tree", "-r", "-z", "--no-renames", "--raw", "--no-commit-id", base, options.tree], { gitDir: options.gitDir })).stdout.split("\0");
+    // `--ignore-submodules=none` (first review): an `ignore = all` the base's own `.gitmodules` sets (or a setting of the git directory) would otherwise leave a submodule entry's change out of the list, and so out of the check.
+    const raw = (await this.#run(["diff-tree", "-r", "-z", "--no-renames", "--ignore-submodules=none", "--raw", "--no-commit-id", base, options.tree], { gitDir: options.gitDir })).stdout.split("\0");
     const changes: { path: string; op: "write" | "delete"; mode: string; oldMode: string; blob: string }[] = [];
     for (let i = 0; i + 1 < raw.length; i += 2) {
       const meta = raw[i]!; const path = raw[i + 1]!;
@@ -1301,6 +1302,7 @@ export class GitBridge {
       if (isIgnoreRuleFile(change.path) && !intended.files.has(change.path)) add("ignore-rule", BLOCK_REASON["ignore-rule"]);
       if (!isIntended(change.path, intended)) add("unrelated", BLOCK_REASON.unrelated);
       if (special(change.mode) || special(change.oldMode)) add("link", BLOCK_REASON.link);
+      if (unfitName(change.path)) add("unreadable", "a name no checkout takes or that is not UTF-8 text (an empty, '.' or '..' part, or a control character)");
       const scanOne = async (file: { path: string; bytes: Buffer }, label: string): Promise<void> => {
         let verdict: string | undefined;
         try { verdict = await options.scan(file); } catch { verdict = "the scan of the file failed"; }
