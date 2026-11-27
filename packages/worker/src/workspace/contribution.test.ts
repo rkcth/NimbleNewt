@@ -329,3 +329,59 @@ test("first review: a submodule change the base's own .gitmodules says to ignore
     }
   } finally { await w.done(); }
 });
+
+test("a sign-off is asked only by a sentence that names one and does not say it is unneeded; a bare DCO, git's -S and 'signal' are not one (card P05, second review)", () => {
+  for (const yes of ["All commits must include a Signed-off-by line", "We follow the Developer Certificate of Origin.", "use git commit -s", "Commit with `git commit -s -m \"msg\"`.", "Sign off your commits (DCO).", "The DCO check needs a sign-off on every commit.",
+    "Commits without a Signed-off-by line are not accepted.", "Run npm test. Tests are optional for docs.\nSigned-off-by is required.", "See https://developercertificate.org for details.", "Use --signoff when you commit.", "Signed-off-by is required. Tests are optional."]) assert.equal(asksSignOff(yes), true, yes);
+  for (const no of ["Please sign the CLA online.", "The DCO output drifts with temperature.", "Tune the DCO signal before a release.", "Sign your commits with git commit -S.", "A Signed-off-by line is not required.", "Signed-off-by lines are optional.",
+    "Do not add a Signed-off-by line.", "Don’t add Signed-off-by trailers.", "We have no DCO.", "There is no need to sign off (no DCO).", "You need not sign off: the Developer Certificate of Origin is not required here.", ""]) assert.equal(asksSignOff(no), false, no);
+});
+
+test("the project-wide guidance comes before folder-level agent files, so the file bound never pushes out the contribution guide or a template; template folders at the top and in docs/ are templates (card P05, second review)", { skip }, async () => {
+  assert.equal(instructionKind("PULL_REQUEST_TEMPLATE/bug.md"), "pull-request-template");
+  assert.equal(instructionKind("docs/pull_request_template/feature.md"), "pull-request-template");
+  assert.equal(instructionKind("src/PULL_REQUEST_TEMPLATE/x.md"), undefined);
+  assert.equal(instructionKind("docs/PULL_REQUEST_TEMPLATE/x.txt"), undefined);
+  const many: Record<string, string> = { ".github/CONTRIBUTING.md": "Run the tests.\n", ".github/pull_request_template.md": "## What\n", "docs/PULL_REQUEST_TEMPLATE/z.md": "## Z\n", "AGENTS.md": "top\n", ".github/copilot-instructions.md": "c\n" };
+  for (let i = 0; i < CONTRIBUTION_LIMITS.instructionFiles + 3; i += 1) many[`a${String(i).padStart(2, "0")}/AGENTS.md`] = "folder\n";
+  const w = await world(many);
+  try {
+    await w.ws.ensure({ ...scope, attemptId: "att-1" });
+    const found = (await w.ws.instructions(scope))!;
+    assert.deepEqual(found.files.slice(0, 5).map((f) => f.path), ["AGENTS.md", ".github/CONTRIBUTING.md", ".github/copilot-instructions.md", ".github/pull_request_template.md", "docs/PULL_REQUEST_TEMPLATE/z.md"]);
+    assert.equal(found.files.length, CONTRIBUTION_LIMITS.instructionFiles);
+    assert.equal(found.files[5]!.path, "a00/AGENTS.md");
+    assert.equal(found.more, 8);
+    assert.equal(found.pullRequestTemplate, ".github/pull_request_template.md");
+    assert.equal(found.signOff, false);
+  } finally { await w.done(); }
+  // A template's checklist naming a sign-off is not the project asking for one (only the guidance and agent files are read for that); a submodule entry named like guidance is listed as such, not read.
+  const t = await world({ ".github/pull_request_template.md": "- [ ] Signed-off-by on every commit\n" });
+  try {
+    const sharedGit = join(t.shared, ".git");
+    const listed = sh(t.shared, "ls-tree", "-z", "HEAD").split("\0").filter(Boolean);
+    const tree = shIn(t.shared, [...listed, `160000 commit ${"3".repeat(40)}\tCLAUDE.md`].map((l) => `${l}\0`).join(""), "--git-dir", sharedGit, "mktree", "-z");
+    sh(t.shared, "reset", "-q", "--soft", sh(t.shared, "commit-tree", tree, "-p", "HEAD", "-m", "gitlink"));
+    await t.ws.ensure({ ...scope, attemptId: "att-1" });
+    const found = (await t.ws.instructions(scope))!;
+    assert.equal(found.signOff, false);
+    assert.deepEqual(found.skipped, [{ path: "CLAUDE.md", kind: "agent-instructions", reason: "a link or a submodule entry, not read" }]);
+  } finally { await t.done(); }
+});
+
+test("a scan's verdict that quotes a credential is redacted before it is cut, in the check and in the guidance read (card P05, second review)", { skip }, async () => {
+  const w = await world({ "CONTRIBUTING.md": "Run the tests.\n" });
+  try {
+    const made = await w.ws.ensure({ ...scope, attemptId: "att-1" });
+    const base = await w.git.baseOf(made.gitDir);
+    const tree = treeOf(made.gitDir, [{ mode: "100644", path: ".gitignore", content: "dist/\n" }, { mode: "100644", path: "CONTRIBUTING.md", content: "Run the tests.\n" }, { mode: "100644", path: "src/a.ts", content: `const t = "${TOKEN}";\n` }]);
+    const quoting = (f: { path: string; bytes: Buffer }): string | undefined => { const m = /ghp_[A-Za-z0-9]{36}/.exec(f.bytes.toString("latin1")); return m === null ? (f.path === "CONTRIBUTING.md" && f.bytes.length > 0 ? `found ${"y ".repeat(90)}${TOKEN}` : undefined) : `found ${m[0]}`; };
+    const check = await w.git.contributionCheck({ gitDir: made.gitDir, base, tree, intended: ["src/"], scan: quoting });
+    assert.deepEqual(check.blocked.map((b) => [b.path, b.kinds]), [["src/a.ts", ["secret"]]]);
+    assert.ok(!JSON.stringify(check).includes(TOKEN) && !JSON.stringify(check).includes(TOKEN.slice(0, 12)), "no part of the value in the answer");
+    assert.match(check.blocked[0]!.reasons[0]!, /\[redacted\]/);
+    const found = (await w.ws.instructions(scope, quoting))!;
+    assert.equal(found.skipped.length, 1);
+    assert.ok(!JSON.stringify(found).includes(TOKEN.slice(0, 12)), "a verdict whose value would straddle the cut leaves no part of it");
+  } finally { await w.done(); }
+});

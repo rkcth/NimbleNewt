@@ -1215,7 +1215,7 @@ export class GitBridge {
   /** A blob's bytes (never more than the file limit: a larger one is an error). */
   async #blobBuffer(gitDir: string, sha: string): Promise<Buffer> {
     return new Promise((resolveBlob, reject) => {
-      execFile(this.#git, [...this.#flags(), "--git-dir", gitDir, "cat-file", "blob", sha], { env: this.#env(), encoding: "buffer", maxBuffer: GIT_LIMITS.fileBytes + 1, windowsHide: true, cwd: this.#empty }, (error, stdout) => (error === null ? resolveBlob(stdout as unknown as Buffer) : reject(new WorkspaceError("invalid_path", "a file could not be read within the size limit"))));
+      execFile(this.#git, [...this.#flags(), "--git-dir", gitDir, "cat-file", "blob", sha], { env: this.#env(), encoding: "buffer", maxBuffer: GIT_LIMITS.fileBytes + 1, windowsHide: true, cwd: this.#empty, timeout: GIT_LIMITS.timeoutMs }, (error, stdout) => (error === null ? resolveBlob(stdout as unknown as Buffer) : reject(new WorkspaceError("invalid_path", "a file could not be read within the size limit"))));
     });
   }
 
@@ -1329,7 +1329,9 @@ export class GitBridge {
     return new Promise((resolveBlob, reject) => {
       const child = spawn(this.#git, [...this.#flags(), "--git-dir", gitDir, "cat-file", "blob", sha], { env: this.#env(), windowsHide: true, cwd: this.#empty, stdio: ["ignore", "pipe", "ignore"] });
       const chunks: Buffer[] = []; let size = 0; let done = false;
-      const finish = (error?: Error): void => { if (done) return; done = true; if (error !== undefined) reject(error); else resolveBlob(Buffer.concat(chunks).subarray(0, max)); };
+      // Second review: bounded in time like every other git command here (a git that stops answering is killed and the read refused).
+      const timer = setTimeout(() => { child.kill("SIGKILL"); finish(new WorkspaceError("unavailable", "git did not answer in time; a file could not be read")); }, GIT_LIMITS.timeoutMs);
+      const finish = (error?: Error): void => { if (done) return; done = true; clearTimeout(timer); if (error !== undefined) reject(error); else resolveBlob(Buffer.concat(chunks).subarray(0, max)); };
       child.stdout.on("data", (chunk: Buffer) => { if (size >= max) return; chunks.push(chunk); size += chunk.length; if (size >= max) { child.kill(); finish(); } });
       child.on("error", (error) => finish(new WorkspaceError("unavailable", "git could not be run", { cause: error })));
       child.on("close", (code) => (code === 0 || size >= max ? finish() : finish(new WorkspaceError("invalid_path", "a file could not be read"))));

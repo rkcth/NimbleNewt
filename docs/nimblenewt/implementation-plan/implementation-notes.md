@@ -20929,3 +20929,31 @@ Base for the merge: origin/main 17dd4c6b (notes: both sides kept).
 - Through `/tmp/nn-slot.sh` with `NIMBLENEWT_REQUIRE_SANDBOX=1` and the offline guard: the worker workspace suite, `integration/p05-contribution-check`, `integration/p02b-wip-backup` and `controller/chat/prompt-room`.
   - Node 22.23.0: 243 tests, 241 passing, 0 failing, 2 Windows-only skips.
   - Node 24.21.0: 243 tests, 241 passing, 0 failing, 2 Windows-only skips.
+
+### P05 first slice, second review (Claude agent, Opus 5.5, 2026-11-27; branch `card-p05`; clean context; card NOT flipped; task-plan files unchanged; not pushed; no workflow)
+Merged origin/main e9a76804 first (clean, no conflicts).
+**Problems found and fixed:**
+- Medium: `asksSignOff` was loose. A later slice adds `Signed-off-by` for the human author when it answers yes, so a wrong yes puts an attestation in that person's name. It said yes to any bare `DCO` (also an oscillator), to `git commit -S` (signing with a key; the `/i` flag), and to text saying no sign-off is wanted ("not required", "optional", "do not add").
+  - Now it reads sentence by sentence. A sentence counts when it names the trailer, the certificate, `--signoff`, developercertificate.org, git's `-s` (case kept), or `DCO` beside a signing or certificate word, and does not say the sign-off is unneeded.
+  - A requirement worded only as a negation can be missed. A missed one shows as the project's own check failing, which is the safer mistake.
+- Low: a scan's verdict was the caller's own text, kept as given (only cut). `shortReason` now runs it through the contracts' `redactText`, and redacts before cutting, so no part of a value it would catch survives a cut.
+- Low: the order of instruction files was by depth alone. In a repository with 19 or more folder-level agent files, `.github/`'s template (and agent file) fell past the 20-file bound. Project-wide files now come first: the contribution guidance, the templates, the agent files at the top and in `.github/`. Folder-level agent files follow. The order is otherwise unchanged.
+- Low: template folders `PULL_REQUEST_TEMPLATE/*.md` at the top and in `docs/` were not found (GitHub reads both, as well as `.github/`).
+- Low: the instruction blob reader (`#blobPrefix`) and `#blobBuffer` had no time bound. Both now use `GIT_LIMITS.timeoutMs`.
+**Checked unchanged:**
+- Every git call here goes through the bridge's environment: system and global config off, HOME and XDG in the scratch folder, `GIT_OPTIONAL_LOCKS=0`, hooks to an empty folder, `protocol.allow=never`, `diff.external` empty, `safe.directory=*`.
+- Only full hex object IDs are passed as arguments, each checked first. Paths are never arguments. Raw `diff-tree` and `ls-tree` run no textconv or filter. `cat-file blob` applies no filter.
+- `diff-tree` gives only A/M/D/T with `--no-renames` between two trees, so there is no parent choice for a merge. An unborn or non-commit base, or a missing object, is refused, or marked unreadable.
+- More than 10,000 changes is refused (fail closed). The 500 and 100 caps cut only the lists. `ok` comes from all changes.
+- PLAN.md at the top is the only NimbleNewt file the product writes into a checkout: handover.json sits beside it, and indexes are in the git directory.
+**Tests added:** sign-off yes/no sentences; the order under the file bound; root and `docs/` template folders; a template's sign-off checklist not counted; a submodule entry named like guidance listed, not read; a quoting verdict redacted in the check and in the guidance read (including a value straddling the cut).
+**Deliberate breakages:** 21, each restored by sha256, all caught (3 after the tests above were added).
+**Runs** (merged tree):
+- `npm ci --ignore-scripts`; `tsc --build --force`; `api:docs:write` (no change); `check:deps` ok; `licenses:check`; `roadmap:check`; `plan.test.mjs` 6 of 6.
+- Worker workspace suite, `p05-contribution-check`, `p02b-wip-backup` and `prompt-room`, through the slot script with the sandbox required and the offline guard:
+  - Node 22.23.0: 246 tests, 244 passing, 0 failing, 2 Windows-only skips.
+  - Node 24.21.0: the same counts.
+**Residual risks:**
+- A path whose name holds a credential is returned as written in `files` and `blocked` (only verdicts are redacted). It needs the controller boundary's scrubber when wired.
+- Case-fold duplicates inside a contribution are judged one by one, not refused.
+- The intended list matches exact spellings (Unicode form differences fail closed).

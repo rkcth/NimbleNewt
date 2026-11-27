@@ -1,4 +1,4 @@
-import { PLAN_FILE } from "@nimblenewt/contracts";
+import { PLAN_FILE, redactText } from "@nimblenewt/contracts";
 import { WorkspaceError } from "./errors.js";
 import { fold, splitRelative, touchesGit } from "./names.js";
 
@@ -48,16 +48,21 @@ export function instructionKind(path: string): InstructionKind | undefined {
   if (AGENT_TOP.has(name) && dirs.length === 0) return "agent-instructions";
   if (name === "copilot-instructions.md" && dirs.length === 1 && dirs[0] === ".github") return "agent-instructions";
   if (PR_TEMPLATE.has(name) && atTopOrGuidance) return "pull-request-template";
-  // A folder of templates: `.github/PULL_REQUEST_TEMPLATE/*.md`, `.gitlab/merge_request_templates/*.md`.
-  if (dirs.length === 2 && ((dirs[0] === ".github" && dirs[1] === "pull_request_template") || (dirs[0] === ".gitlab" && dirs[1] === "merge_request_templates")) && name.endsWith(".md")) return "pull-request-template";
+  // A folder of templates: `PULL_REQUEST_TEMPLATE/*.md` at the top, in `.github/` or in `docs/` (second review: GitHub reads all three), and `.gitlab/merge_request_templates/*.md`.
+  const templateFolder = (dirs.length === 1 && dirs[0] === "pull_request_template") || (dirs.length === 2 && ((dirs[1] === "pull_request_template" && (dirs[0] === ".github" || dirs[0] === "docs")) || (dirs[0] === ".gitlab" && dirs[1] === "merge_request_templates")));
+  if (templateFolder && name.endsWith(".md")) return "pull-request-template";
   return undefined;
 }
 
-/** The order instruction files are given in: the top first, then shallower paths, then by kind and path, so the same tree always gives the same list. */
+/**
+ * The order instruction files are given in: the project-wide ones first (the contribution guidance, the pull-request templates and the agent files at the top), then the agent files of folders below; within each, shallower
+ * paths, then by kind and path, so the same tree always gives the same list. Second review: by depth alone, a repository with many folder-level agent files pushed `.github/`'s guidance and template past the file bound.
+ */
 export function instructionOrder(a: { path: string; kind: InstructionKind }, b: { path: string; kind: InstructionKind }): number {
   const depth = (p: string): number => p.split("/").length;
+  const group = (f: { path: string; kind: InstructionKind }): number => (f.kind === "agent-instructions" && depth(f.path) > 1 && !/^\.github\//i.test(f.path) ? 1 : 0);
   const rank: Record<InstructionKind, number> = { contributing: 0, "agent-instructions": 1, "pull-request-template": 2 };
-  return depth(a.path) - depth(b.path) || rank[a.kind] - rank[b.kind] || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  return group(a) - group(b) || depth(a.path) - depth(b.path) || rank[a.kind] - rank[b.kind] || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
 }
 
 /**
@@ -80,8 +85,22 @@ export function instructionText(bytes: Buffer, max: number): { text: string; cut
   return { text: text.slice(0, end), cut: true };
 }
 
-/** Whether a repository's guidance asks for a sign-off on each commit (a Developer Certificate of Origin): a later contribution commit then carries `Signed-off-by` for its human author. */
-export const asksSignOff = (text: string): boolean => /\bsigned-off-by\b|\bDeveloper Certificate of Origin\b|\bDCO\b|\bgit commit -s\b|--signoff\b/i.test(text);
+/**
+ * A sentence that names a sign-off: the trailer, the certificate, git's flag (`-s`, matched in its own case: `-S` signs with a key, a different thing), or `DCO` beside a word about signing or the certificate (a bare `DCO`
+ * is also, for one, an oscillator).
+ */
+const SIGN_WORD = String.raw`\b(?:sign(?:[- ]?offs?|ed|s|ing)?\b|certificate)`;
+const SIGN_OFF_MARK = new RegExp(String.raw`\bsigned-off-by\b|\bdeveloper certificate of origin\b|--signoff\b|\bdevelopercertificate\.org\b|\bDCO\b(?=.*${SIGN_WORD})|${SIGN_WORD}.*\bDCO\b`, "i");
+const GIT_SIGN_OFF_FLAG = /\bgit\s+commit\b[^\n]*?\s-s(?![\w-])/;
+/** Words that make such a sentence say no sign-off is wanted ("not required", "optional", "do not add a Signed-off-by"). */
+const SIGN_OFF_NOT = /\b(?:not|never|no longer)\s+(?:be\s+)?(?:required|needed|necessary|mandatory|used|wanted|asked)\b|\boptional\b|\bno need\b|\bunnecessary\b|\b(?:do|does|did|need)\s+not\s+(?:need|require|use|add|sign|ask|want)\b|\b(?:don't|doesn't|didn't|dont|doesnt|needn't)\s+(?:need|require|use|add|sign|ask|want)\b|\bno\s+(?:sign[- ]?offs?|signed-off-by|dco)\b/i;
+
+/**
+ * Whether a repository's guidance asks for a sign-off on each commit (a Developer Certificate of Origin): a later contribution commit then carries `Signed-off-by` for its human author, so a wrong yes would put an attestation in
+ * that person's name (second review). Read sentence by sentence: a sentence counts when it names a sign-off and does not say it is unneeded. A requirement worded only as a negation may be missed; a missed one shows as the
+ * project's own check failing, which is the safer of the two mistakes.
+ */
+export const asksSignOff = (text: string): boolean => text.replace(/[\u2018\u2019]/g, "'").split(/\n|(?<=[.!?;])\s+/).some((s) => (SIGN_OFF_MARK.test(s) || GIT_SIGN_OFF_FLAG.test(s)) && !SIGN_OFF_NOT.test(s));
 
 /** Names of NimbleNewt's own state, in any folder (compared folded). A contribution never carries a file under one of them. */
 const STATE_DIRS = new Set([".nimblenewt", "nimblenewt-state", ".nn"]);
@@ -146,5 +165,5 @@ export const BLOCK_REASON: Record<Exclude<ContributionBlock, "secret" | "unreada
  */
 export const unfitName = (path: string): boolean => path.split("/").some((p) => p === "" || p === "." || p === ".." || /[\u0000-\u001F\u007F\uFFFD]/u.test(p));
 
-/** A reason as it is kept: one line, cut. */
-export const shortReason = (text: string): string => text.replace(/\s+/g, " ").trim().slice(0, CONTRIBUTION_LIMITS.reasonChars);
+/** A reason as it is kept: credential shapes replaced (second review: a scan's verdict is the caller's text and could quote what it found), one line, cut (after the redaction, so a cut never leaves part of a value it would have caught). */
+export const shortReason = (text: string): string => redactText(String(text)).replace(/\s+/g, " ").trim().slice(0, CONTRIBUTION_LIMITS.reasonChars);
