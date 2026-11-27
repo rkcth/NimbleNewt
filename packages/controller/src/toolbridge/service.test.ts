@@ -11,7 +11,8 @@ import { DomainError } from "../domain/errors.js";
 import type { JsonObject } from "../storage/types.js";
 import { JobService } from "../jobs/index.js";
 import { RecallService } from "../context/recall-service.js";
-import { bridgeCommandId, launchOf, ToolExecutionService, type BoundGateway, type BuiltinTool, type BridgeResponse, type ScriptLaunch, type ScriptRunner } from "./service.js";
+import { SubmissionService } from "../submissions/index.js";
+import { bridgeCommandId, launchOf, SUBMISSION_LIST_LIMITS, ToolExecutionService, type BoundGateway, type BuiltinTool, type BridgeResponse, type ScriptLaunch, type ScriptRunner } from "./service.js";
 import { checkValue, schemaProblems } from "./schema.js";
 import { RUNNING_CALL_KIND, RunningCallStore } from "./running-store.js";
 
@@ -32,6 +33,7 @@ const opOf = <T extends { readonly callId: string }>(ops: readonly T[], callId: 
   assert.ok(found !== undefined, `call ${callId} has no operation record (calls with one: ${JSON.stringify(ops.map((o) => o.callId))}; it answered ${JSON.stringify(answered)})`);
   return found;
 };
+const canonicalJsonLength = (v: unknown): number => JSON.stringify(v).length;
 const deferred = <T = void>() => { let resolve!: (v: T) => void; const promise = new Promise<T>((r) => { resolve = r; }); return { promise, resolve }; };
 
 for (const backend of backends) {
@@ -1789,6 +1791,111 @@ for (const backend of backends) {
     assert.notEqual(seen[0]!.raw.commandId, seen[1]!.raw.commandId);
     assert.deepEqual(asked, ["art-mine", "art-other", "art-loose", "art-none", "art-damaged", "bad id", "art-unreadable"], "the artifact is looked up only for a document change that names one and passes the field check");
     assert.deepEqual(read, ["art-mine", "art-damaged", "art-unreadable"], "the files of an artifact of another task (or of none) are never read for the agent");
+  });
+
+  suite("submission.list (card bridge-submissions): the agent lists the code submissions of its own task it may see, newest first, bounded, with where review stands; another agent's, another task's, another project's and document submissions are absent; only the deliverable writers' roles may list; an ended attempt's credential is refused", async (c) => {
+    // A second project, where Ann may read tasks too: her code there must never show up under this task.
+    const p2 = (await c.projects.createProject({ commandId: uid("p"), actor: c.owner.id, name: "Q" })).id;
+    const ann = await c.agentFor("ann", [{ action: "task.read", project: p2 }]);
+    const ben = await c.agentFor("ben");
+    const cara = await c.agentFor("cara");
+    const dave = await c.agentFor("dave");
+    const { taskId } = await c.task("t", ann);
+    const { taskId: otherTask } = await c.task("other", ann, { admit: false });
+    const { taskId: farTask } = await c.task("far", ann, { admit: false, project: p2 });
+    const roles = new Map<string, string[]>([[ann.id, ["author", "docs"]], [ben.id, ["author"]], [cara.id, ["reviewer"]], [dave.id, ["director"]]]);
+    const subs = SubmissionService.withEpoch(c.storage, c.epoch, async (id) => roles.get(id) ?? [], c.options);
+    const whole = async (id: string) => c.principals.authenticate((await c.principals.issueCredential(c.owner, id)).token);
+    const annP = await whole(ann.id), benP = await whole(ben.id), caraP = await whole(cara.id), daveP = await whole(dave.id);
+    const tree = (i: number): string => i.toString(16).padStart(40, "0");
+    const code = async (by: typeof annP, task: string, i: number): Promise<string> => { c.clock.advance(1000); return (await subs.record(by, { commandId: uid("s"), taskId: task, kind: "code", role: "author", base: "c".repeat(40), tree: tree(i), patchId: tree(1000 + i) })).id; };
+    const mine: string[] = [];
+    for (let i = 1; i <= 23; i++) mine.push(await code(annP, taskId, i));
+    const bens = await code(benP, taskId, 900);
+    const elsewhere = [await code(annP, otherTask, 901), await code(annP, farTask, 902)];
+    const doc = (await subs.record(annP, { commandId: uid("s"), taskId, kind: "document", role: "docs", artifactDigest: `sha256:${"e".repeat(64)}` })).id;
+    // Where review stands: Cara (a reviewer who wrote none of it) asks for changes on the newest and approves the one before it.
+    await subs.record(caraP, { commandId: uid("s"), taskId, kind: "review", role: "reviewer", subject: mine[22]!, verdict: "changes" });
+    await subs.record(caraP, { commandId: uid("s"), taskId, kind: "review", role: "reviewer", subject: mine[21]!, verdict: "approve" });
+    await subs.record(caraP, { commandId: uid("s"), taskId, kind: "review", role: "reviewer", subject: mine[20]!, verdict: "approve" });
+    await subs.record(daveP, { commandId: uid("s"), taskId, kind: "signoff", role: "director", subject: mine[20]!, decision: "approve" });
+    // Card bridge-submissions: the attempt's first call names Ann's newest code submission of the task (read from the project's code index by the real service), and the listing tool.
+    c.dispatcher = c.restart({ replaySafe: c.svc.replaySafe, newestCodeOf: (projectId, task, agentId) => subs.newestCodeOf(projectId, task, agentId) });
+    assert.deepEqual([await subs.newestCodeOf(c.project, taskId, ann.id), await subs.newestCodeOf(c.project, taskId, ben.id), await subs.newestCodeOf(c.project, taskId, cara.id), await subs.newestCodeOf(p2, farTask, ann.id), await subs.newestCodeOf(c.project, farTask, ann.id)], [mine[22], bens, undefined, elsewhere[1], undefined], "the newest of each agent, per task and project; none for a pair with no code");
+    // The real listing behind the state API's door: the credential is authenticated and `SubmissionService.list` applies its own visibility rule.
+    const seen: { token: unknown; op: string; args: Record<string, unknown> }[] = [];
+    const state = { handle: async (token: unknown, raw: unknown) => {
+      const r = raw as { op: string; args: Record<string, unknown> };
+      seen.push({ token, op: r.op, args: r.args });
+      try {
+        const by = await c.credentials.authenticate(token);
+        const a = r.args as { taskId: string; kind?: string; limit?: number; after?: string };
+        return { v: 1, op: r.op, ok: true, result: await subs.list(by, a.taskId, { ...(a.kind === undefined ? {} : { kind: a.kind }), limit: a.limit ?? 50, ...(a.after === undefined ? {} : { afterId: a.after }) }) } as never;
+      } catch (error) { const e = error as DomainError; return { v: 1, op: r.op, ok: false, error: { code: e.code, message: e.message } } as never; }
+    } };
+    let broken = false;
+    const views = { rolesOf: async (by: { id: string }) => roles.get(by.id) ?? [], approvalOf: async (id: string) => { if (broken) throw new Error("unreadable"); return subs.approvalOf(id); } };
+    const base = { principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks, isLocalHost: () => true };
+    const svc = new ToolExecutionService({ ...base, state, submissionViews: views });
+    const bare = new ToolExecutionService({ ...base, state });
+    // A listing that never ends and answers rows that are not this task's code: the bridge reads a bounded number of pages and keeps only this task's code.
+    let pages = 0;
+    const endless = new ToolExecutionService({ ...base, submissionViews: views, state: { handle: async () => { pages++; return { v: 1, op: "submission.list", ok: true, result: { items: [
+      { id: `sbm-${"a".repeat(19)}${"abcdefghijklmnopqrstuvwxyz234567"[pages % 32]}`, kind: "code", taskId, submittedAt: "2026-10-23T09:00:00.000Z", tree: "a".repeat(40), submittedBy: ann.id },
+      { id: `sbm-${"b".repeat(20)}`, kind: "code", taskId: otherTask, submittedAt: "2026-10-23T09:00:00.000Z", tree: "a".repeat(40), submittedBy: ann.id },
+      { id: `sbm-${"c".repeat(20)}`, kind: "document", taskId, submittedAt: "2026-10-23T09:00:00.000Z", submittedBy: ann.id },
+      { id: "sbm-not an id", kind: "code", taskId, submittedAt: "2026-10-23T09:00:00.000Z", tree: "a".repeat(40), submittedBy: ann.id },
+      { id: `sbm-${"d".repeat(20)}`, kind: "code", taskId, submittedAt: "2026-10-23T09:00:00.000Z", tree: "not a tree", submittedBy: ann.id },
+    ], next: `cursor-${pages}` } } as never; } } });
+    const out: Record<string, BridgeResponse> = {};
+    let kept: { token: string; gateway: BoundGateway } | undefined;
+    let content = "";
+    const session = c.session(async (s) => {
+      kept = { token: s.token, gateway: s.gateway };
+      const send = (args: JsonObject, callId: string, over = svc) => over.handle(s.token, s.gateway, { op: "submission.list", callId, args });
+      out["list"] = await send({}, "l1");
+      out["named-task"] = await send({ taskId: otherTask }, "l2");
+      out["limit"] = await send({ limit: 50 }, "l3");
+      out["bare"] = await send({}, "l4", bare);
+      out["endless"] = await send({}, "l5", endless);
+      broken = true;
+      out["unreadable-review"] = await send({}, "l6");
+      broken = false;
+      roles.set(ann.id, ["reviewer"]);
+      out["no-role"] = await send({}, "l7");
+      roles.set(ann.id, ["author", "docs"]);
+    });
+    c.worker.script = async (ctx) => { content = ctx.order.content; return session(ctx); };
+    await c.tick();
+    assert.ok(content.includes(`Your newest code submission of this task is ${mine[22]!}.`), content.slice(-1500));
+    assert.match(content, /nimblenewt__submission-list lists them all/);
+    const list = good(out["list"]!);
+    const shown = list["submissions"] as { id: string; sequence: number; tree: string; createdAt: string; submittedBy: string; state: string }[];
+    assert.deepEqual([list["taskId"], list["shown"], list["total"], list["complete"]], [taskId, SUBMISSION_LIST_LIMITS.newest, 23, true]);
+    assert.deepEqual(shown.map((x) => x.id), [...mine].reverse().slice(0, 20), "Ann's own code of this task, newest first, the newest 20 of 23");
+    assert.deepEqual(shown.map((x) => x.sequence), Array.from({ length: 20 }, (_, i) => 23 - i), "the sequence counts from the oldest");
+    for (const id of [bens, ...elsewhere, doc]) assert.ok(!JSON.stringify(list).includes(id), `${id} is not listed`);
+    assert.deepEqual([shown[0]!.tree, shown[0]!.submittedBy, shown[0]!.state, shown[1]!.state, shown[2]!.state, shown[3]!.state], [tree(23).slice(0, 12), ann.id, "changes_asked", "approved", "signed_off", "needs_review"]);
+    assert.match(shown[0]!.createdAt, /^2026-10-23T09:\d\d:\d\d\.000Z$/);
+    assert.deepEqual(Object.keys(shown[0]!).sort(), ["createdAt", "id", "sequence", "state", "submittedBy", "tree"], "IDs, times, a short tree and the review state only: no patch, report or evidence");
+    assert.ok(canonicalJsonLength(list) < 4000, "the answer stays small");
+    // Every read went to the API with the worker's own credential, for the attempt's task and code only.
+    const firstRead = seen[0]!;
+    assert.deepEqual([firstRead.op, firstRead.args["taskId"], firstRead.args["kind"], firstRead.args["limit"], firstRead.token === kept!.token], ["submission.list", taskId, "code", SUBMISSION_LIST_LIMITS.pageSize, true]);
+    for (const k of ["named-task", "limit"]) assert.equal(bad(out[k]!).code, "invalid_command", k);
+    assert.equal(bad(out["bare"]!).code, "unavailable");
+    const endlessList = good(out["endless"]!);
+    assert.equal(pages, SUBMISSION_LIST_LIMITS.pages, "a bounded number of pages is read");
+    assert.equal(endlessList["complete"], false);
+    assert.match(String(endlessList["note"]), /more code submissions than one listing reads/);
+    assert.ok((endlessList["submissions"] as { id: string }[]).every((x) => /^sbm-a{19}/.test(x.id)), "only this task's well-formed code is kept");
+    assert.ok((good(out["unreadable-review"]!)["submissions"] as { state: string }[]).every((x) => x.state === "unknown"), "where review stands is unknown when it cannot be read, never guessed");
+    const noRole = bad(out["no-role"]!);
+    assert.equal(noRole.code, "forbidden");
+    assert.ok(noRole.message.length <= 300, noRole.message);
+    // After the attempt ended its credential and gateway list nothing.
+    const late = await svc.handle(kept!.token, kept!.gateway, { op: "submission.list", callId: "late", args: {} });
+    assert.ok(["unauthenticated", "fenced"].includes(bad(late).code), JSON.stringify(late));
   });
 
   suite("toolbox (card T08): from a run the agent reads a shared tool's source, copies it, lists its copies, proposes an improvement for its own task and reads its notices; the copy and the proposal are writes a pause stops", async (c) => {
