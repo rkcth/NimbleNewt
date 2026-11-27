@@ -161,6 +161,11 @@ export interface DispatcherDeps {
   readonly pauses: PauseGuard;
   /** Why a task may not be started although no pause gate of its own holds it, or undefined: the controller says so when a swarm ancestor of the task has a Stop or Suspend in force (card L02d), so a stopped parent's children are not started again. */
   readonly heldBy?: (taskId: string) => Promise<string | undefined>;
+  /**
+   * Why the owner's switches keep the task from starting now, or undefined (card B06: a task of the NimbleNewt development project starts only while the feature is on and its request is approved). Asked again before
+   * every start, so an attempt admitted earlier (waiting, parked, moved or carried over a restart) does not start after the owner withdrew the approval or switched the feature off. Absent: nothing is held.
+   */
+  readonly startGate?: (taskId: string) => Promise<string | undefined>;
   readonly decisions?: DecisionGuard;
   /**
    * Whether an operation on the task's checkout (integration, landing, refresh, quarantine) is running or left open (card H12m): an attempt of such a task is not started until it ends, and waits instead. A failure to
@@ -2112,6 +2117,9 @@ export class DispatcherService {
       const g = await this.#deps.decisions.guard(taskId, "start");
       if (g.blockedBy.length > 0) return skip("decision", g.blockedBy.join("; "));
     }
+    // 3'. The owner's switch for work on NimbleNewt's own code (card B06), judged at every start and not only at admission: a withdrawn approval or the feature switched off holds the attempt (a wait that the owner's decision ends).
+    const ownCode = await this.#deps.startGate?.(taskId);
+    if (ownCode !== undefined) return skip("decision", ownCode.slice(0, 500));
     // 3a. Prerequisite tasks: work does not start before the tasks it depends on are complete (card L04c). The wait is recorded in the tick's report; it is not a failure.
     if (this.#deps.prerequisites !== undefined) {
       let got: Awaited<ReturnType<NonNullable<DispatcherDeps["prerequisites"]>>>;

@@ -65,6 +65,8 @@ export interface OwnCodeOptions extends RunnerOptions {
 
 /** The command ID of the task an approval creates: derived from the request, so a repeat of the approval finds the same task. */
 const taskCommandOf = (requestId: string): string => `owncode-task:${requestId}`;
+/** Thrown inside an approval's build when the request is already approved but its task was never created: nothing is written, and the task is created after the build (any command ID of the owner finishes it). */
+const UNFINISHED: unique symbol = Symbol("owncode-unfinished-approval");
 /** The task ID an approval of this request creates (ProjectService derives a task's ID from its command ID). */
 export const taskIdOf = (requestId: string): string => derivedId("task", taskCommandOf(requestId));
 
@@ -171,7 +173,8 @@ export class OwnCodeService {
 
   /**
    * The owner decides a waiting request (only the owner; not with a token confined to a task). `approve` needs the feature on and creates the task in the development project, titled from the request; the
-   * request then names the task. `reject` creates nothing. A repeat of the same command finds the same task (its ID derives from the request).
+   * request then names the task. `reject` creates nothing. A repeat of the same command finds the same task (its ID derives from the request). When the approval was recorded but its task creation failed, a
+   * new `approve` of the request at its current revision (any command ID) creates the task, still exactly once.
    */
   async decide(by: Principal, command: NoActor & { requestId: string; expectedRevision: number; decision: "approve" | "reject"; note?: string }): Promise<{ revision: number; status: OwnCodeStatus; taskId?: string }> {
     onlyKnown(command, ["commandId", "requestId", "expectedRevision", "decision", "note"]);
@@ -180,6 +183,7 @@ export class OwnCodeService {
     const decision = command.decision === "approve" || command.decision === "reject" ? command.decision : invalid("decision", "must be approve or reject");
     const note = command.note === undefined ? undefined : plain(command.note, "note", OWNCODE_LIMITS.note);
     if (decision === "approve" && this.#projects === undefined) throw new DomainError("unavailable", "the project records are not available here, so no request can be approved");
+    let finishing = false;
     const result = await this.#retrying(() => this.#runner.command("owncode.decide", { commandId: this.#scoped(by, command.commandId), actor: by.id }, async () => ({
       payload: clean({ requestId: id, expectedRevision: expected, decision, note }),
       build: async () => {
@@ -187,6 +191,7 @@ export class OwnCodeService {
         const got = await this.#get(id);
         if (got === undefined) throw new DomainError("not_found", `no request ${id}`);
         if (got.revision !== expected) throw new DomainError("stale_revision", `request ${id} is at revision ${got.revision}, not ${expected}`, { currentRevision: got.revision });
+        if (decision === "approve" && got.body.status === "approved" && got.body.taskId !== undefined && (await this.#runner.get("task", got.body.taskId)) === undefined) { finishing = true; throw UNFINISHED; }
         if (got.body.status !== "pending") invalid("requestId", `request ${id} is ${got.body.status}; only a waiting request is decided`);
         const index = await this.#index();
         const pending = this.#withoutPending(index, got.body.requestedBy, id);
@@ -208,11 +213,11 @@ export class OwnCodeService {
         changes.unshift({ type: "update", ref: { kind: "owncode-request", id }, expectedRevision: got.revision, body: clean(next) }, this.#indexChange(index, index.ids, pending));
         return { ref: { kind: "owncode-request", id }, creates: false, changes, detail: clean({ decision, taskId: next.taskId }) };
       },
-    })));
+    }))).catch((error: unknown) => { if (error === UNFINISHED && finishing) return undefined; throw error; });
     const stored = (await this.#get(id))?.body;
     if (stored === undefined) throw new DomainError("integrity", `request ${id} is not found after its decision`);
     if (stored.status === "approved" && stored.taskId !== undefined && stored.projectId !== undefined) await this.#createTask(by, id, stored);
-    return { revision: result.revision, status: stored.status, ...(stored.taskId === undefined ? {} : { taskId: stored.taskId }) };
+    return { revision: result?.revision ?? expected, status: stored.status, ...(stored.taskId === undefined ? {} : { taskId: stored.taskId }) };
   }
 
   /**
@@ -272,7 +277,7 @@ export class OwnCodeService {
 
   /**
    * Why an attempt on this task may not start, or `undefined`. Only tasks of the development project are judged: while the feature is off, a task there that no approved request created, and one whose request
-   * is no longer approved, are refused. A task that cannot be read is left to the admission's own check (which refuses it). A settings or request record that cannot be read throws, so admission fails.
+   * is no longer approved, are refused, and so is a task whose title or description is no longer the one the approval created. A task that cannot be read is left to the admission's own check (which refuses it). A settings or request record that cannot be read throws, so admission fails.
    */
   async checkAttempt(taskId: string): Promise<string | undefined> {
     const settings = await this.#runner.get(SETTINGS.kind, SETTINGS.id);
@@ -286,14 +291,28 @@ export class OwnCodeService {
     const request = await this.#get(link.requestId);
     if (request === undefined) return `task ${taskId}: its request ${link.requestId} is not found, so no work starts`;
     if (request.body.status !== "approved" || request.body.taskId !== taskId || request.body.projectId !== s.projectId) return `task ${taskId}: its request ${link.requestId} is ${request.body.status}${request.body.withdrawnFrom === "approved" ? " (the owner withdrew the approval)" : ""}, so no work starts`;
+    // The approval is of the work as asked: a task whose title or description was changed afterwards (by its worker, a meeting decision or anyone with task.update) is not that work.
+    const want = this.#taskText(link.requestId, request.body);
+    const t = task.body as unknown as { title?: string; description?: string };
+    if (t.title !== want.title || t.description !== want.description) return `task ${taskId} was changed after the owner approved request ${link.requestId} (its title or description is not the approved one), so no work starts; changed work needs a new request`;
     return undefined;
   }
 
   // ---- internals -------------------------------------------------------------------------------------------------------------
 
-  async #createTask(by: Principal, id: string, stored: OwnCodeRequestBody): Promise<void> {
-    const title = [...`NimbleNewt: ${stored.request.what.replace(/\s+/g, " ").trim()}`].slice(0, OWNCODE_LIMITS.title).join("");
+  /**
+   * The title and description of the task an approval creates, derived from the stored request alone (so the gate can tell later whether the task still says what was approved). The title is cut at a character
+   * boundary to the task title's limit, which counts UTF-16 code units.
+   */
+  #taskText(id: string, stored: OwnCodeRequestBody): { title: string; description: string } {
+    let title = "";
+    for (const ch of `NimbleNewt: ${stored.request.what.replace(/\s+/g, " ").trim()}`) { if (title.length + ch.length > OWNCODE_LIMITS.title) break; title += ch; }
     const description = `Approved request ${id} from ${stored.requestedBy}.\nWhat: ${stored.request.what}\nWhy: ${stored.request.why}\nExpected effort: ${stored.request.effort}\nExpected cost: ${stored.request.cost}`;
+    return { title, description };
+  }
+
+  async #createTask(by: Principal, id: string, stored: OwnCodeRequestBody): Promise<void> {
+    const { title, description } = this.#taskText(id, stored);
     const created = await this.#projects!.createTask({ commandId: taskCommandOf(id), actor: stored.decidedBy ?? by.id, projectId: stored.projectId!, title, description });
     if (created.id !== stored.taskId) throw new DomainError("integrity", `request ${id}: the task created (${created.id}) is not the one recorded (${stored.taskId})`);
   }

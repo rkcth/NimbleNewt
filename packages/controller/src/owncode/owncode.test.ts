@@ -250,6 +250,20 @@ for (const backend of backends) {
     assert.equal((await c.projects.getTask(taskId))!.projectId, c.devProject);
     assert.deepEqual(await c.svc.decide(c.owner, { commandId: "approve-1", requestId: once.id, expectedRevision: 1, decision: "approve" }), replay, "a third repeat changes nothing");
     assert.ok(await c.start(taskId));
+    // A lost task creation is also finished by a new approval with another command ID (review): the task is created once, and with it in place the request is decided, so a further approval is refused.
+    const second = await c.ask(c.dev, { what: "a second change" });
+    fail = true;
+    await refuses("unavailable", () => flaky.decide(c.owner, { commandId: "approve-2", requestId: second, expectedRevision: 1, decision: "approve" }), /offline/);
+    fail = false;
+    await refuses("forbidden", () => flaky.decide(c.dev, { commandId: "approve-2b", requestId: second, expectedRevision: 2, decision: "approve" }), /only the owner/);
+    await refuses("stale_revision", () => flaky.decide(c.owner, { commandId: "approve-2c", requestId: second, expectedRevision: 1, decision: "approve" }));
+    await refuses("invalid_command", () => flaky.decide(c.owner, { commandId: "reject-2", requestId: second, expectedRevision: 2, decision: "reject" }), /only a waiting request/);
+    assert.equal(await c.projects.getTask(taskIdOf(second)), undefined);
+    assert.deepEqual(await flaky.decide(c.owner, { commandId: "approve-2d", requestId: second, expectedRevision: 2, decision: "approve" }), { revision: 2, status: "approved", taskId: taskIdOf(second) });
+    assert.equal((await c.projects.getTask(taskIdOf(second)))!.projectId, c.devProject);
+    assert.equal((await c.svc.get(c.owner, second))!.revision, 2, "finishing the task creation writes nothing to the request");
+    await refuses("invalid_command", () => flaky.decide(c.owner, { commandId: "approve-2e", requestId: second, expectedRevision: 2, decision: "approve" }), /only a waiting request/);
+    assert.ok(await c.start(taskIdOf(second)));
     // A service without the project records approves nothing.
     const bare = OwnCodeService.withEpoch(c.storage, c.epoch, options);
     const other = await c.ask(c.dev2);
@@ -277,5 +291,23 @@ for (const backend of backends) {
     await link(orphan, "ocr-aaaaaaaaaaaaaaaaaaaa");
     await refuses("invalid_command", () => c.start(orphan), /is not found, so no work starts/);
     assert.ok(await c.start(taskId), "the real task still starts");
+    // Review: the approval is of the work as asked. A task whose title or description was changed afterwards does not start; put back as approved, it starts again.
+    await c.finish(taskId, (await c.assign.getAssignment(taskId))!.activeAttemptId!);
+    const before = (await c.projects.getTask(taskId))!;
+    await c.projects.updateTask({ commandId: cid("ed"), actor: c.owner.id, taskId, expectedRevision: before.revision, title: "NimbleNewt: rewrite the access checks" });
+    await refuses("invalid_command", () => c.start(taskId), /was changed after the owner approved request/);
+    const edited = (await c.projects.getTask(taskId))!;
+    await c.projects.updateTask({ commandId: cid("ed"), actor: c.owner.id, taskId, expectedRevision: edited.revision, title: before.title, description: `${before.description}\nAlso: the access checks` });
+    await refuses("invalid_command", () => c.start(taskId), /its title or description is not the approved one/);
+    const edited2 = (await c.projects.getTask(taskId))!;
+    await c.projects.updateTask({ commandId: cid("ed"), actor: c.owner.id, taskId, expectedRevision: edited2.revision, description: before.description });
+    assert.ok(await c.start(taskId), "the task as approved starts again");
+    // A long request in characters outside the basic plane: the title is cut to the task title's limit in UTF-16 code units, never inside a pair, so the approval's task is created.
+    const wide = await c.ask(c.dev2, { what: "\u{1F331}".repeat(300) });
+    const wideTask = await c.approve(wide);
+    const title = (await c.projects.getTask(wideTask))!.title;
+    assert.ok(title.length <= 200 && title.length >= 199, String(title.length));
+    assert.ok(!/[\ud800-\udbff]$/.test(title), "no half of a pair at the end");
+    assert.ok(await c.start(wideTask));
   });
 }

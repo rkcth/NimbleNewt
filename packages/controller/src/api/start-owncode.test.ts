@@ -91,5 +91,22 @@ test("work on NimbleNewt's own code through the running controller: off by defau
     const sow = (await c.services.projects.createTask({ commandId: "t-sow", actor: rob.id, projectId: garden, title: "sow" })).id;
     assert.ok(await start(sow));
     assert.equal((await call(boot.token, "owncode.list", { status: "withdrawn" })).result.items.length, 1);
+
+    // The dispatcher asks again before every start (review): an attempt admitted while the approval held does not start once the owner withdraws it, nor while the feature is off; it waits.
+    const s2 = (await call(boot.token, "owncode.settings", {})).result;
+    assert.ok((await call(boot.token, "owncode.enable", { expectedRevision: s2.revision }, "en-2")).ok);
+    const asked2 = await call(annToken, "owncode.request", { ...ask, what: "say who lands the queue" }, "ask-2");
+    const id2 = asked2.result.id as string;
+    const task2 = (await call(boot.token, "owncode.decide", { requestId: id2, expectedRevision: 1, decision: "approve" }, "d-2")).result.taskId as string;
+    const admitted = await start(task2);
+    const heldFor = async (): Promise<string | undefined> => (await c.dispatch!.dispatcher.tick()).skipped.find((x) => x.attemptId === admitted && x.check === "decision")?.reason;
+    const s3 = (await call(boot.token, "owncode.settings", {})).result;
+    assert.ok((await call(boot.token, "owncode.disable", { expectedRevision: s3.revision }, "dis-2")).ok);
+    assert.match((await heldFor()) ?? "", /The owner can enable it/, "switched off after the admission: the dispatcher holds the attempt");
+    assert.ok((await call(boot.token, "owncode.enable", { expectedRevision: s3.revision + 1 }, "en-3")).ok);
+    assert.equal(await heldFor(), undefined, "switched on again: the owner's switch no longer holds it");
+    const got2 = (await call(boot.token, "owncode.get", { requestId: id2 })).result.item;
+    assert.ok((await call(boot.token, "owncode.withdraw", { requestId: id2, expectedRevision: got2.revision, reason: "not now" }, "w-2")).ok);
+    assert.match((await heldFor()) ?? "", /the owner withdrew the approval/, "withdrawn after the admission: the dispatcher holds the attempt");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

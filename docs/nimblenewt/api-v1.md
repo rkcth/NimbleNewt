@@ -6040,7 +6040,7 @@ Result: `{ id, replayed }`.
 
 #### `owncode.decide`
 
-Owner only: approves or rejects a waiting request to work on NimbleNewt's own code. Approval needs the feature on and creates the task in the development project (no attempt starts on it otherwise); rejection creates nothing.
+Owner only: approves or rejects a waiting request to work on NimbleNewt's own code. Approval needs the feature on and creates the task in the development project (no attempt starts on it otherwise); rejection creates nothing. If an approval was recorded but its task could not be created, approving the request again at its current revision creates it (once).
 
 Arguments:
 
