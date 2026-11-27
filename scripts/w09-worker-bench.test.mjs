@@ -703,6 +703,41 @@ test("W09 bench measurement: the provider counts are read only from their own fi
   assert.equal(usageOf('{"content":"prompt_tokens: 10, completion_tokens: 3"}'), null, "the words in a reply's text are not its counts");
   assert.equal(usageOf(""), null);
   assert.deepEqual(usageOf('{"prompt_tokens":5,"completion_tokens":1}{"prompt_tokens":9,"completion_tokens":4}'), { input: 9, output: 4, cacheRead: 0, reasoning: 0 }, "the largest of repeated figures");
+  assert.deepEqual(usageOf('{"prompt_tokens":9,"completion_tokens":4}{"prompt_tokens":5,"completion_tokens":1}'), { input: 9, output: 4, cacheRead: 0, reasoning: 0 }, "the largest, not the last");
+});
+
+test("W09 bench measurement (first review): the fetch delivers every byte unchanged across chunk boundaries, reads counts from a stream's head and tail without joining a number cut between them, an abort is not an outage, and the per-run lines are bounded", async () => {
+  const enc = new TextEncoder();
+  const told = [];
+  const replies = [];
+  const f = radianceOnlyFetch({ baseUrl: BASE, onCall: (c) => told.push(c), fetch: async (url, init) => replies.shift()(init) });
+  const post = (init = {}) => f(`${BASE}/chat/completions`, { method: "POST", body: JSON.stringify({ stream: true }), ...init });
+  const chunked = (text, sizes) => { const bytes = enc.encode(text); let at = 0; let i = 0; return new ReadableStream({ pull(c) { if (at >= bytes.length) { c.close(); return; } const n = sizes[i++ % sizes.length]; c.enqueue(bytes.slice(at, at + n)); at += n; } }); };
+  // Anthropic style: the input count only at the start (message_start), the output count only at the end, 50 KB apart, in chunks of odd sizes (one far over 16 KiB).
+  const text = `event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":4321,"output_tokens":1}}}\n\n${`data: {"type":"content_block_delta","delta":{"text":"${"y".repeat(500)}"}}\n\n`.repeat(100)}data: {"type":"message_delta","usage":{"output_tokens":777}}\n\n`;
+  replies.push(() => new Response(chunked(text, [7, 1, 3000, 40_000, 13]), { status: 200 }));
+  assert.equal(await (await post()).text(), text, "the agent reads exactly the bytes the server sent");
+  assert.deepEqual([told[0].usage?.input, told[0].usage?.output, told[0].bytes], [4321, 777, enc.encode(text).length]);
+  // A number cut where the head scan ends must not join the tail's first digits into a count.
+  const head = `{"x":"${"a".repeat(16 * 1024 - 6 - 20)}","prompt_tokens":12`;
+  assert.equal(enc.encode(head).length, 16 * 1024);
+  const end = `"completion_tokens":5}`;
+  const tail = `34,${" ".repeat(16 * 1024 - 3 - end.length)}${end}`;
+  assert.equal(enc.encode(tail).length, 16 * 1024);
+  replies.push(() => new Response(chunked(`${head}${" ".repeat(20_000)}${tail}`, [1000]), { status: 200 }));
+  await (await post()).text();
+  assert.deepEqual([told[1].usage?.input, told[1].usage?.output], [0, 5], "no input count is read from 12 | 34");
+  // The caller aborts while the request is out: the server did not fail, so this is no outage.
+  replies.push((init) => new Promise((_, no) => init.signal.addEventListener("abort", () => no(init.signal.reason), { once: true })));
+  const ac = new AbortController();
+  const p = post({ signal: ac.signal });
+  setTimeout(() => ac.abort(), 10);
+  await assert.rejects(p);
+  assert.deepEqual([told[2].status, told[2].outage], ["aborted", false]);
+  // The per-run lines of the batch report stop at 50.
+  const calls = callLog(); calls.add({ sent: true, streamed: true, ok: true, ms: 5, usage: { input: 1, output: 1 }, outage: false });
+  const lines = callsLines(Array.from({ length: 60 }, (_, i) => ({ runId: `r${i}`, calls: calls.result(), tokens: { input: 1, output: 1 } })));
+  assert.equal(lines.length, 51);
 });
 
 test("W09 bench measurement: median and 95th percentile (nearest rank) of a run's call times; anything that is not a duration is left out and counted", () => {
@@ -769,6 +804,7 @@ test("W09 bench measurement: a non-finish whose last model call found the server
     [base(att()), "verified"],
     [base(att(), fail), "false-done"],
     [base(att(), { ...fail, interfaceMismatch: true }), "interface-mismatch"],
+    [base(att(), pass, false), "uncalibrated"],
   ];
   for (const [c, cause] of cases) {
     const w = withOutageCause(c, down);

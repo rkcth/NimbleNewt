@@ -174,13 +174,13 @@ export function tokensOfCalls(calls) {
 }
 
 /**
- * W09 bench measurement: a run whose last sent model call was a server outage (`lib/worker-embedder.mjs` OUTAGE_STATUSES, or no connection) and that is a non-finish without a recorded done gets the cause `server-unavailable`, with
- * the cause it would have had kept as `causeOtherwise`. The OUTCOME is never changed, so the run counts in every gate exactly as before (a non-finish stays one, an unclassified run still fails the "no silent non-finish" gate). A verified
- * finish, a false done and an interface mismatch keep their cause: the outage did not make them.
+ * W09 bench measurement: a run whose last sent model call was a server outage (`lib/worker-embedder.mjs` OUTAGE_STATUSES, or no connection) and that is a non-finish (a done not accepted by the check or the second agent included)
+ * gets the cause `server-unavailable`, with the cause it would have had kept as `causeOtherwise`. The OUTCOME is never changed, so the run counts in every gate exactly as before (a non-finish stays one, an unclassified run still fails
+ * the "no silent non-finish" gate). A verified finish, a false done, an interface mismatch and an uncalibrated task (its acceptance tests pass on the unchanged checkout) keep their cause: the outage did not make them.
  */
 export function withOutageCause(classified, calls) {
   const keep = ["verified-finish", "wrong", "interface-mismatch"];
-  if (calls?.lastCall?.outage !== true || keep.includes(classified.outcome)) return classified;
+  if (calls?.lastCall?.outage !== true || keep.includes(classified.outcome) || classified.cause === "uncalibrated") return classified;
   return { ...classified, cause: "server-unavailable", causeOtherwise: classified.cause ?? null, reason: `${classified.reason}; the run's last model call found the server unavailable` };
 }
 
