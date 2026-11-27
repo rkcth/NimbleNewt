@@ -29,6 +29,14 @@ If the answer to the promotion request is lost, the result says the outcome is n
 
 A new manifest replaces the old one in the same folder. If the machine stops during that swap, the folder holds no manifest and a promotion is refused until a new one is written. A mix of old and new files does not match the checksums and is refused the same way.
 
+## The manifest on a schedule, and only from the primary
+
+The controller can write the manifest itself. It does so when it is started with a manifest folder (the `recovery` start option: `manifestDirectory`, and `everyMs`, the time between writes, default 15 minutes, from one minute to one day). The dispatcher's regular rounds write it; a controller started without the dispatcher writes none. There is no entry for it in the configuration document yet.
+
+Only the controller that holds the current epoch writes. It checks the epoch before it reads anything, again just before the new files are put in place, and once more afterwards; the snapshot the manifest is made from must carry the same epoch. A manifest never goes back: one already in the folder with a newer epoch, or the same epoch and higher counters, is kept. That also covers an old primary that is still running on its own copy of the database after a failover, where its epoch still looks current: the newer manifest in the folder stops it. The check reads the watermark from `manifest.json` even when the manifest is damaged, so a damaged newer manifest still stops an older writer. A `manifest.json` whose watermark cannot be read at all is never replaced: move it aside and the next round writes a new one. If the epoch moved while the new manifest was being put in place, the controller takes its own manifest away again (only if the file there is still its own), so the folder holds no manifest rather than an older one. Once a controller finds it is no longer the primary it never tries again until it is restarted.
+
+Ask in chat for the database the controller runs on (for example "is the recovery manifest up to date?"), and the answer says how often the manifest is written, when the latest was written, its epoch and counters, how many records and artifact files it lists, how many audit entries and deliveries were written since (a promotion checked against it cannot vouch for those), and why the last write did not go through, if it did not. Only the owner sees it. The answer reads `manifest.json` only; its other files are checked when a promotion or a restore report reads them.
+
 ## SQLite and backups
 
 SQLite has no standby. Its recovery is the last good backup; `reportRestoredStore` compares the restored store with a manifest written before the loss and says how many audit entries, records and artifact files the backup does not have. Backups are unchanged by all of this: a backup made beside a standby restores into any backend with no standby and no manifest.
@@ -39,6 +47,7 @@ After a failover, `measureLoss` compares the writes the controller was told succ
 
 ## What is not here yet
 
-- Nothing in this guide can be reached from chat, the status page or the API yet, and nothing runs it on a schedule: card K05 adds the recovery chat, the endpoint, fencing of the old controller and the consent step. Until then these are building blocks, not a feature you can use.
+- Apart from the scheduled manifest and its status lines, nothing in this guide can be reached from chat, the status page or the API yet: card K05 adds the recovery chat, the endpoint, fencing of the old controller and the consent step. Promotion, loss measurement and the restore report are building blocks until then.
+- The manifest folder is a start option, not yet an entry in the configuration document, and copying the folder and the artifact files to the standby host is still yours to arrange.
 - There is no automatic failover. Nothing promotes a standby by itself.
 - It has been tested with both servers on one machine, talking over the local loopback address. A standby on another host, a slow or broken network (including one that is neither up nor down), separate clocks, TLS and connection poolers have not been tested.

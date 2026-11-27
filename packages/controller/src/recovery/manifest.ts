@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { canonicalJson } from "../storage/index.js";
 import type { RecoverySource, Watermark } from "./source.js";
@@ -53,7 +53,7 @@ function blobsOf(body: string | undefined): BlobRef[] {
  * manifest as it was. The swap removes the old `manifest.json` first and puts the new one in last: a crash during the swap leaves no manifest (refused), never a mix. Records of kind `artifact` name
  * the blobs; the reserved `tombstone` records are left out (a removed record is not state a recovery must find).
  */
-export async function writeRecoveryManifest(source: RecoverySource, directory: string, options: { readonly now?: () => Date } = {}): Promise<RecoveryManifest> {
+export async function writeRecoveryManifest(source: RecoverySource, directory: string, options: { readonly now?: () => Date; /** Called with the new manifest once its files are flushed in the staging folder and before anything in `directory` is touched; throwing leaves the earlier manifest as it was. */ readonly beforeSwap?: (manifest: RecoveryManifest) => Promise<void> } = {}): Promise<RecoveryManifest> {
   mkdirSync(directory, { recursive: true });
   const staging = `${resolve(directory)}.partial-${process.pid}`;
   rmSync(staging, { recursive: true, force: true });
@@ -81,6 +81,7 @@ export async function writeRecoveryManifest(source: RecoverySource, directory: s
     const manifest: RecoveryManifest = { ...body, sha256: sha256(canonicalJson(body)) };
     // the manifest file is written last: a folder without it is not a manifest
     writeFlushed(join(staging, RECOVERY_MANIFEST_FILE), `${JSON.stringify(manifest, null, 2)}\n`);
+    await options.beforeSwap?.(manifest);
     for (const file of [RECOVERY_MANIFEST_FILE, RECOVERY_AGGREGATES_FILE, RECOVERY_BLOBS_FILE]) rmSync(join(directory, file), { force: true });
     for (const file of [RECOVERY_AGGREGATES_FILE, RECOVERY_BLOBS_FILE, RECOVERY_MANIFEST_FILE]) renameSync(join(staging, file), join(directory, file));
     return manifest;
@@ -101,23 +102,59 @@ export interface ReadManifest {
   blobRefs(): BlobRef[];
 }
 
-export function readRecoveryManifest(directory: string): ReadManifest {
-  let manifest: RecoveryManifest;
-  try { manifest = JSON.parse(readFileSync(join(directory, RECOVERY_MANIFEST_FILE), "utf8")) as RecoveryManifest; } catch (error) {
-    throw new RecoveryManifestBad(`the recovery manifest in ${directory} cannot be read (${error instanceof Error ? error.message.slice(0, 120) : "unknown"})`);
+const count = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) >= 0;
+/** `manifest.json` is a few hundred bytes; anything far larger is not one this code wrote, and is not read whole. */
+export const RECOVERY_MANIFEST_MAX_BYTES = 64 * 1024;
+
+/** The text of `manifest.json`, or `undefined` when there is none. A file over the size bound is refused unread. */
+export function readManifestText(directory: string): string | undefined {
+  const path = join(directory, RECOVERY_MANIFEST_FILE);
+  let size: number;
+  try { size = statSync(path).size; } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return undefined;
+    throw new RecoveryManifestBad(`the recovery manifest cannot be read (${error instanceof Error ? ((error as NodeJS.ErrnoException).code ?? "unknown") : "unknown"})`);
   }
-  if (manifest?.format !== RECOVERY_FORMAT || manifest.product !== "nimblenewt") throw new RecoveryManifestBad("not a recovery manifest of a format this version reads");
+  if (size > RECOVERY_MANIFEST_MAX_BYTES) throw new RecoveryManifestBad(`the recovery manifest is ${size} bytes, larger than any this version writes`);
+  try { return readFileSync(path, "utf8"); } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return undefined;
+    throw new RecoveryManifestBad(`the recovery manifest cannot be read (${(error as NodeJS.ErrnoException)?.code ?? "unknown"})`);
+  }
+}
+
+/**
+ * `manifest.json` alone, checked: format, product, its own checksum and the shape of every field a check relies on. The files it names are NOT read (that is `readRecoveryManifest`), so this is cheap
+ * enough for a status answer. `undefined` when there is no manifest.
+ */
+export function readRecoveryManifestHeader(directory: string): RecoveryManifest | undefined {
+  const text = readManifestText(directory);
+  return text === undefined ? undefined : checkHeader(text);
+}
+
+function checkHeader(text: string): RecoveryManifest {
+  let manifest: RecoveryManifest;
+  try { manifest = JSON.parse(text) as RecoveryManifest; } catch { throw new RecoveryManifestBad("the recovery manifest is not readable JSON"); }
+  if (typeof manifest !== "object" || manifest === null || manifest.format !== RECOVERY_FORMAT || manifest.product !== "nimblenewt") throw new RecoveryManifestBad("not a recovery manifest of a format this version reads");
   const { sha256: claimed, ...rest } = manifest;
   if (claimed !== sha256(canonicalJson(rest))) throw new RecoveryManifestBad("the recovery manifest's own checksum does not match: it was changed after it was written");
   // The checksum says the text is as written, not that it was written by this code: every field a check relies on is read only when it has the right shape, so a missing counter can never
   // make the comparison skip it.
-  const count = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) >= 0;
   const w = manifest.watermark as unknown as Record<string, unknown> | undefined;
   if (typeof w !== "object" || w === null || !count(w["epoch"]) || !count(w["auditSeq"]) || !count(w["deliverySeq"])) throw new RecoveryManifestBad("the recovery manifest has no readable watermark (epoch and counters)");
+  if (typeof manifest.createdAt !== "string" || !Number.isFinite(Date.parse(manifest.createdAt))) throw new RecoveryManifestBad("the recovery manifest has no readable time it was written");
   for (const [entry, name] of [[manifest.aggregates, RECOVERY_AGGREGATES_FILE], [manifest.blobs, RECOVERY_BLOBS_FILE]] as const) {
     const e = entry as unknown as Record<string, unknown> | undefined;
     if (typeof e !== "object" || e === null || e["file"] !== name || !count(e["rows"]) || !count(e["bytes"]) || typeof e["sha256"] !== "string") throw new RecoveryManifestBad(`the recovery manifest's entry for ${name} is not readable`);
   }
+  return manifest;
+}
+
+export function readRecoveryManifest(directory: string): ReadManifest {
+  let text: string | undefined;
+  try { text = readManifestText(directory); } catch (error) {
+    throw new RecoveryManifestBad(`the recovery manifest in ${directory} cannot be read (${error instanceof Error ? error.message.slice(0, 120) : "unknown"})`);
+  }
+  if (text === undefined) throw new RecoveryManifestBad(`the recovery manifest in ${directory} cannot be read (there is no ${RECOVERY_MANIFEST_FILE})`);
+  const manifest = checkHeader(text);
   const read = (entry: RecoveryFileEntry): string => {
     let text: string;
     try { text = readFileSync(join(directory, entry.file), "utf8"); } catch { throw new RecoveryManifestBad(`${entry.file} is missing`); }
