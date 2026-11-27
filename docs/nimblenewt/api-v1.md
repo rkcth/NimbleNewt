@@ -3749,6 +3749,23 @@ Result: `{ revision }`.
 
 Completion: finished when accepted (`completed: true`).
 
+#### `capacity.borrow`
+
+The owner's emergency borrow of the improvement (PC) reserve (owner only): production work (of one project when `projectId` is given) may take up to `places` of the places workClass.pcFloor keeps for improvement work, until `until`, with the owner's `reason` and the date the owner reviews it by (`reviewBy`). All four are needed. A borrow lasts at most 72 hours, its review date lies from `until` to 30 days after it, and it lends no more places than the floor keeps. One borrow at a time, never extended; once it ends, the floor stands again for at least as long as it was lent before another can start, so repeated urgency cannot remove it (to give improvement work less for longer, lower workClass.pcFloor). The improvement ceiling stays, nothing running is stopped and nobody's work changes hands. `end: true` (and nothing else) ends the borrow in force; borrowed places come back as their attempts end. Kept in the admission record, so it survives a restart and expires by itself. The status kind capacity shows it, what it let in and its review date. This is the form the chat uses.
+
+Arguments:
+
+- `reason` (optional): why, in the owner's words (1 to 300 characters)
+- `places` (optional): how many reserved places to lend
+- `projectId` (optional): lend only to this project's production work
+- `until` (optional): when it ends, a date and time with its time zone
+- `reviewBy` (optional): when the owner reviews it, a date and time with its time zone
+- `end` (optional): true to end the borrow in force
+
+Result: `{ borrowId, ended, until, reviewBy, againFrom?, revision, replayed }`: `againFrom` is the earliest time the floor may be lent again.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `swarm.limits.change`
 
 The owner changes the limits on spawning child tasks (owner only), leaving the others as they are: `depth` (0 to 8 levels; 0 allows no child task at all), `liveChildren` (0 to 64 unfinished children of one parent at once; 0 allows no new child now) and `totalChildren` (1 to 1000 children of one parent in all, the fan-in; null turns that total off). Defaults: depth 3, liveChildren 4, totalChildren 16. `unset` returns a limit to its default. A lower limit cancels nothing that exists; it only refuses new children. This is the form the chat uses.

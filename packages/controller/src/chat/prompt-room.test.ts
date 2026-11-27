@@ -26,7 +26,7 @@ const listed = (system: string, op: string): string[] => {
 };
 
 // Pin: the prompt is about this long. The ceiling is 2,000 characters above what is now (a card that adds a control fits); the floor is 4,000 below it, so a large cut that dropped controls is seen too. Moving either is a decision.
-const SIZE = 154_560; // chat gaps2 154,137; Q02 leftovers +89; P09 landing checks view +334 (2026-11-23); Q02 stale approvals +197 (155,294 measured, 2026-11-26); C08 task-level override clause in the submissions kind +64 (155,678 measured, 2026-11-26); P03b finish: the "(card X)" references dropped from the status kinds' descriptions (-430), a right on one service resource in the grant sentences, `resource` on grant.create and service operations in the tools kind (+360), 156,461 measured (2026-11-26, 70 below what it was); its review: a "(card P09/P10)" reference dropped too (-15), 156,446 measured
+const SIZE = 154_560; // chat gaps2 154,137; Q02 leftovers +89; P09 landing checks view +334 (2026-11-23); Q02 stale approvals +197 (155,294 measured, 2026-11-26); C08 task-level override clause in the submissions kind +64 (155,678 measured, 2026-11-26); P03b finish: the "(card X)" references dropped from the status kinds' descriptions (-430), a right on one service resource in the grant sentences, `resource` on grant.create and service operations in the tools kind (+360), 156,461 measured (2026-11-26, 70 below what it was); its review: a "(card P09/P10)" reference dropped too (-15), 156,446 measured; B01 emergency borrow: the capacity.borrow line (+124), and in the capacity kind the borrow named while a repeated "all off" clause went (-4), 156,433 before and 156,553 measured (2026-11-27)
 const CEILING = SIZE + 2_000;
 const FLOOR = SIZE - 4_000;
 
