@@ -176,9 +176,10 @@ for (const backend of backends) {
     await w.tick();
     const f = await w.get(c.owner, first.windowId);
     assert.equal(f.status, "failed");
-    assert.match(f.reason ?? "", /could not be undone \(there is no earlier release to go back to\); the release runs at NimbleNewt's next start unless you roll it back/);
+    assert.match(f.reason ?? "", /^the release runs at NimbleNewt's next start unless you roll it back \(release\.rollback\): .*could not be undone \(there is no earlier release to go back to\)$/);
     assert.equal(c.pointer(), v1.id);
     assert.deepEqual(c.told.filter((t) => t.windowId === first.windowId && t.label !== "A maintenance window waits for a restart").map((t) => t.level), ["needs-you"]);
+    assert.match(c.told.find((t) => t.windowId === first.windowId && t.label === "A maintenance window ended failed")!.detail, /the release runs at NimbleNewt's next start unless you roll it back/, "the notice keeps the consequence (it is cut at 200 characters)");
     assert.equal((await c.pauses.gateState(INST))?.intent, "active", "the window still gives back its pause");
     await c.act.confirm(c.owner, { commandId: cid("c"), releaseId: v1.id });
 
@@ -274,6 +275,50 @@ for (const backend of backends) {
     assert.match(g.reason ?? "", /another release/);
     assert.equal(g.undoingAt, undefined);
     assert.equal((await c.act.status(c.owner)).history.filter((h) => h.kind === "rolled_back").length, 1);
+  });
+
+  suite("a switch the owner made again is not undone: rolled back and activated again by the owner before the close, the window ends without a rollback, leaves the pointer and gives back its pause", async (c) => {
+    const { windowId, v1, v2, w } = await c.open();
+    await w.tick();
+    assert.equal((await w.get(c.owner, windowId)).status, "activated");
+    const digest = (await c.act.verify(c.owner, { releaseId: v2 })).digest!;
+    await c.act.rollback(c.owner, { commandId: cid("rb"), releaseId: v1 });
+    await c.act.activate(c.owner, { commandId: cid("a"), candidateId: v2, digest });
+    c.clock.t = CLOSES + MIN;
+    await w.tick();
+    const g = await w.get(c.owner, windowId);
+    assert.equal(g.status, "failed");
+    assert.match(g.reason ?? "", /^the release runs at NimbleNewt's next start unless you roll it back \(release\.rollback\): .*switched in again since, not by this window, so the window left that switch as it is$/);
+    assert.equal(g.undoingAt, undefined);
+    assert.equal(c.pointer(), v2, "the owner's own switch stands");
+    const s = await c.act.status(c.owner);
+    assert.deepEqual(s.history.filter((h) => h.by === "service:release-window" && h.kind === "rolled_back"), [], "the window rolled nothing back");
+    assert.equal((await c.pauses.gateState(INST))?.intent, "active", "the window's pause ended with it");
+    assert.match(c.told.find((t) => t.windowId === windowId && t.label === "A maintenance window ended failed")!.detail, /the release runs at NimbleNewt's next start unless you roll it back/);
+    const before = c.told.length;
+    await w.tick();
+    assert.equal(c.told.length, before, "told once");
+  });
+
+  suite("a switch that lands between the window's look and its rollback is not undone: the rollback is pinned to the activation record the window read", async (c) => {
+    const { windowId, v1, v2, w } = await c.open();
+    await w.tick();
+    const digest = (await c.act.verify(c.owner, { releaseId: v2 })).digest!;
+    c.clock.t = CLOSES + MIN;
+    let raced = false;
+    const racing = c.win({ runningRelease: v1, activation: { ...bound(c.act), rollback: async (by, cmd) => {
+      if (!raced) { raced = true; await c.act.rollback(c.owner, { commandId: cid("rb"), releaseId: v1 }); await c.act.activate(c.owner, { commandId: cid("a"), candidateId: v2, digest }); }
+      return c.act.rollback(by, cmd);
+    } } });
+    await racing.tick();
+    assert.equal(c.pointer(), v2, "the owner's switch made meanwhile stands");
+    await racing.tick();
+    const g = await w.get(c.owner, windowId);
+    assert.equal(g.status, "failed");
+    assert.match(g.reason ?? "", /not by this window/);
+    assert.equal(c.pointer(), v2);
+    assert.deepEqual((await c.act.status(c.owner)).history.filter((h) => h.by === "service:release-window" && h.kind === "rolled_back"), []);
+    assert.equal((await c.pauses.gateState(INST))?.intent, "active");
   });
 }
 

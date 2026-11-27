@@ -595,7 +595,8 @@ export class ReleaseWindowService {
     else if (s.current?.id === w.candidateId && s.lastKnownGood?.id === w.candidateId) next = this.#next(w, "committed", "the release started and confirmed its start");
     else if (s.current?.id !== w.candidateId && s.journal === undefined) next = this.#next(w, "reverted", `another release (${s.current?.id ?? "none"}) became current before this one confirmed its start`);
     if (next === undefined) {
-      if (this.#overdue(w, s)) return this.#undo(rev, w, s);
+      // Only the window's own switch is undone. The same release switched in again by someone else (the owner rolled back and activated it again) is theirs: the window ends without touching it.
+      if (this.#overdue(w, s)) return this.#own(w, s) ? this.#undo(rev, w, s) : this.#leave(rev, w);
       await this.#tellHeld(rev, w);
       return false;
     }
@@ -614,6 +615,20 @@ export class ReleaseWindowService {
     return this.#now() >= Date.parse(w.closesAt) && s.journal === undefined && s.current?.id === w.candidateId;
   }
 
+  /** Whether the current release in the record is this window's own switch: made in the window's name, at or after the window called it (not the owner's or another switch to the same release). */
+  #own(w: WindowBody, s: Awaited<ReturnType<WindowOptions["activation"]["status"]>>): boolean {
+    const c = s.current;
+    return c !== undefined && c.id === w.candidateId && c.by === WINDOW_ACTOR.id && (w.activatingAt === undefined || c.at >= w.activatingAt);
+  }
+
+  /** The window closed and its release is current, but by a switch someone else made: that switch is theirs and stays. The window ends (giving back its pause) and says so. */
+  async #leave(rev: number, w: WindowBody): Promise<boolean> {
+    const next = this.#next(w, "failed", "the release runs at NimbleNewt's next start unless you roll it back (release.rollback): the window closed before a restart into it, and the release was switched in again since, not by this window, so the window left that switch as it is");
+    const saved = await this.#write(rev, w, next, "release.window.undo", `rwin:${w.windowId}:left`);
+    await this.#tell(saved, next);
+    return true;
+  }
+
   /**
    * Undoes the window's own switch with the journalled rollback (all of K02/K03's rollback checks apply), after recording that it is about to. A rollback that is refused, or no earlier release to go back to,
    * ends the window failed with a plain account: the switch stays and the release runs at the next start unless the owner rolls it back. The release is never quarantined here: it never started.
@@ -625,7 +640,8 @@ export class ReleaseWindowService {
       w = marked;
     }
     const cannot = async (why: string): Promise<boolean> => {
-      const next = this.#next(w, "failed", `the window closed before NimbleNewt was restarted into the release, and its switch could not be undone (${why}); the release runs at NimbleNewt's next start unless you roll it back (release.rollback)`.slice(0, 400));
+      // The consequence first: the owner's notice keeps only the start of the reason.
+      const next = this.#next(w, "failed", `the release runs at NimbleNewt's next start unless you roll it back (release.rollback): the window closed before a restart into it, and its switch could not be undone (${why})`.slice(0, 400));
       const saved = await this.#write(rev, w, next, "release.window.undo", `rwin:${w.windowId}:undo-failed`);
       await this.#tell(saved, next);
       return true;
@@ -635,14 +651,19 @@ export class ReleaseWindowService {
     let refused: string | undefined;
     try {
       // Named by the activation record's revision: an earlier attempt that a restart's recovery aborted is a new attempt, not a replay of a command that "did not complete".
-      await this.#o.activation.rollback(WINDOW_ACTOR, { commandId: `rwin:${w.windowId}:undo-${s.revision}`, releaseId: w.from });
+      // Pinned to the record the window judged: a switch made since (the owner's, another one) refuses this rollback as stale instead of being undone.
+      await this.#o.activation.rollback(WINDOW_ACTOR, { commandId: `rwin:${w.windowId}:undo-${s.revision}`, releaseId: w.from, expectedRevision: s.revision });
     } catch (error) {
       if (!(error instanceof DomainError)) throw error;
+      // The record moved since it was read: judged again at the next sweep from what it says then.
+      if (error.code === "stale_revision") return true;
       refused = recordText(error);
     }
     // Settled from the record, never assumed: still open (an error after its journal opened) is settled at a later sweep; the release before current again is the undo done; anything else is said.
     const after = await this.#o.activation.status(WINDOW_ACTOR);
     if (after.journal !== undefined) return true;
+    // Someone else's switch came in meanwhile: the next sweep ends the window from the record, without a rollback.
+    if (after.current?.id !== w.from && !this.#own(w, after)) return true;
     if (after.current?.id !== w.from) return cannot(refused ?? "the rollback returned but the release before is not current");
     return this.#undone(rev, w);
   }
