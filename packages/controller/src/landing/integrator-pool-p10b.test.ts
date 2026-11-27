@@ -154,6 +154,35 @@ for (const backend of backends) {
     } finally { await r.close(); }
   });
 
+  test(`${backend.name}: a hold on a branch whose queue is now empty still keeps the integrator busy; every hold counted; equal waits go by project ID; the hold time asked for is the lease's; a repeat after release takes the next (card P10b)`, async () => {
+    const r = await rig();
+    try {
+      const [p, q] = [await r.project("Apple"), await r.project("Birch")].sort();
+      // Both queued at the same moment: the tie goes to the smaller project ID.
+      const tp = await r.task(p!, "tie-p"), tq = await r.task(q!, "tie-q");
+      for (const [i, [projectId, taskId]] of ([[q!, tq], [p!, tp]] as const).entries()) await r.queue.enqueue({ commandId: `tie-${i}`, actor: "controller", projectId, branch: "main", submissionId: sbm(40 + i), taskId, base: BASE, tree: tree(40 + i), author: "agent:writer" });
+      const ivy = await r.person("ivy", [{ action: "integration.lease", project: "*" }]);
+      const first = await r.pool.next(ivy, { commandId: "t1", ttlMs: 7 * MIN });
+      assert.deepEqual(first.outcome === "taken" ? [first.projectId, first.taskId] : first, [p, tp]);
+      if (first.outcome !== "taken") return;
+      assert.equal(Date.parse(first.lease.expiresAt) - Date.parse(first.lease.acquiredAt), 7 * MIN, "the lease is held for the time asked for");
+      // p's work leaves the queue (it landed, or was taken out): the hold is still ivy's, so she is busy and q is not taken.
+      await r.queue.remove({ commandId: "rm-p", actor: "controller", projectId: p!, branch: "main", taskId: tp, reason: "landed" });
+      const busy = await r.pool.next(ivy, { commandId: "t2", ttlMs: 7 * MIN });
+      assert.deepEqual(busy.outcome === "holding" ? [busy.projectId, busy.holding] : busy, [p, 1]);
+      // A second hold taken through the door directly: both are counted.
+      r.w.clock.advance(MIN);
+      const direct = await r.leaseOps.acquire(ivy, { commandId: "d1", taskId: tq, branch: "main", ttlMs: 7 * MIN });
+      const two = await r.pool.next(ivy, { commandId: "t3", ttlMs: 7 * MIN });
+      assert.deepEqual(two.outcome === "holding" ? [two.projectId, two.holding] : two, [p, 2]);
+      // Both let go: a repeat of the first request (its branch has no work now) takes q under its own command for that branch.
+      await r.leaseOps.release(ivy, { commandId: "r1", leaseId: first.lease.leaseId, fence: first.lease.fence });
+      await r.leaseOps.release(ivy, { commandId: "r2", leaseId: direct.leaseId, fence: direct.fence });
+      const repeat = await r.pool.next(ivy, { commandId: "t1", ttlMs: 7 * MIN });
+      assert.deepEqual(repeat.outcome === "taken" ? [repeat.projectId, repeat.taskId, repeat.lease.fence] : repeat, [q, tq, 2]);
+    } finally { await r.close(); }
+  });
+
   test(`${backend.name}: race: integrators asking at the same moment never share a branch and none holds two (card P10b)`, async () => {
     const r = await rig();
     try {
