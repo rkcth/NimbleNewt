@@ -13,6 +13,7 @@ import type { Change, ControllerStorage, JsonObject } from "../storage/types.js"
 import { readApprovalReliance, readReviewCite, relianceBasis, shapeReviewCite } from "./review-citation.js";
 import { dependencyChangesNow, dependencyChangeText, readDependencyBasis } from "./dependency-basis.js";
 import { approvalOutdated, type ApprovalBasis } from "./approval-standing.js";
+import { CONTRIBUTOR_APPROVAL_TEXT, CONTRIBUTORS, contributorChange, principalOf, taskContributors } from "./contributors.js";
 
 export const SUBMISSION_KINDS = ["code", "review", "qa", "document", "signoff"] as const;
 export type SubmissionKind = (typeof SUBMISSION_KINDS)[number];
@@ -483,6 +484,14 @@ export class SubmissionService {
           citeChecks = [...read.changes];
           body = { ...body, decisionVersions: read.versions };
         }
+        // Card Q04: an agent that contributed code to the task (any version of it, or holds it now) cannot approve it, as the author of the version cannot. Checked here, after the runner looked for a repeat, so a
+        // repeat of an approval recorded before still answers with that record. The task's contributor record is checked by the write, so a code submission of the reviewer at the same moment builds this again.
+        let contributorCheck: Change[] = [];
+        if (kind === "review" && asked.verdict === "approve" && subject?.kind === "code") {
+          if ((await taskContributors(this.#runner, task.projectId, taskId, [subject.submittedBy])).has(principalOf(by.id))) throw new DomainError("forbidden", CONTRIBUTOR_APPROVAL_TEXT);
+          const record = await this.#runner.get(CONTRIBUTORS, taskId);
+          if (record !== undefined) contributorCheck = [{ type: "check", ref: { kind: CONTRIBUTORS, id: taskId }, expectedRevision: record.revision }];
+        }
         if (kind === "review" && asked.verdict === "approve") {
           const named = asked.criteriaRevision === undefined ? undefined : asked.decisions ?? [];
           const relied = await readApprovalReliance(this.#runner, taskId, named);
@@ -503,7 +512,7 @@ export class SubmissionService {
           body = { ...body, judgedAgainst: { criteriaRevision, decisions: relied.relied, dependencies: deps.snapshot } };
         }
         const ref = { kind: "submission", id };
-        return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }, ...citeChecks, ...(await this.#verdictChange(id, body)), ...(await this.#lineageChange(id, body)), ...(await this.#signoffChange(id, body)), ...(await this.#docIndexChange(id, body)), ...(await this.#codeIndexChange(id, body)), ...guards.map((g) => ({ type: "check" as const, ref: { kind: g.kind, id: g.id }, expectedRevision: g.revision }))], detail: { taskId, kind, role }, contention: async () => (await this.#guarded(guards)) ?? await this.#contention(id, body) };
+        return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }, ...citeChecks, ...(await this.#verdictChange(id, body)), ...(await this.#lineageChange(id, body)), ...(await this.#signoffChange(id, body)), ...(await this.#docIndexChange(id, body)), ...(await this.#codeIndexChange(id, body)), ...(await this.#contributorChange(body)), ...contributorCheck, ...guards.map((g) => ({ type: "check" as const, ref: { kind: g.kind, id: g.id }, expectedRevision: g.revision }))], detail: { taskId, kind, role }, contention: async () => (await this.#guarded(guards)) ?? await this.#contention(id, body) };
       },
     }));
     if (this.#onRecorded !== undefined) { try { await this.#onRecorded({ submissionId: result.id, taskId, kind, role, submittedBy: by.id, ...(body.verdict === undefined ? {} : { verdict: body.verdict }), ...(body.decision === undefined ? {} : { decision: body.decision }) }); } catch { /* the record of a step never changes what happened */ } }
@@ -646,6 +655,31 @@ export class SubmissionService {
       out.push({ submissionId: other, base: b.base, tree: b.tree, submittedBy: b.submittedBy });
     }
     return out;
+  }
+
+  /**
+   * A code submission adds its submitter to its task's contributor record in the same write (card Q04, `contributors.ts`). A task with code from before the record existed is seeded first: from the project's code index
+   * when it covers every code submission of the project, otherwise from one bounded scan of the submission table (the same bound as the code index's own seed), complete only when that scan reached the end.
+   */
+  async #contributorChange(body: SubmissionBody): Promise<Change[]> {
+    if (body.kind !== "code" || body.tree === undefined) return [];
+    return contributorChange(this.#runner, body.taskId, body.submittedBy, async () => {
+      const index = await this.#readCodeIndex(body.projectId);
+      if (index?.body.complete === true) return { ids: index.body.entries.filter((e) => e.taskId === body.taskId).map((e) => e.by), complete: true };
+      const ids = new Set(index?.body.entries.filter((e) => e.taskId === body.taskId).map((e) => e.by) ?? []);
+      let after: string | undefined;
+      const { pageSize, reads } = this.#waitingScan;
+      for (let read = 0; read < reads; read++) {
+        const chunk = await this.#runner.list("submission", { ...(after === undefined ? {} : { afterId: after }), limit: pageSize });
+        for (const row of chunk) {
+          after = row.id;
+          const b = row.body as unknown as SubmissionBody;
+          if (b.taskId === body.taskId && b.kind === "code" && b.tree !== undefined) ids.add(b.submittedBy);
+        }
+        if (chunk.length < pageSize) return { ids: [...ids], complete: true };
+      }
+      return { ids: [...ids], complete: false };
+    });
   }
 
   /** A document submission is added to its project's index in the same write (card Q03b); the oldest entries beyond `DOC_INDEX_KEPT` drop off. */
@@ -839,6 +873,11 @@ export class SubmissionService {
     const lastSignoff = signoffs[signoffs.length - 1];
     const base = { submissionId, ...(carriedFrom === undefined ? {} : { carriedFrom }), taskId: found.taskId, projectId: found.projectId, base: found.base, tree: found.tree, ...(found.patchId === undefined ? {} : { patchId: found.patchId }), submittedBy: found.submittedBy, submittedAt: found.submittedAt, ...(Array.isArray(found.evidence) && found.evidence.length > 0 ? { evidence: found.evidence } : {}), ...(lastSignoff === undefined ? {} : { director: { newest: lastSignoff.decision, by: lastSignoff.by, signoffId: lastSignoff.id } }) };
     if (newest !== undefined && ownCarried && newest.verdict === "approve") return { ...base, approved: false, reason: `the approval that would carry over from ${carriedFrom} was given by this submission's own submitter; another reviewer has to approve it` };
+    // Card Q04: an approval by an agent that contributed code to the task (any version, or holds it now) does not count, read now from the task's current contributors (so an approval recorded before this rule, or
+    // by an agent that contributed after it approved, does not count either). It reads as waiting for review: another reviewer has to approve it.
+    if (newest !== undefined && newest.verdict === "approve" && (await taskContributors(this.#runner, found.projectId, found.taskId, [found.submittedBy])).has(principalOf(newest.by))) {
+      return { ...base, approved: false, reason: `the approval by ${newest.by} does not count: ${CONTRIBUTOR_APPROVAL_TEXT}` };
+    }
     // Card Q02: an approval given before a decision the task relies on, or the task's criteria, changed no longer counts (read here, so every reader of approvals sees it); a new review restores it.
     if (newest !== undefined && newest.verdict === "approve") {
       const because = await approvalOutdated(this.#runner, found.taskId, newest);

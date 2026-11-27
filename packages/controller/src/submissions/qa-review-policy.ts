@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
-import { assignmentIdOf } from "../domain/assignment-model.js";
 import { projectId as checkProjectId, taskId as checkTaskId, type TaskBody } from "../domain/model.js";
 import { CommandRunner, type Built, type RunnerOptions } from "../domain/runner.js";
 import { text } from "../domain/model.js";
@@ -12,6 +11,7 @@ import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { NewestCode, QaEvidenceBody, QaEvidenceService } from "./qa-evidence.js";
+import { principalOf, taskContributors } from "./contributors.js";
 
 /**
  * The review policy of a project (card Q02): which tasks need independent QA, when a review starts by itself, which checks it must cover beyond the task contract's, whether passing independent review gates
@@ -126,7 +126,6 @@ export interface QaReviewSweepResult { readonly projects: number; readonly creat
 /** The project's required landing checks with the ones its review policy adds for the task, in the order the checks are listed everywhere (a repeat is dropped). Pure. */
 export const withPolicyChecks = (base: readonly Check[], extra: readonly Check[]): readonly Check[] => (extra.length === 0 ? base : CHECKS.filter((c) => base.includes(c) || extra.includes(c)));
 
-const principalOf = (id: string): string => (id.startsWith("agent:") ? id : `agent:${id}`);
 
 /** Whether a task is in the policy's scope. Pure. */
 export function inPolicyScope(policy: Pick<QaReviewPolicyBody, "scope">, taskId: string, workClass: "P" | "PC"): boolean {
@@ -457,7 +456,7 @@ export class QaReviewService {
       if (info === undefined) continue;
       let current = r;
       if (r.assignee === undefined || !(await this.#stillEligible(r, info, reviewers))) {
-        const pick = await this.#pick(r.taskId, info, load, reviewers, r.approvedBy);
+        const pick = await this.#pick(projectId, r.taskId, info, load, reviewers, r.approvedBy);
         // An assignee that cannot review any more (it holds the task now, or left the reviewers) is replaced by the next eligible one, or leaves the request waiting with the owner told.
         if (pick !== r.assignee) { current = await this.#assign(r, pick, now); if (pick !== undefined) { load.set(pick, (load.get(pick) ?? 0) + 1); out.assigned++; } open.set(r.id, current); }
       }
@@ -517,7 +516,7 @@ export class QaReviewService {
       const id = w.trigger === "reapproval" ? await this.#episode(projectId, w.taskId, info.submissionId, w.cause) : `qrr-${hex(projectId, w.taskId, info.submissionId, w.trigger, w.cause)}`;
       if (id === undefined || (await this.#runner.get(REQUEST, id)) !== undefined) continue;
       if (w.trigger === "gate" && (await this.#independentEvidence({ projectId, taskId: w.taskId, submissionId: info.submissionId, createdAt: "" }, info)) !== undefined) continue;
-      const assignee = await this.#pick(w.taskId, info, load, reviewers, w.approvedBy);
+      const assignee = await this.#pick(projectId, w.taskId, info, load, reviewers, w.approvedBy);
       const body: QaReviewRequestBody = { projectId, taskId: w.taskId, submissionId: info.submissionId, tree: info.tree, trigger: w.trigger, cause: w.cause, ...(w.approval === undefined ? {} : { approval: w.approval }), ...(w.reason === undefined ? {} : { reason: w.reason }), ...(w.approvedBy === undefined ? {} : { approvedBy: w.approvedBy }), ...(assignee === undefined ? {} : { assignee, assignedAt: now }), state: "open", createdAt: now };
       if (!(await this.#create(id, body))) continue;
       made++; out.created++; owed.add(info.submissionId);
@@ -565,9 +564,8 @@ export class QaReviewService {
   }
 
   /** Eligible reviewers for a task, least loaded first (`prefer`, the reviewer whose approval stopped counting, first when still eligible): never the submitters of its code, never the agent that holds it now. */
-  async #pick(taskId: string, info: { submittedBy: string; contributors: readonly string[] }, load: ReadonlyMap<string, number>, reviewers: (worker: string) => Promise<readonly string[]>, prefer?: string): Promise<string | undefined> {
-    const assignment = (await this.#runner.get("assignment", assignmentIdOf(taskId)))?.body as { owner?: { id?: string } } | undefined;
-    const excluded = new Set([...info.contributors, info.submittedBy, ...(assignment?.owner?.id === undefined ? [] : [principalOf(assignment.owner.id)])].map(principalOf));
+  async #pick(projectId: string, taskId: string, info: { submittedBy: string; contributors: readonly string[] }, load: ReadonlyMap<string, number>, reviewers: (worker: string) => Promise<readonly string[]>, prefer?: string): Promise<string | undefined> {
+    const excluded = await taskContributors(this.#runner, projectId, taskId, [...info.contributors, info.submittedBy]);
     const pool = (await reviewers(info.submittedBy)).filter((r) => !excluded.has(principalOf(r)));
     pool.sort((a, b) => (load.get(a) ?? 0) - (load.get(b) ?? 0) || (a < b ? -1 : a > b ? 1 : 0));
     return prefer !== undefined && pool.includes(prefer) ? prefer : pool[0];
@@ -576,23 +574,21 @@ export class QaReviewService {
   async #stillEligible(r: QaReviewRequestBody, info: { submittedBy: string; contributors: readonly string[] }, reviewers: (worker: string) => Promise<readonly string[]>): Promise<boolean> {
     if (r.assignee === undefined) return false;
     const pool = await reviewers(info.submittedBy);
-    const assignment = (await this.#runner.get("assignment", assignmentIdOf(r.taskId)))?.body as { owner?: { id?: string } } | undefined;
-    const excluded = new Set([...info.contributors, ...(assignment?.owner?.id === undefined ? [] : [assignment.owner.id])].map(principalOf));
+    const excluded = await taskContributors(this.#runner, r.projectId, r.taskId, [...info.contributors, info.submittedBy]);
     return pool.includes(r.assignee) && !excluded.has(principalOf(r.assignee));
   }
 
   /**
-   * Independent QA evidence recorded on the request's submission after the request was made, by someone who did not work on the task (not a submitter of its code, not the agent that holds it now): its ID. Evidence
-   * by another contributor counts for the QA gate as it always did, but it is not the independent review the policy asked for, so the request stays open for its reviewer.
+   * Independent QA evidence recorded on the request's submission after the request was made, by someone who did not work on the task (not a submitter of its code, not the agent that holds it now: the one
+   * definition of `contributors.ts`, card Q04): its ID. Evidence by a contributor does not count for the QA gate either (card Q04), so it never settles the request.
    */
   async #independentEvidence(r: Pick<QaReviewRequestBody, "projectId" | "taskId" | "submissionId" | "createdAt">, info: { submittedBy: string; contributors: readonly string[] } | undefined): Promise<string | undefined> {
     const ids = ((await this.#runner.get("qa-evidence-index", r.taskId))?.body as unknown as { ids?: string[] } | undefined)?.ids ?? [];
-    const assignment = (await this.#runner.get("assignment", assignmentIdOf(r.taskId)))?.body as { owner?: { id?: string } } | undefined;
     const submitter = ((await this.#runner.get("submission", r.submissionId))?.body as { submittedBy?: string } | undefined)?.submittedBy;
-    const excluded = new Set([...(info?.contributors ?? []), ...(info === undefined ? [] : [info.submittedBy]), ...(submitter === undefined ? [] : [submitter]), ...(assignment?.owner?.id === undefined ? [] : [assignment.owner.id])].map(principalOf));
+    const excluded = await taskContributors(this.#runner, r.projectId, r.taskId, [...(info?.contributors ?? []), ...(info === undefined ? [] : [info.submittedBy]), ...(submitter === undefined ? [] : [submitter])]);
     for (const id of [...ids].reverse().slice(0, 100)) {
       const e = (await this.#runner.get("qa-evidence", id))?.body as unknown as QaEvidenceBody | undefined;
-      if (e !== undefined && e.submissionId === r.submissionId && e.source === "independent" && e.recordedAt >= r.createdAt && !excluded.has(e.recordedBy)) return id;
+      if (e !== undefined && e.submissionId === r.submissionId && e.source === "independent" && e.recordedAt >= r.createdAt && !excluded.has(principalOf(e.recordedBy))) return id;
     }
     return undefined;
   }

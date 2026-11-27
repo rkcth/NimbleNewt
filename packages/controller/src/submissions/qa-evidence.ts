@@ -12,6 +12,7 @@ import type { Change, ControllerStorage, JsonObject } from "../storage/types.js"
 import { CONTRACT_WORK_FIELDS } from "./acceptance.js";
 import type { RolesOf, SubmissionBody } from "./submissions.js";
 import { overriddenFor } from "./review-citation.js";
+import { principalOf, taskContributors } from "./contributors.js";
 import { dependencyChanges, dependencyChangesNow, dependencyChangeText, readDependencyBasis, type DependencyChange, type DependencyMemo } from "./dependency-basis.js";
 
 /** The four results a QA check can have (card Q02). They are kept apart: only `passed` passes; `failed`, `blocked` (could not be run: an environment or a dependency was missing) and `not-run` each fail the gate and are counted separately. */
@@ -36,7 +37,10 @@ export interface QaEvidenceBody {
   /** The code submission checked, and the tree it names: the exact version the checks ran on. */
   readonly submissionId: string;
   readonly tree: string;
-  /** `self` when the author of the submission recorded it (a self-check: kept, never counted by the gate); `independent` for the owner or a qa or reviewer agent that did not submit the work. */
+  /**
+   * `self` when the author of the submission, or another contributor of the task (card Q04: an agent that submitted any version of the task's code, or holds the task now), recorded it (a self-check: kept,
+   * never counted by the gate); `independent` for the owner or a qa or reviewer agent that did not contribute. Kept as recorded; the gate also leaves out "independent" evidence of an agent that is a contributor when the gate is read.
+   */
   readonly source: "self" | "independent";
   /** The task contract version (acceptance criteria, required evidence, checks) in force when it was recorded. */
   readonly criteriaRevision: number;
@@ -111,6 +115,11 @@ export interface QaGate {
   /** How many independent original sources each required check needs (the project's review policy; 1 without one), and the checks that passed but have fewer (reason `fewer_sources`). */
   readonly sourcesNeeded?: number;
   readonly shortfalls?: readonly { readonly check: string; readonly sources: number }[];
+  /**
+   * Card Q04: evidence on this submission recorded as independent by an agent that contributed code to the task (submitted any version of it, or holds it now), read at the time of the gate. It is not counted:
+   * a contributor cannot pass its own fix. Absent when there is none.
+   */
+  readonly byContributors?: readonly string[];
 }
 
 /** Each task's newest code submission in a project, newest first, with everyone that submitted code on the task (`QaEvidenceService.newestCode`). */
@@ -359,7 +368,8 @@ export class QaEvidenceService {
         }
         if (task.state === "cancelled") throw new DomainError("invalid_command", "the task is cancelled");
         if (ms > Date.parse(this.#runner.now()) + QA_LIMITS.skewMs) bad("observedAt", "is in the future");
-        const self = by.id === sub.submittedBy;
+        // Card Q04: an agent that contributed code to the task (submitted any version of it, or holds it now; `contributors.ts`) records a self-check, never independent evidence: it cannot pass its own fix.
+        const self = by.id === sub.submittedBy || (by.kind === "agent" && (await taskContributors(this.#runner, task.projectId, taskId, [sub.submittedBy])).has(principalOf(by.id)));
         if (by.kind === "agent" && !self) {
           const roles = await this.#ports.rolesOf(by.id, { projectId: task.projectId, taskId }, by);
           if (!CHECKERS.some((r) => roles.includes(r))) throw new DomainError("forbidden", `${by.id} holds neither the qa nor the reviewer role in this project`);
@@ -910,7 +920,7 @@ export class QaEvidenceService {
   }
 
   /**
-   * Whether the independent QA evidence for one code submission passes, read only. Only current evidence that still holds counts: a self-check never does. Every required check needs a `passed`
+   * Whether the independent QA evidence for one code submission passes, read only. Only current evidence that still holds counts: a self-check never does, nor evidence by an agent that contributed code to the task (card Q04, read when the gate is read). Every required check needs a `passed`
    * result in the newest such record that names it; failed, blocked, not-run and missing are each counted and each fail. With no required checks, every check named in any such record is judged so,
    * and so is every check named by independent evidence that no longer holds and whose re-check is not done (it is `missing` until a re-check names it again); no record at all fails. A task relying on a superseded decision fails whatever the evidence says.
    */
@@ -937,6 +947,9 @@ export class QaEvidenceService {
     // Card Q02 (amended 2026-10-28): evidence carries over to a later submission only by an unchanged patch ID; only evidence that is current and still holds carries (stale evidence of an earlier submission is not this one's).
     const carriedSubs = new Set(await this.#ports.carriedFrom?.(submissionId) ?? []);
     const carriedUsed = new Set<string>();
+    // Card Q04: who contributed to the task, read now (`contributors.ts`): independent evidence recorded by one of them (before the rule existed, or by an agent that contributed after it recorded) is not counted.
+    const contributors = await taskContributors(this.#runner, task.projectId, taskId, [sub.submittedBy]);
+    const byContributors: string[] = [];
     const usable: (QaEvidenceBody & { id: string })[] = [];
     const stale: { id: string; reasons: QaStaleReason[] }[] = [];
     for (const id of index.body.ids) {
@@ -945,6 +958,8 @@ export class QaEvidenceService {
       if (found === undefined || e === undefined || (e.submissionId !== submissionId && !carriedSubs.has(e.submissionId)) || e.source !== "independent") continue;
       // Evidence carried from an earlier copy that this submission's own submitter recorded is a self-check of this submission (card Q02 review): it never counts here.
       if (e.submissionId !== submissionId && e.recordedBy === sub.submittedBy) continue;
+      // Card Q04: evidence by a contributor of the task is its own check, whatever it was recorded as: never counted, and its staleness is not this gate's (it is listed apart, for the reader).
+      if (contributors.has(principalOf(e.recordedBy))) { if (e.submissionId === submissionId) byContributors.push(id); continue; }
       reads.push({ kind: "qa-evidence", id, revision: found.revision });
       const own = e.submissionId === submissionId;
       if (e.state !== "current") { if (own) stale.push({ id, reasons: [...(e.reasons ?? [])] }); continue; }
@@ -1008,7 +1023,7 @@ export class QaEvidenceService {
     const decisions: QaDecisionRef[] = (reliance?.links ?? []).filter((l) => l.state === "current").map((l) => ({ id: l.decisionId, version: l.version, topic: l.topic }));
     const seen = new Set<string>();
     const bound = reads.filter((r) => { const k = `${r.kind}\u0000${r.id}`; if (seen.has(k)) return false; seen.add(k); return true; });
-    return { gate: { taskId, submissionId, tree: sub.tree, verdict: reasons.size === 0 && checks.length > 0 ? "passed" : "failed", reasons: [...reasons], criteriaRevision: contract.version, decisions, required, checks, counts, stale, pendingRechecks: pending, ...(needed > 1 ? { sourcesNeeded: needed, shortfalls } : {}), ...(carriedUsed.size > 0 ? { carriedFrom: [...carriedUsed].sort() } : {}) }, reads: bound };
+    return { gate: { taskId, submissionId, tree: sub.tree, verdict: reasons.size === 0 && checks.length > 0 ? "passed" : "failed", reasons: [...reasons], criteriaRevision: contract.version, decisions, required, checks, counts, stale, pendingRechecks: pending, ...(needed > 1 ? { sourcesNeeded: needed, shortfalls } : {}), ...(carriedUsed.size > 0 ? { carriedFrom: [...carriedUsed].sort() } : {}), ...(byContributors.length > 0 ? { byContributors } : {}) }, reads: bound };
   }
 }
 

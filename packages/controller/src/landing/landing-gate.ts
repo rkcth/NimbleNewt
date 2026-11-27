@@ -88,7 +88,7 @@ export interface ContractTests {
   readonly onlyAuthors?: boolean;
 }
 /** The QA gate of a code submission as the landing gate needs it (`QaEvidenceService.gate`). */
-export interface QaGateView { readonly taskId: string; readonly submissionId: string; readonly tree: string; readonly verdict: "passed" | "failed"; readonly reasons: readonly string[]; /** Earlier same-patch submissions whose evidence counted (card Q02). */ readonly carriedFrom?: readonly string[]; readonly counts?: { readonly passed: number; readonly failed: number; readonly blocked: number; readonly notRun: number; readonly missing: number } }
+export interface QaGateView { readonly taskId: string; readonly submissionId: string; readonly tree: string; readonly verdict: "passed" | "failed"; readonly reasons: readonly string[]; /** Earlier same-patch submissions whose evidence counted (card Q02). */ readonly carriedFrom?: readonly string[]; /** Evidence left out because an agent that contributed code to the task recorded it (card Q04). */ readonly byContributors?: readonly string[]; readonly counts?: { readonly passed: number; readonly failed: number; readonly blocked: number; readonly notRun: number; readonly missing: number } }
 /** The documents gate of a code submission as the landing gate needs it (`DocObligationService.landing`): the documents describing the task that are not verified against that code. */
 export interface DocsGateView { readonly taskId: string; readonly submissionId: string; readonly tree: string; readonly checked: number; readonly pending: readonly { readonly obligationId: string; readonly title: string; readonly reason: string }[] }
 /** The director sign-off of a code submission as the landing gate needs it (`landingDirectorGate`): the newest sign-off on that submission, when there is one. */
@@ -280,7 +280,9 @@ export class LandingGate {
       const reasons = g.reasons.join(", ") || "no reason given";
       // No independent evidence at all is not run; the contract's required checks are then each `missing` too (`check_missing`), which says the same. Anything else failed.
       const none = g.reasons.includes("no_evidence") && g.reasons.every((r) => r === "no_evidence" || r === "check_missing");
-      return no(none ? "not_run" : "fail",`the QA gate of ${call.submissionId} (tree ${g.tree.slice(0, 12)}) did not pass: ${reasons}`);
+      // Card Q04: evidence the gate left out because its recorder contributed code to the task is said in plain words, so the author is not told only "no evidence" while evidence exists.
+      const left = Array.isArray(g.byContributors) && g.byContributors.length > 0 ? `; evidence from an agent that contributed code to this task does not count (another QA agent has to check it)` : "";
+      return no(none ? "not_run" : "fail",`the QA gate of ${call.submissionId} (tree ${g.tree.slice(0, 12)}) did not pass: ${reasons}${left}`);
     }
     // Evidence is bound to the submission's tree; it counts for the integrated tree only while the patch is the one the host computes from that base and tree.
     const computed = typeof report.reviewedPatchId === "string" && PATCH.test(report.reviewedPatchId) && a.base === before.base && a.tree === before.tree ? report.reviewedPatchId : undefined;
