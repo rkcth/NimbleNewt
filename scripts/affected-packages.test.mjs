@@ -27,7 +27,7 @@ test("a change outside the packages selects everything, documentation alone sele
 });
 
 test("files only the root checks look at select no package; the ones a package's tests run or read still select every package", () => {
-  for (const f of ["scripts/windows-appcontainer-experiment.test.mjs", "scripts/affected-packages.test.mjs", "scripts/test-shard.mjs", "scripts/ci-annotate.mjs", "scripts/y02-checkpoint.mjs", "scripts/wsb-list-line.mjs", "CONTRIBUTING.md", "SECURITY.md", ".github/workflows/exhaustive.yml", ".github/workflows/windows-appcontainer-experiment.yml"]) assert.deepEqual(affected([f], graph), [], f);
+  for (const f of ["scripts/windows-appcontainer-experiment.test.mjs", "scripts/affected-packages.test.mjs", "scripts/test-shard.mjs", "scripts/ci-annotate.mjs", "scripts/y02-checkpoint.mjs", "scripts/seatbelt-diagnose.mjs", "CONTRIBUTING.md", "SECURITY.md", ".github/workflows/exhaustive.yml", ".github/workflows/windows-appcontainer-experiment.yml"]) assert.deepEqual(affected([f], graph), [], f);
   // what run-package-tests.mjs, the offline guard, the stores' hosts and the launcher scripts use, and the weights that decide the shards, stay "everything"
   for (const f of ["scripts/run-package-tests.mjs", "scripts/test-changed.mjs", "scripts/affected-packages.mjs", "scripts/offline-guard.mjs", "scripts/shard.mjs", "scripts/slow-tests.json", "scripts/test-weights.json", "scripts/clean-dist.mjs", "scripts/safe-error.mjs", "scripts/local-host.mjs", "scripts/nimblenewt.mjs", "scripts/new-helper.mjs", "scripts/fixtures/x.json", "experiments/experiments.js", ".github/workflows/ci.yml", "prototypes/meeting/a.mjs"]) assert.equal(affected([f], graph), "all", f);
   // the experiment's own folder is read by the worker's contract test

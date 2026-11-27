@@ -24,7 +24,7 @@ const FIXED_SIDS = new Set(["S-1-0-0", "S-1-1-0", "S-1-2-0", "S-1-2-1", "S-1-3-0
  * Prefixes whose SIDs are derived from a fixed name (a built-in group, a service name, a package family or capability name, a mandatory label), never from a person: built-in
  * groups (S-1-5-32-), service SIDs (S-1-5-80-), app packages (S-1-15-2-), capabilities (S-1-15-3-), restricted services (S-1-5-99-), driver hosts (S-1-5-84-, S-1-5-90-,
  * S-1-5-96-), authentication packages (S-1-5-64-), integrity labels (S-1-16-) and process trust labels (S-1-19-<type>-<level>, for example S-1-19-512-8192, the label icacls
- * shows on the Store package of Windows Sandbox: a protection type and level, the same on every machine). Not virtual machines: only their group (S-1-5-83-0) is fixed; one machine's SID
+ * shows on Store packages: a protection type and level, the same on every machine). Not virtual machines: only their group (S-1-5-83-0) is fixed; one machine's SID
  * (S-1-5-83-1-...) is made from that machine's own random id, so it is redacted (`S-1-5-83-<vm>`).
  */
 const FIXED_PREFIXES = ["S-1-5-32-", "S-1-5-80-", "S-1-15-2-", "S-1-15-3-", "S-1-5-99-", "S-1-5-84-", "S-1-5-90-", "S-1-5-96-", "S-1-5-64-", "S-1-16-", "S-1-19-"];

@@ -2,8 +2,6 @@
 //   node scripts/containment-evidence.mjs run  --out DIR [--allow-unavailable]   run the suite here, write DIR/containment-<platform>.json
 //        --allow-unavailable: exit 0 when this Windows host has no sandbox capacity at all (an honest skip; ignored on Linux and macOS, for a CI cell such as a GitHub-hosted Windows runner where the
 //        native launcher is not installed). The report still records every case as not_run with the reason, and the gate still blocks on it. A run that had capacity is judged in full.
-//        --windows-summary FILE [--workdir-check FILE]: SUPERSEDED (Windows Sandbox era; the release gate refuses that block since card A03b). Fill the report's `windows` block from the real Windows Sandbox tests' summary.json (windows-real.test.ts) and the
-//        working-directory check (scripts/g05-workdir-check.mjs); what they cannot show stays false (packages/worker/src/sandbox/containment-windows-evidence.ts). Without it there is no block.
 //        --native-info FILE [--account-kind standard|administrator-filtered] [--symlink-right yes|no]: Windows, native launcher only (card A03b). Fill the report's `nativeWindows` block for the
 //        release gate from the launcher's `info` output FILE, the launcher NIMBLENEWT_WIN_LAUNCHER and its nn-launcher.record.json, this run's records under NIMBLENEWT_WIN_CONTROL_DIR\records, the
 //        NimbleNewtRun-* profiles left under %LOCALAPPDATA%\Packages, and the two facts run-g05.ps1 measured (packages/worker/src/sandbox/containment-windows-native-evidence.ts). What is missing
@@ -44,8 +42,8 @@ const flag = (name) => { const i = rest.indexOf(`--${name}`); return i >= 0 ? re
 
 if (command === "run") {
   const out = flag("out");
-  const usage = "usage: run --out DIR [--prebuilt] [--allow-unavailable] [--windows-summary FILE [--workdir-check FILE]] [--native-info FILE [--account-kind standard|administrator-filtered] [--symlink-right yes|no]] [--redact [--local DIR]]";
-  const valued = ["--out", "--windows-summary", "--workdir-check", "--local", "--native-info", "--account-kind", "--symlink-right"];
+  const usage = "usage: run --out DIR [--prebuilt] [--allow-unavailable] [--native-info FILE [--account-kind standard|administrator-filtered] [--symlink-right yes|no]] [--redact [--local DIR]]";
+  const valued = ["--out", "--local", "--native-info", "--account-kind", "--symlink-right"];
   for (let i = 0; i < rest.length; i++) {
     if (valued.includes(rest[i]) && rest[i + 1] !== undefined && !rest[i + 1].startsWith("--")) { i++; continue; }
     if (rest[i] === "--allow-unavailable" || rest[i] === "--redact" || rest[i] === "--prebuilt") continue;
@@ -53,9 +51,9 @@ if (command === "run") {
   }
   const accountKind = flag("account-kind");
   const symlinkRight = flag("symlink-right");
-  if (out === undefined || (flag("workdir-check") !== undefined && flag("windows-summary") === undefined) || (flag("local") !== undefined && !rest.includes("--redact"))
+  if (out === undefined || (flag("local") !== undefined && !rest.includes("--redact"))
     || (accountKind !== undefined && accountKind !== "standard" && accountKind !== "administrator-filtered") || (symlinkRight !== undefined && symlinkRight !== "yes" && symlinkRight !== "no")
-    || ((accountKind !== undefined || symlinkRight !== undefined) && flag("native-info") === undefined) || (flag("native-info") !== undefined && flag("windows-summary") !== undefined)) { console.error(usage); process.exit(2); }
+    || ((accountKind !== undefined || symlinkRight !== undefined) && flag("native-info") === undefined)) { console.error(usage); process.exit(2); }
   // Windows: the account signed in at the console, only so redaction can hide its name too (card A03b: the native launcher runs as this signed-in account; nothing here is Windows Sandbox).
   const consoleUser = await worker.windowsConsoleUser();
   const since = new Date();
@@ -76,26 +74,13 @@ if (command === "run") {
       else { report = made.report; for (const n of made.notProven) console.log(`  nativeWindows block: not proven: ${n}`); }
     }
   }
-  const summaryFile = flag("windows-summary");
-  if (summaryFile !== undefined) {
-    const read = (f) => { try { return readFileSync(resolve(f), "utf8"); } catch { return undefined; } };
-    const summaryRaw = read(summaryFile);
-    const workdirRaw = flag("workdir-check") === undefined ? undefined : read(flag("workdir-check"));
-    if (summaryRaw === undefined) console.log("  the Windows Sandbox summary could not be read: no windows block (the gate blocks on it)");
-    else if (flag("workdir-check") !== undefined && workdirRaw === undefined) console.log("  the working-directory check output could not be read: no windows block (the gate blocks on it)");
-    else {
-      const made = worker.attachWindowsEvidence(report, { summaryRaw, ...(workdirRaw === undefined ? {} : { workdirRaw }), session: worker.sessionFromEnvironment(process.env) });
-      if ("error" in made) console.log(`  no windows block: ${made.error}`);
-      else { report = made.report; for (const n of made.notProven) console.log(`  windows block: not proven: ${n}`); }
-    }
-  }
   mkdirSync(resolve(out), { recursive: true });
   const file = join(resolve(out), `containment-${report.platform}.json`);
   const redact = rest.includes("--redact");
   // With --redact, what is printed is the redacted report too: a job log or summary is as public as the artifact.
-  // On Windows the account at the console (and a configured owner or share account) is often not the account this runs as, so it is not among the names redaction knows by
-  // itself: look it up and hide it too. A failed lookup leaves the general rules (any `<machine>\account`, home folders, SIDs).
-  const names = { users: [process.env["NIMBLENEWT_WSB_OWNER"], process.env["NIMBLENEWT_WSB_SHARE_IDENTITY"]].filter((n) => typeof n === "string" && n.length >= 2) };
+  // On Windows the account at the console may not be the account this runs as, so it is not among the names redaction knows by itself: look it up and hide it too.
+  // A failed lookup leaves the general rules (any `<machine>\account`, home folders, SIDs).
+  const names = { users: [] };
   if (redact && consoleUser !== undefined) names.users.push(consoleUser);
   const shown = redact ? worker.redactReport(report, names) : report;
   if (redact) {

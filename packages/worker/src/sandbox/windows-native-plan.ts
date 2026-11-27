@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { win32 } from "node:path";
 import { SandboxError } from "./errors.js";
 import type { NormalizedRecipe } from "./recipe.js";
-import { checkWindowsHostPath, foldWin, isWindowsDeviceName, overlapsWin } from "./windows-plan.js";
+import { checkWindowsHostPath, foldWin, isWindowsDeviceName, overlapsWin } from "./windows-paths.js";
 
 /*
  * Card A03b, the native Windows launcher: everything about how one launch becomes a launcher command line, with no operating-system call in it (so it runs, and is tested, on any OS).

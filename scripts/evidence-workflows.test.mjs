@@ -33,24 +33,23 @@ test("own-hardware: the Windows evidence job runs only by hand from main, every 
   const on = text.slice(text.indexOf("\non:\n") + 5, text.indexOf("\npermissions:"));
   assert.match(on, /^ {2}workflow_dispatch:\n {4}inputs:\n {6}g05_owner_bundle:\n {8}description: "[^"\n]+"\n {8}type: boolean\n {8}default: false\n$/, "started by hand only, with one boolean input that defaults to false");
   assert.doesNotMatch(text, /^ {2}(push|pull_request|pull_request_target):/m);
-  const j = job(text, "sandbox-windows");
+  const j = job(text, "windows-evidence");
   assert.match(j, /if: github\.repository == 'rkcth\/NimbleNewt' && github\.ref == 'refs\/heads\/main'/);
   assert.match(j, /runs-on: \[self-hosted, nimblenewt-windows\]/);
-  const ids = ["fs", "wsb", "wd", "g05", "g06", "y02", "cleanup"];
+  const ids = ["fs", "g06", "y02"];
   for (const id of ids) assert.match(step(j, id), /\n {8}continue-on-error: true\n/, id);
-  // Every evidence step has its own timeout, so a stuck one ends as a failure and the cleanup, outcome and upload steps still run inside the job's limit.
+  // Every evidence step has its own timeout, so a stuck one ends as a failure and the outcome and upload steps still run inside the job's limit.
   for (const id of ids) assert.match(step(j, id), /\n {8}timeout-minutes: \d+\n/, id);
-  // ... and the job's own limit is above their sum with room for set-up and uploads (30 minutes), so a job timeout cannot cut off the cleanup or the outcome step.
+  // ... and the job's own limit is above their sum with room for set-up and uploads (30 minutes), so a job timeout cannot cut off the outcome step.
   const stepSum = ids.reduce((sum, id) => sum + Number(/\n {8}timeout-minutes: (\d+)\n/.exec(step(j, id))[1]), 0);
   assert.ok(Number(/\n {4}timeout-minutes: (\d+)\n/.exec(j)[1]) >= stepSum + 30, `job limit below ${stepSum + 30}`);
-  // The leftovers of a step stopped by its timeout are released whatever happened before.
-  assert.match(step(j, "cleanup"), /\n {8}if: always\(\)\n/);
-  assert.match(step(j, "cleanup"), /node scripts\/wsb-cleanup\.mjs --local "\$RUNNER_TEMP\/g05-local"/);
-  assert.ok(j.indexOf("id: cleanup") > j.indexOf("id: y02") && j.indexOf("id: cleanup") < j.indexOf("Job summary and outcome"));
   const outcome = j.slice(j.indexOf("- name: Job summary and outcome"));
   assert.match(outcome, /if: always\(\)/);
   for (const id of ids) assert.match(outcome, new RegExp(`\\$\\{\\{ steps\\.${id}\\.outcome \\}\\}`), id);
   assert.match(outcome, /if \[ "\$o" != "success" \]; then .*exit 1; fi/);
+  // The Windows Sandbox steps (owner decision 2026-11-26: AppContainer, no Windows Sandbox) are gone, with every wsb diagnostic, from the whole workflow.
+  for (const gone of ["wsbctx", "wsblist", "wsb", "wd", "g05", "cleanup"]) assert.ok(!j.includes(`\n        id: ${gone}\n`), gone);
+  assert.doesNotMatch(text, /wsb-(cleanup|job-context|launch-variants|list-line)\.mjs|windows-real\.test|NIMBLENEWT_WSB_|NIMBLENEWT_REAL_WINDOWS_SANDBOX|--windows-summary|--workdir-check/);
   // The Git Bash fix stays the first thing after the checkout (run 44453704944).
   assert.ok(j.indexOf("Use Git Bash for bash steps") < j.indexOf("id: fs"));
 });
@@ -61,11 +60,11 @@ test("own-hardware: the probe job (one run of the whole suite on each own machin
   // A Windows run takes about twice the Mac's 21 minutes and one was cancelled at 60 (CI, 2026-11-19).
   assert.equal(Number(/\n {4}timeout-minutes: (\d+)\n/.exec(probe)?.[1]), 150);
   assert.match(probe, /label: \[nimblenewt-mac, nimblenewt-windows\]/);
-  assert.equal(Number(/\n {4}timeout-minutes: (\d+)\n/.exec(job(text, "sandbox-windows"))?.[1]), 480);
+  assert.equal(Number(/\n {4}timeout-minutes: (\d+)\n/.exec(job(text, "windows-evidence"))?.[1]), 240);
 });
 
 test("own-hardware: the outcome step, run as bash runs it on the runner, passes only when every evidence step succeeded", { skip: process.platform === "win32" ? "runs the step with a POSIX bash" : false }, () => {
-  const j = job(read("own-hardware.yml"), "sandbox-windows");
+  const j = job(read("own-hardware.yml"), "windows-evidence");
   const from = j.indexOf("- name: Job summary and outcome");
   const block = j.slice(from, j.indexOf("\n      - ", from + 1));
   const lines = block.slice(block.indexOf("        run: |\n") + "        run: |\n".length).split("\n");
@@ -82,55 +81,45 @@ test("own-hardware: the outcome step, run as bash runs it on the runner, passes 
       const r = spawnSync("bash", ["--noprofile", "--norc", "-eo", "pipefail", "-c", script], { cwd: root, encoding: "utf8", env: { PATH: process.env.PATH, RUNNER_TEMP: dir, GITHUB_STEP_SUMMARY: summary, COMPUTERNAME: "MYPC", ...outcomes } });
       return { status: r.status, summary: readFileSync(summary, "utf8") };
     };
-    const ids = ["FS", "WSB", "WD", "G05", "G06", "Y02", "CLEAN"];
+    const ids = ["FS", "G06", "Y02"];
     const all = Object.fromEntries(ids.map((k) => [k, "success"]));
-    const ok = run(all, { "y02-wsb-local/y02.log": "sandbox-escape-refused: pass (50/50)\n" });
+    const ok = run(all, { "y02-local/y02.log": "sandbox-escape-refused: pass (50/50)\n" });
     assert.equal(ok.status, 0, ok.summary);
     assert.match(ok.summary, /\| Y02 scenarios \| success \|/);
     for (const k of ids) for (const bad of ["failure", "skipped", "cancelled", ""]) assert.equal(run({ ...all, [k]: bad }).status, 1, `${k}=${bad}`);
     // A Y02 log without any scenario line (the run stopped early) still reaches the outcome check, and the table is written.
-    const early = run({ ...all, Y02: "failure" }, { "y02-wsb-local/y02.log": "the build failed\n" });
+    const early = run({ ...all, Y02: "failure" }, { "y02-local/y02.log": "the build failed\n" });
     assert.equal(early.status, 1);
     assert.match(early.summary, /\| Y02 scenarios \| failure \|/);
     // Home folders in the copied log lines are replaced.
-    const home = run(all, { "y02-wsb-local/y02.log": "sandbox-escape-refused: pass (50/50)\n", "g05-local/g05.log": "wrote C:\\Users\\someone\\x\n", "g05-local/cleanup.log": "the console session belongs to MYPC\\ownername, not the configured owner\n" });
+    const home = run(all, { "y02-local/y02.log": "sandbox-escape-refused: pass (50/50) C:\\Users\\someone\\x\n", "g06-host/long-paths-counts.txt": "# pass 3 the console session belongs to MYPC\\ownername\n" });
     assert.doesNotMatch(home.summary, /someone/);
     assert.doesNotMatch(home.summary, /ownername/);
     assert.match(home.summary, /<home>/);
-    assert.match(home.summary, /\| Leftovers of the Sandbox runs released \| success \|/);
+    assert.match(home.summary, /\| G06 long paths \| success \|/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("own-hardware: only redacted or data-only evidence is uploaded; the unredacted report and local findings stay on the machine; auto-login is never switched on", () => {
-  const j = job(read("own-hardware.yml"), "sandbox-windows");
-  const g05 = step(j, "g05");
-  assert.match(g05, /containment-evidence\.mjs run --out "\$RUNNER_TEMP\/g05-windows" "\$\{EXTRA\[@\]\}" --redact --local "\$RUNNER_TEMP\/g05-local"/);
-  assert.match(g05, /NIMBLENEWT_WSB_SUPERVISOR_ACL: report-only/);
+test("own-hardware: only redacted or data-only evidence is uploaded; local findings stay on the machine; auto-login is never switched on", () => {
+  const j = job(read("own-hardware.yml"), "windows-evidence");
   const uploads = [...j.matchAll(/\n {10}path: (.+)\n/g)].map((m) => m[1]);
-  assert.deepEqual([...uploads].sort(), [
-    "${{ runner.temp }}/g05-windows/containment-*.json", "${{ runner.temp }}/g06-host", "${{ runner.temp }}/sandbox-windows", "${{ runner.temp }}/sandbox-windows-detail", "${{ runner.temp }}/y02-windows/y02-scenarios-*.json",
-  ]);
+  assert.deepEqual([...uploads].sort(), ["${{ runner.temp }}/g06-host", "${{ runner.temp }}/y02-windows/y02-scenarios-*.json"]);
   for (const u of uploads) assert.doesNotMatch(u, /local/, u);
   assert.doesNotMatch(j, /NIMBLENEWT_REAL_WINDOWS_AUTOLOGON/);
   const y02 = step(j, "y02");
-  assert.match(y02, /NIMBLENEWT_REAL_WINDOWS_SANDBOX: "1"/);
   assert.match(y02, /y02-checkpoint\.mjs run --out "\$RUNNER_TEMP\/y02-windows"/);
-  // The Sandbox tests run inside the scenario set write to their own folders, never over the uploaded summary.
-  assert.doesNotMatch(y02, /NIMBLENEWT_WSB_OUT: \$\{\{ runner\.temp \}\}\/sandbox-windows\n/);
   // The filesystem facts keep only words, not fsutil's text (which can name the checkout path).
   const fs = step(j, "fs");
   assert.match(fs, /function State/);
   assert.doesNotMatch(fs, /VolumeLabel|FileSystemLabel|SerialNumber|USERNAME/);
   assert.match(step(j, "g06"), /packages\/worker\/dist\/workspace\/long-paths\.test\.js/);
   // The job log is public: every step that prints a command's output passes it through the redaction filter (the full text goes to a local file only).
-  for (const id of ["wd", "g05", "g06", "y02", "cleanup"]) {
+  for (const id of ["g06", "y02"]) {
     const run = step(j, id).slice(step(j, id).indexOf("run: |"));
     const printing = run.split("\n").filter((l) => /^\s+node /.test(l));
     assert.ok(printing.length > 0, id);
     for (const l of printing) assert.match(l, /2>&1 \| tee "[^"]+" \| node scripts\/redact-log\.mjs$/, `${id}: ${l}`);
   }
-  // The Sandbox tests' own output stays in the local folder.
-  assert.match(step(j, "wsb"), /> "\$NIMBLENEWT_WSB_LOCAL\/output\.txt" 2>&1/);
 });
 
 test("exhaustive: the Y02 scenario set runs on hosted Linux and macOS with the sandbox and uploads its report", () => {
@@ -149,14 +138,14 @@ test("every action in the evidence workflows is pinned to a full commit", () => 
 });
 
 test("redact-log: account, home and console names are replaced line by line; without the redaction code nothing of the input is shown", { skip: process.platform === "win32" ? "POSIX paths in the check" : false }, () => {
-  const input = ["plain line", "C:\\Users\\Jane Doe\\AppData\\Local\\Temp\\nn-g06-x failed", "the console session belongs to MYPC\\janed, not the configured owner", "owner PC\\cfgowner set"].join("\n");
-  const r = spawnSync(process.execPath, [join(root, "scripts", "redact-log.mjs")], { input, encoding: "utf8", env: { ...process.env, COMPUTERNAME: "MYPC", NIMBLENEWT_WSB_OWNER: "PC\\cfgowner" } });
+  const input = ["plain line", "C:\\Users\\Jane Doe\\AppData\\Local\\Temp\\nn-g06-x failed", "the console session belongs to MYPC\\janed, not the configured owner"].join("\n");
+  const r = spawnSync(process.execPath, [join(root, "scripts", "redact-log.mjs")], { input, encoding: "utf8", env: { ...process.env, COMPUTERNAME: "MYPC" } });
   assert.equal(r.status, 0, r.stderr);
   const lines = r.stdout.split("\n");
   assert.equal(lines[0], "plain line");
-  assert.doesNotMatch(r.stdout, /Jane|janed|cfgowner|MYPC/);
+  assert.doesNotMatch(r.stdout, /Jane|janed|MYPC/);
   assert.match(lines[1], /<home>/);
-  assert.equal(lines.length, 5);
+  assert.equal(lines.length, 4);
   // A copy of the script without the built code next to it: it withholds everything and says so.
   const dir = mkdtempSync(join(tmpdir(), "nn-redact-log-"));
   try {
@@ -164,60 +153,15 @@ test("redact-log: account, home and console names are replaced line by line; wit
     writeFileSync(join(dir, "scripts", "redact-log.mjs"), readFileSync(join(root, "scripts", "redact-log.mjs")));
     const off = spawnSync(process.execPath, [join(dir, "scripts", "redact-log.mjs")], { input, encoding: "utf8" });
     assert.equal(off.status, 0);
-    assert.equal(off.stdout, "<4 lines withheld: the redaction code could not be loaded>\n");
+    assert.equal(off.stdout, "<3 lines withheld: the redaction code could not be loaded>\n");
   } finally { rmSync(dir, { recursive: true, force: true }); }
-});
-
-test("wsb-cleanup: bad usage exits 2; off Windows it does nothing and exits 0", () => {
-  const usage = spawnSync(process.execPath, [join(root, "scripts", "wsb-cleanup.mjs"), "--bogus"], { encoding: "utf8" });
-  assert.equal(usage.status, 2);
-  if (process.platform !== "win32") {
-    const r = spawnSync(process.execPath, [join(root, "scripts", "wsb-cleanup.mjs")], { encoding: "utf8" });
-    assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /not Windows/);
-  }
-});
-
-test("own-hardware: the job-context diagnostic (card wsb-console) runs once before the first wsb call, never fails the job, and fits in the job's limit", () => {
-  const text = read("own-hardware.yml");
-  const j = job(text, "sandbox-windows");
-  const s = step(j, "wsbctx");
-  assert.match(s, /\n {8}continue-on-error: true\n/);
-  // 15 minutes: the context script stops itself at 240 s, the launch variants (card wsb-variants, two task variants since wsb-limited) at 460 s, and a minute for starting node.
-  assert.match(s, /\n {8}timeout-minutes: 15\n/);
-  assert.ok(240 + 460 + 60 <= 15 * 60);
-  assert.match(j, /run level Limited \(the verdict-bearing one\) and the same task at Highest for comparison/);
-  assert.match(s, /node scripts\/wsb-job-context\.mjs 2>&1 \| node scripts\/redact-log\.mjs > "\$RUNNER_TEMP\/wsb-job-context\.txt"\n {10}node scripts\/wsb-launch-variants\.mjs 2>&1 \| node scripts\/redact-log\.mjs >> "\$RUNNER_TEMP\/wsb-job-context\.txt"\n/);
-  // Only the redacted copy is printed or added to the summary (the variants are appended to the same file, after the context lines).
-  assert.doesNotMatch(s.replace(/node scripts\/wsb-job-context\.mjs 2>&1 \| node scripts\/redact-log\.mjs/, "").replace(/node scripts\/wsb-launch-variants\.mjs 2>&1 \| node scripts\/redact-log\.mjs/, ""), /wsb-job-context\.mjs|wsb-launch-variants\.mjs/);
-  assert.match(s, /cat "\$RUNNER_TEMP\/wsb-job-context\.txt"; echo '```'; \} >> "\$GITHUB_STEP_SUMMARY"/);
-  // After the build, before every step that runs wsb (the Sandbox tests are the first).
-  assert.ok(j.indexOf("id: wsbctx") > j.indexOf("npm run build") && j.indexOf("id: wsbctx") < j.indexOf("id: wsb\n"));
-  // A record, not evidence: the outcome step does not read it.
-  assert.doesNotMatch(j.slice(j.indexOf("- name: Job summary and outcome")), /steps\.wsbctx\./);
-  const ids = ["wsbctx", "wsblist", "fs", "wsb", "wd", "g05", "g06", "y02", "cleanup"];
-  const stepSum = ids.reduce((sum, id) => sum + Number(/\n {8}timeout-minutes: (\d+)\n/.exec(step(j, id))[1]), 0);
-  assert.ok(Number(/\n {4}timeout-minutes: (\d+)\n/.exec(j)[1]) >= stepSum + 30, `job limit below ${stepSum + 30}`);
-  // No other job runs it.
-  assert.equal(text.split("wsb-job-context.mjs").length - 1, 1);
-  assert.equal(text.split("node scripts/wsb-launch-variants.mjs").length - 1, 1);
-});
-
-test("own-hardware: the product launcher's one-line wsb list record (card wsb-repair) is a diagnostic: after the context step, before the tests, always exit 0, redacted, not read by the outcome step", () => {
-  const j = job(read("own-hardware.yml"), "sandbox-windows");
-  const s = step(j, "wsblist");
-  assert.match(s, /\n {8}continue-on-error: true\n/);
-  assert.match(s, /node scripts\/wsb-list-line\.mjs 2>&1 \| node scripts\/redact-log\.mjs \| tee "\$RUNNER_TEMP\/wsb-list-line\.txt"/);
-  assert.ok(j.indexOf("id: wsbctx") < j.indexOf("id: wsblist") && j.indexOf("id: wsblist") < j.indexOf("id: wsb\n"));
-  assert.doesNotMatch(j.slice(j.indexOf("- name: Job summary and outcome")), /steps\.wsblist\./);
-  assert.equal(read("own-hardware.yml").split("node scripts/wsb-list-line.mjs").length - 1, 1);
 });
 
 test("own-hardware (card A03b): the G05 owner bundle runs only when its input is ticked, only from main, alone, built on a hosted runner and checked by hash before anything of it runs on the owner's PC", () => {
   const text = read("own-hardware.yml");
   const guard = "github.repository == 'rkcth/NimbleNewt' && github.ref == 'refs/heads/main'";
   // the usual jobs keep their guards and are skipped when the owner bundle run is asked for
-  for (const name of ["probe", "sandbox-windows"]) assert.ok(job(text, name).includes(`    if: ${guard} && inputs.g05_owner_bundle != true\n`), name);
+  for (const name of ["probe", "windows-evidence"]) assert.ok(job(text, name).includes(`    if: ${guard} && inputs.g05_owner_bundle != true\n`), name);
   const build = job(text, "g05-bundle-build");
   const run = job(text, "g05-owner-run");
   assert.ok(build.includes(`    if: \${{ inputs.g05_owner_bundle == true && ${guard} }}\n`), "the hosted build: the input and the same guards");

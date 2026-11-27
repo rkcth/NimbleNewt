@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { test } from "node:test";
@@ -169,13 +169,29 @@ test("scenario evidence: every guard has its own refusal", () => {
 });
 
 test("the platform-specific files are part of what a report must have run", () => {
-  assert.ok(filesFor(map.scenarios[0], "win32").includes("worker/sandbox/windows-real"));
-  assert.ok(!filesFor(map.scenarios[0], "linux").includes("worker/sandbox/windows-real"));
+  assert.ok(filesFor(map.scenarios[0], "win32").includes("worker/sandbox/windows-native"));
+  assert.ok(!filesFor(map.scenarios[0], "linux").includes("worker/sandbox/windows-native"));
   assert.ok(filesFor(map.scenarios[0], "darwin").includes("worker/sandbox/seatbelt"));
-  // On a machine WITH a Windows Sandbox client (where Y02 must pass) the host checks skip their two no-client tests; that exact reason is named as not applicable.
-  assert.ok(filesFor(map.scenarios[0], "win32").includes("worker/sandbox/windows-host-real"));
-  const present = /const PRESENT = "([^"]+)";/.exec(readFileSync(join(here, "..", "packages", "worker", "src", "sandbox", "windows-host-real.test.ts"), "utf8"))?.[1];
-  assert.ok(present !== undefined && map.scenarios[0].notApplicable.win32.includes(present), "the no-client skip reason of windows-host-real is named for win32");
+  // Card A03b (owner decision 2026-11-26: AppContainer, no Windows Sandbox): the Windows files are the native launcher's tests; the removed Windows Sandbox tests are not named,
+  // and every Windows file the map names exists (a missing compiled file would fail the scenario on Windows only).
+  for (const f of filesFor(map.scenarios[0], "win32")) {
+    assert.doesNotMatch(f, /^worker\/sandbox\/windows(-real|-host-real)?$/, f);
+    const [pkg, ...rest] = f.split("/");
+    assert.ok(existsSync(join(here, "..", "packages", pkg, "src", `${rest.join("/")}.test.ts`)), `${f}: its test source exists`);
+  }
+  for (const reason of map.scenarios[0].notApplicable.win32) assert.doesNotMatch(reason, /Windows Sandbox|AUTOLOGON/, reason);
+  // Every reason a file of the escape scenario gives for skipping only because the host is Windows is named for win32 (containment-windows-cases.test.ts skips its POSIX-shaped
+  // simulated-container tests there; unnamed, those skips would fail the scenario on the owner's Windows runner only).
+  const escapeWinSkips = filesFor(map.scenarios[0], "win32").flatMap((f) => {
+    const [pkg, ...rest] = f.split("/");
+    const src = readFileSync(join(here, "..", "packages", pkg, "src", `${rest.join("/")}.test.ts`), "utf8");
+    return [
+      ...[...src.matchAll(/(?:onWindows|isWindows|process\.platform === "win32")[^;\n]*?t\.skip\("([^"]+)"\)/g)].map((m) => m[1]),
+      ...[...src.matchAll(/skip: [^?\n]*(?:onWindows|isWindows|process\.platform === "win32")[^?\n]*\? "([^"]+)"/g)].map((m) => m[1]),
+    ];
+  });
+  assert.ok(escapeWinSkips.includes("the simulated container is POSIX-shaped") && escapeWinSkips.length >= 10, `found ${escapeWinSkips.length} Windows-only skips in the escape scenario's files`);
+  for (const r of escapeWinSkips) assert.ok(notApplicableHere(r, map.scenarios[0].notApplicable.win32), `the Windows-only skip "${r}" is named for win32`);
   // Every reason the resource-limit tests give for skipping only because the host is Windows is named for win32, word for word
   // (own-hardware run 44501483353 failed the scenario on "needs a shell and ps", which the map lacked). Host-load skips are not of this form.
   const limitsScenario = map.scenarios.find((s) => s.id === "sandbox-resource-limits");

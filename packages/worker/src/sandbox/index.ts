@@ -11,12 +11,6 @@ export { windowsNativeBackend, windowsDefaultBackend, unavailableNative, PROBE_S
 export { NATIVE_BACKEND_NAME, NATIVE_MODE, NODE_PRESERVE_OPTIONS, LPAC_CAPABILITIES, REFUSED_ROUTE, FAILURE_PREFIX, checkNativeRecipe, grantsFor, launcherArgs, nativeEnv, programPath, quoteWindowsArg, commandLine, parseLauncherLine, WINDOW_STATION_MODES, isWindowStationMode, type WindowStationMode, type NativeFailure, type NativeGrant, type NativeSettings, type ContainerKind } from "./windows-native-plan.js";
 export { runNativeJob, sweepLeftovers, sweepLeftoversLocked, revokeAndReadBack, readRecord, type NativeHost, type NativeJob, type RunRecord } from "./windows-native-job.js";
 export { nativeRealHost } from "./windows-native-real.js";
-/** Superseded (2026-11-25): Windows Sandbox is not the Windows plan; the native launcher above is. Kept only for the tests and diagnostics that still exercise it. */
-export { windowsSandboxBackend, AUTOLOGON_ACKNOWLEDGEMENT, VM_FALLBACK_DECISION, type AutologonOptIn, type WindowsSandboxOptions } from "./windows.js";
-export type { WindowsAccessEntry, WindowsAutologon, WindowsHost, WindowsLockTask, WindowsPackageInfo, WindowsSession, WindowsSignature } from "./windows-host.js";
-export { windowsRealHost } from "./windows-real.js";
-export { createRecordedFolder, dropFinishedRecords, scanEvidenceFolders } from "./windows-records.js";
-export { evidenceControlDirs, searchEvidenceDirs, releaseLeftovers, sandboxRunning, type LeftoverResult } from "./windows-cleanup.js";
 export { scriptRunner, type InterpreterInstall, type ScriptResult, type ScriptRun, type ScriptRunnerOptions } from "./script.js";
 export { jobLauncher, linuxOrphans, type JobEnd, type JobLauncherOptions, type JobRun } from "./job.js";
 export { linuxProcessTree, linuxStillRunning, splitRunTree, MAX_RUN_PROCESSES, type RunProcess } from "./proc.js";
@@ -24,7 +18,8 @@ export { hostScriptRunner, hostScriptBase, ownNodeInstall, type HostInterpreter,
 export { CONTAINMENT_SCHEMA, MAX_REPORT_AGE_MS, MAX_REPORT_BYTES, REQUIRED_CASE_IDS, REQUIRED_PLATFORMS, assessRelease, isLinkRightInconclusive, isNativeWindowsEvidence, parseReport, produceReport, reportDigest, runContainmentSuite, runOutcome, type CaseResult, type ContainmentReport, type GateOptions, type ReportProvenance, type GateResult, type PlatformName, type SuiteOptions, type NativeWindowsEvidence, type TrustedHostException, type Verdict, type WindowsEvidence } from "./containment.js";
 export { LAUNCHER_RECORD_SCHEMA, PACKAGED_CONTROLLER_EXISTS, attachNativeWindowsEvidence, collectNativeEvidence, grantsReadBackOf, nativeWindowsEvidence, type NativeEvidenceInput, type NativeEvidenceSources } from "./containment-windows-native-evidence.js";
 export { WINDOWS_CASES, WINDOWS_CASE_RUNNER, judgeWindowsCase, parseRunnerResults, type CaseVerdict } from "./containment-windows-cases.js";
-export { evidenceIdentity, unavailableBackend, windowsConsoleUser, windowsEvidenceBackend, windowsSandboxEvidenceBackend, type IdentitySource } from "./containment-windows.js";
-export { MAX_WSB_SUMMARY_BYTES, WSB_CONTROLS, WSB_SUMMARY_SCHEMA, WSB_TESTS, attachWindowsEvidence, controlsFromEscapeOutput, parseWorkdirCheck, parseWsbSummary, redactReport, sessionFromEnvironment, windowsEvidenceFromSummary, type WindowsEvidenceContext, type WsbControl, type WsbSummary } from "./containment-windows-evidence.js";
+export { unavailableBackend, windowsEvidenceBackend } from "./containment-windows.js";
+export { windowsConsoleUser } from "./windows-console.js";
+export { MAX_WORKDIR_CHECK_BYTES, parseWorkdirCheck, redactReport } from "./containment-windows-evidence.js";
 export { redact, redactAndCut, scrub, scrubDeep, WITHHELD, type RedactionNames } from "./windows-redact.js";
 export { CPU_BURST_SECONDS, ResourceWatch, judge, measureDirs, parseCpuTime, parsePsUsage, psSampler, type LimitExceeded, type UsageSample, type UsageSampler, type WatchLimits } from "./resource-watch.js";

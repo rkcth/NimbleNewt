@@ -2,7 +2,7 @@
 // addresses; a line that still looks personal is withheld whole). For the console output of the Windows evidence steps of own-hardware.yml: the job log of a public repository
 // is public, and an error message or a failing test's output can name the runner account's home or temporary folder, or the account at the console.
 //   some-command 2>&1 | tee local.log | node scripts/redact-log.mjs
-// Besides the running machine's own names it hides NIMBLENEWT_WSB_OWNER, NIMBLENEWT_WSB_SHARE_IDENTITY and, on Windows, the account signed in at the console.
+// Besides the running machine's own names it hides, on Windows, the account signed in at the console.
 // If the redaction code cannot be loaded (the build failed), nothing of the input is shown: one fixed line says so. Always exits 0 so it never decides a step's outcome
 // (with `set -o pipefail` the command before it still does).
 import { createInterface } from "node:readline";
@@ -11,7 +11,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 let scrub;
-const names = { users: [process.env["NIMBLENEWT_WSB_OWNER"], process.env["NIMBLENEWT_WSB_SHARE_IDENTITY"]].filter((n) => typeof n === "string" && n.length >= 2) };
+const names = { users: [] };
 try {
   const worker = await import(pathToFileURL(join(root, "packages", "worker", "dist", "index.js")).href);
   scrub = worker.scrub;

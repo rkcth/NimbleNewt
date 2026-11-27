@@ -114,8 +114,8 @@ test("--prebuilt: a missing or malformed COMMIT exits 2 before anything runs; wi
     const r = evidence(b, "run", "--prebuilt");
     assert.equal(r.status, 2); assert.match(r.stderr, /^usage: run --out DIR \[--prebuilt\]/m, "past the COMMIT check: the missing --out is what stops it");
   }
-  // Card A03b: the native-evidence flags are checked before anything runs (a bad value, a fact without --native-info, --native-info with the Windows Sandbox summary, a flag without its value)
-  for (const extra of [["--native-info", "f", "--account-kind", "admin"], ["--native-info", "f", "--symlink-right", "maybe"], ["--account-kind", "standard"], ["--symlink-right", "no"], ["--native-info", "f", "--windows-summary", "s"], ["--native-info"]]) {
+  // Card A03b: the native-evidence flags are checked before anything runs (a bad value, a fact without --native-info, the removed Windows Sandbox flags --windows-summary and --workdir-check, a flag without its value)
+  for (const extra of [["--native-info", "f", "--account-kind", "admin"], ["--native-info", "f", "--symlink-right", "maybe"], ["--account-kind", "standard"], ["--symlink-right", "no"], ["--native-info", "f", "--windows-summary", "s"], ["--windows-summary", "s"], ["--workdir-check", "w"], ["--native-info"]]) {
     const r = evidence(b, "run", "--prebuilt", "--out", join(b, "results"), ...extra);
     assert.equal(r.status, 2, `${extra.join(" ")}: ${r.stdout}${r.stderr}`);
     assert.match(r.stderr, /^usage: run --out DIR .*--native-info FILE \[--account-kind standard\|administrator-filtered\] \[--symlink-right yes\|no\]/m);

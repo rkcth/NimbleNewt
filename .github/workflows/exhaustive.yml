@@ -71,8 +71,8 @@ jobs:
 
   # Card G05: the isolation-boundary proof on each operating system's hosted runner (Rob, 2026-11-18: GitHub Actions runners count as the real OS runs). It runs the containment
   # suite through the production launcher and uploads containment-<platform>.json (schema nimblenewt.containment/1, read by `containment-evidence.mjs gate` and Y02's gate).
-  # Linux (bubblewrap) and macOS (Seatbelt) must hold every case. A hosted Windows runner cannot run Windows Sandbox (a client feature that needs nested virtualization), so that
-  # cell records every case not_run with the reason and passes as an honest skip (--allow-unavailable); the release gate still blocks Windows until a host with Windows Sandbox runs it.
+  # Linux (bubblewrap) and macOS (Seatbelt) must hold every case. A hosted Windows runner has no native AppContainer launcher installed (its administrator install step is not run here), so that
+  # cell records every case not_run with the reason and passes as an honest skip (--allow-unavailable); the release gate takes Windows evidence only from the owner bundle run (own-hardware.yml).
   containment:
     name: G05 containment / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -117,7 +117,7 @@ jobs:
   # Card Y02: the checkpoint's scenario set (scripts/y02-scenarios.json: escape and path tricks, resource limits, startup checks, the pre-commit gate, pause and stop, checked resume,
   # remote reconnect with epochs, idle subscriptions) through `y02-checkpoint.mjs run`, on the hosted Linux and macOS runners, on the same commit as the rest of this workflow, with the
   # sandbox required. It uploads y02-scenarios-<platform>.json, which `y02-checkpoint.mjs gate` reads beside the containment reports above, the QA records (qa.yml) and the CI run ids.
-  # Windows is not here: its scenario set needs the real Windows Sandbox, which a hosted runner cannot run; own-hardware.yml runs it on the owner's machine.
+  # Windows is not here: its scenario set runs on the owner's machine (own-hardware.yml, the Windows evidence job).
   y02-scenarios:
     name: Y02 scenarios / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}

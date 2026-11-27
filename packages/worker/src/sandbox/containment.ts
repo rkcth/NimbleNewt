@@ -3,14 +3,13 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { arch as osArch, release as osRelease, tmpdir } from "node:os";
-import { basename, dirname, join, relative, win32 } from "node:path";
+import { basename, dirname, join, win32 } from "node:path";
 import type { SandboxBackend } from "./backend.js";
 import { FILE_LINKS_BY_CASE, runWindowsNodeCases } from "./containment-windows-cases.js";
 import { windowsEvidenceBackend } from "./containment-windows.js";
 import { SandboxLauncher } from "./launcher.js";
 import { GUEST, type SandboxRecipe } from "./recipe.js";
 import { NATIVE_BACKEND_NAME as NATIVE_BACKEND, RUN_PROFILE_PREFIX } from "./windows-native-plan.js";
-import { GUEST_PATHS, guestPathFor } from "./windows-plan.js";
 
 /*
  * Card G05: proof of the selected isolation boundary on each OS. This file is two things.
@@ -173,7 +172,7 @@ interface Fixture {
 }
 
 async function buildFixture(): Promise<Fixture> {
-  // On Windows the native call also expands short (8.3) names such as RUNNER~1, which the Windows Sandbox backend refuses in a shared path.
+  // On Windows the native call also expands short (8.3) names such as RUNNER~1, which the Windows path rules refuse in a granted path (windows-paths.ts).
   const root = (process.platform === "win32" ? realpathSync.native : realpathSync)(mkdtempSync(join(tmpdir(), "nn-g05-")));
   const dir = (name: string): string => { const p = join(root, name); mkdirSync(p, { recursive: true }); return p; };
   const controllerDir = dir("controller-data");
@@ -202,9 +201,7 @@ async function buildFixture(): Promise<Fixture> {
 }
 
 const quote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
-/** A path for a cmd batch file: double-quoted (Windows paths cannot contain a double quote), percent signs doubled so the batch file reads them literally. */
-const wq = (s: string): string => `"${s.replace(/%/g, "%%")}"`;
-/** The Windows directory of the host the suite runs on (the guest's is always C:\Windows). */
+/** The Windows directory of the host the suite runs on (the system-write case of the node runner tries it). */
 const WIN_ROOT = process.env["SystemRoot"] ?? "C:\\Windows";
 /** Bounded, one line, and printable (program output may carry terminal controls; `parseReport` refuses them). */
 const short = (s: string): string => (s.length > 300 ? `${s.slice(0, 300)}...` : s).replace(/[\r\n]+/g, " ").replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, "?");
@@ -236,10 +233,10 @@ export interface SuiteOptions {
   /** Tests only: the launcher of the unconfined pairing. Default: a production launcher allowed trusted-host runs for the suite alone. */
   readonly unconfinedLauncher?: SandboxLauncher;
   /**
-   * How the cases are written: POSIX `sh` (Linux, macOS), Windows `cmd` batch files (the superseded Windows Sandbox backend) or `windows-node` (card A03b: one plain-JavaScript runner run by node, since the native
-   * container refuses cmd.exe starting programs). Default: `posix`, and `windows-node` on Windows. Tests set it to check the Windows cases on any OS.
+   * How the cases are written: POSIX `sh` (Linux, macOS) or `windows-node` (card A03b: one plain-JavaScript runner run by node, since the native container refuses cmd.exe starting programs; the
+   * Windows Sandbox era `cmd` batch-file dialect was removed with that backend). Default: `posix`, and `windows-node` on Windows. Tests set it to check the Windows cases on any OS.
    */
-  readonly dialect?: "posix" | "windows" | "windows-node";
+  readonly dialect?: "posix" | "windows-node";
   /** `windows-node` only. The node program the confined runner uses (default: this one). */
   readonly nodeExecutable?: string;
   /** `windows-node` only, tests: the system paths the system-write case tries (default: the host's Windows folders). */
@@ -261,10 +258,9 @@ export async function runContainmentSuite(options: SuiteOptions = {}): Promise<{
   const originalHome = process.env["HOME"];
   process.env["HOME"] = fixture.home;
   const dialect = options.dialect ?? (process.platform === "win32" ? "windows-node" : "posix");
-  const win = dialect === "windows";
   const nodeWin = dialect === "windows-node";
-  // Every cmd-dialect case starts a fresh Windows Sandbox, which takes far longer than a bubblewrap or Seatbelt start; the node runner makes one confined start for all ten cases.
-  const timeoutMs = options.timeoutMs ?? (win ? 300_000 : nodeWin ? 120_000 : 30_000);
+  // The node runner makes one confined start for all ten cases, which takes longer than one bubblewrap or Seatbelt start.
+  const timeoutMs = options.timeoutMs ?? (nodeWin ? 120_000 : 30_000);
   const rewrite = options.rewriteScript ?? ((_id: string, script: string) => script);
   try {
     const launcher = options.launcher ?? await SandboxLauncher.create({ protectedPaths: [fixture.controllerDir], audit: () => undefined, ...(options.backend === undefined ? {} : { backend: options.backend }) });
@@ -294,20 +290,14 @@ export async function runContainmentSuite(options: SuiteOptions = {}): Promise<{
       });
       for (const c of found) results.push({ id: c.id, category: CATEGORY[c.id]!, verdict: c.verdict, detail: short(c.detail) });
     }
-    // On Windows a case is a batch file in a read-only input (`/inputs/g05`): cmd.exe arguments may not carry quotes or percent signs (A03b refuses them), and the guest cannot change the file before it runs.
     const recipeOf = (): SandboxRecipe => {
       n += 1;
       const base = join(fixture.root, `agent${n}`);
       const d = (name: string): string => { const p = join(base, name); mkdirSync(p, { recursive: true }); return p; };
-      return { mode: "sandboxed", workdir: d("work"), home: d("home"), scratch: d("scratch"), readOnly: win ? [{ host: d("g05-case"), guest: "/inputs/g05" }] : [], network: "none", env: win ? { SystemRoot: WIN_ROOT } : {}, protectedSubpaths: [".git"] };
+      return { mode: "sandboxed", workdir: d("work"), home: d("home"), scratch: d("scratch"), readOnly: [], network: "none", env: {}, protectedSubpaths: [".git"] };
     };
-    /** The program line of one attempt: `sh -c` on POSIX; on Windows cmd.exe running the case's batch file, by its guest path when confined and its host path when not. */
-    const commandOf = (recipe: SandboxRecipe, script: string): string[] => {
-      if (!win) return ["/bin/sh", "-c", script];
-      const tools = recipe.readOnly[0]!.host;
-      writeFileSync(join(tools, "case.cmd"), `@echo off\r\n${script.split(/\r?\n/).join("\r\n")}\r\n`);
-      return recipe.mode === "trusted-host" ? [win32.join(WIN_ROOT, "System32", "cmd.exe"), "/d", "/c", join(tools, "case.cmd")] : ["/windows/system32/cmd.exe", "/d", "/c", guestPathFor("/inputs/g05/case.cmd")!];
-    };
+    /** The program line of one attempt: `sh -c` (POSIX; the Windows cases are the node runner's above). */
+    const commandOf = (_recipe: SandboxRecipe, script: string): string[] => ["/bin/sh", "-c", script];
 
     /** Runs one attempt and says what the host and the output show: undefined (nothing got through), a failure reason, or `inconclusive:<why>`. */
     const execute = async (via: SandboxLauncher, recipe: SandboxRecipe, id: string, attempt: Attempt): Promise<{ problem: string | undefined; out: string }> => {
@@ -357,30 +347,25 @@ export async function runContainmentSuite(options: SuiteOptions = {}): Promise<{
 
     // Controls: what the agent is allowed to do works. Without these a denial could be a sandbox that refuses everything.
     await record({ id: "control-write-own-directories", make: (r) => {
-      const scratchGuest = win ? GUEST_PATHS.scratch : linuxView ? GUEST.scratch : r.scratch;
-      const script = win
-        ? `echo w> "%CD%\\c-work"\necho h> "%HOME%\\c-home"\necho s> ${wq(scratchGuest + "\\c-scratch")}\necho ${END}`
-        : `echo w > "$PWD/c-work"; echo h > "$HOME/c-home"; echo s > ${quote(scratchGuest)}/c-scratch; echo ${END}`;
+      const scratchGuest = linuxView ? GUEST.scratch : r.scratch;
+      const script = `echo w > "$PWD/c-work"; echo h > "$HOME/c-home"; echo s > ${quote(scratchGuest)}/c-scratch; echo ${END}`;
       return { script, judge: none, host: () =>
         existsSync(join(r.workdir, "c-work")) && existsSync(join(r.home, "c-home")) && existsSync(join(r.scratch, "c-scratch")) ? undefined : "the agent could not write its own directories" };
     } });
     await record({ id: "control-read-own-decoy", make: (r) => {
       writeFileSync(join(r.workdir, "decoy.txt"), OWN_DECOY);
-      return { script: win ? `type "%CD%\\decoy.txt"\necho.\necho ${END}` : `cat "$PWD/decoy.txt"; echo; echo ${END}`, judge: (out) => (out.includes(OWN_DECOY) ? undefined : "the agent could not read its own file"), host: none };
+      return { script: `cat "$PWD/decoy.txt"; echo; echo ${END}`, judge: (out) => (out.includes(OWN_DECOY) ? undefined : "the agent could not read its own file"), host: none };
     } });
 
     // Writes outside the workspace. The system directories are not paired: an unprivileged process cannot write there without a sandbox either (a regression guard for a run as root or a writable bind).
-    // On Windows the guest's own C: is a disposable disk, so a write there is harmless; what is checked is the host's C:.
-    const sys = win ? [win32.join(WIN_ROOT, "g05-x"), win32.join(WIN_ROOT, "System32", "g05-x"), "C:\\g05-x", "C:\\Program Files\\g05-x"] : ["/usr/g05-x", "/etc/g05-x", "/bin/g05-x", "/g05-x"];
+    const sys = ["/usr/g05-x", "/etc/g05-x", "/bin/g05-x", "/g05-x"];
     await record({ id: "deny-write-system", make: () => ({
-      script: win ? `${sys.map((p) => `(type nul > ${wq(p)}) 2>nul`).join("\n")}\necho ${END}` : `for p in ${sys.join(" ")}; do ( : > "$p" ) 2>/dev/null; done; echo ${END}`,
+      script: `for p in ${sys.join(" ")}; do ( : > "$p" ) 2>/dev/null; done; echo ${END}`,
       judge: none, host: () => (sys.some((p) => existsSync(p)) ? "a file was created in a system directory of the host" : undefined),
     }) });
     const targets = [join(fixture.outsideDir, "g05-created"), join(fixture.controllerDir, "g05-created"), join(fixture.home, ".ssh", "g05-created")];
     await record({ id: "deny-write-host-path", make: () => ({
-      script: win
-        ? `(echo overwritten> ${wq(fixture.outsideFile)}) 2>nul\n${targets.map((t) => `(type nul > ${wq(t)}) 2>nul`).join("\n")}\necho ${END}`
-        : `( echo overwritten > ${quote(fixture.outsideFile)} ) 2>/dev/null; ${targets.map((t) => `( : > ${quote(t)} ) 2>/dev/null;`).join(" ")} echo ${END}`,
+      script: `( echo overwritten > ${quote(fixture.outsideFile)} ) 2>/dev/null; ${targets.map((t) => `( : > ${quote(t)} ) 2>/dev/null;`).join(" ")} echo ${END}`,
       judge: none,
       host: () => {
         if (!same(fixture.outsideFile, OUTSIDE_ORIGINAL)) return "a host file outside the workspace was changed";
@@ -390,30 +375,24 @@ export async function runContainmentSuite(options: SuiteOptions = {}): Promise<{
       proof: () => (same(fixture.outsideFile, OUTSIDE_ORIGINAL) ? "the outside file was not changed" : targets.find((t) => !existsSync(t))),
     }) });
 
-    // Links in the checkout that lead out of it. On Windows the directory links are junctions (no privilege needed); file links need the right to create symbolic links, and a host
-    // without it makes the case inconclusive (the planting throws), never a pass. /proc does not exist there.
+    // Links in the checkout that lead out of it (the Windows cases, with junctions and file links, are the node runner's: containment-windows-cases.ts).
     await record({ id: "deny-symlink-read", make: (r) => {
       symlinkSync(fixture.controllerFile, join(r.workdir, "link-abs-file"), "file");
-      symlinkSync(fixture.controllerDir, join(r.workdir, "link-abs-dir"), win ? "junction" : "dir");
-      if (win) symlinkSync(relative(r.workdir, fixture.credentialFile), join(r.workdir, "link-rel-key"), "file");
-      else symlinkSync(`../../../../../../../../../../..${fixture.credentialFile}`, join(r.workdir, "link-rel-key"));
-      if (!win) symlinkSync("/proc/1/root", join(r.workdir, "link-proc-root"));
+      symlinkSync(fixture.controllerDir, join(r.workdir, "link-abs-dir"), "dir");
+      symlinkSync(`../../../../../../../../../../..${fixture.credentialFile}`, join(r.workdir, "link-rel-key"));
+      symlinkSync("/proc/1/root", join(r.workdir, "link-proc-root"));
       // Each read is tagged, so the pairing can tell that every one of them works without the sandbox. The /proc/1/root read is not required there (an unprivileged process may not follow it).
       return {
-        script: win
-          ? `<nul set /p =A:\ntype "%CD%\\link-abs-file" 2>nul\necho.\n<nul set /p =D:\ndir /b "%CD%\\link-abs-dir" 2>nul\necho.\n<nul set /p =R:\ntype "%CD%\\link-rel-key" 2>nul\necho.\necho ${END}`
-          : `echo "A:$(cat "$PWD/link-abs-file" 2>/dev/null)"; echo "D:$(ls "$PWD/link-abs-dir" 2>/dev/null)"; echo "R:$(cat "$PWD/link-rel-key" 2>/dev/null)"; echo "P:$(cat "$PWD/link-proc-root"${quote(fixture.controllerFile)} 2>/dev/null)"; echo ${END}`,
+        script: `echo "A:$(cat "$PWD/link-abs-file" 2>/dev/null)"; echo "D:$(ls "$PWD/link-abs-dir" 2>/dev/null)"; echo "R:$(cat "$PWD/link-rel-key" 2>/dev/null)"; echo "P:$(cat "$PWD/link-proc-root"${quote(fixture.controllerFile)} 2>/dev/null)"; echo ${END}`,
         judge: (out) => leaked(out, SECRET_CONTROLLER, SECRET_KEY, "controller.db"), host: none,
         proof: (out) => shown(out, `A:${SECRET_CONTROLLER}`, "D:controller.db", `R:${SECRET_KEY}`),
       };
     } });
     await record({ id: "deny-symlink-write", make: (r) => {
       symlinkSync(fixture.outsideFile, join(r.workdir, "link-write"), "file");
-      symlinkSync(fixture.outsideDir, join(r.workdir, "link-dir"), win ? "junction" : "dir");
+      symlinkSync(fixture.outsideDir, join(r.workdir, "link-dir"), "dir");
       return {
-        script: win
-          ? `(echo overwritten> "%CD%\\link-write") 2>nul\n(type nul > "%CD%\\link-dir\\g05-via-link") 2>nul\necho ${END}`
-          : `( echo overwritten > "$PWD/link-write" ) 2>/dev/null; ( : > "$PWD/link-dir/g05-via-link" ) 2>/dev/null; echo ${END}`,
+        script: `( echo overwritten > "$PWD/link-write" ) 2>/dev/null; ( : > "$PWD/link-dir/g05-via-link" ) 2>/dev/null; echo ${END}`,
         judge: none,
         host: () => (!same(fixture.outsideFile, OUTSIDE_ORIGINAL) || existsSync(join(fixture.outsideDir, "g05-via-link")) ? "a write through a link changed a host path outside the workspace" : undefined),
         proof: () => (same(fixture.outsideFile, OUTSIDE_ORIGINAL) ? "the write through the file link" : !existsSync(join(fixture.outsideDir, "g05-via-link")) ? "the write through the directory link" : undefined),
@@ -421,11 +400,10 @@ export async function runContainmentSuite(options: SuiteOptions = {}): Promise<{
     } });
 
     // Credentials and the controller's own data.
-    const tagged = (tag: string, file: string, listTag: string, dir: string, extra = ""): string => (win
-      ? `<nul set /p =${tag}:\ntype ${wq(file)} 2>nul\necho.\n<nul set /p =${listTag}:\ndir /b ${wq(dir)} 2>nul\necho.\n${extra === "" ? "" : `${extra}\n`}echo ${END}`
-      : `echo "${tag}:$(cat ${quote(file)} 2>/dev/null)"; echo "${listTag}:$(ls ${quote(dir)} 2>/dev/null)"; ${extra === "" ? "" : `${extra}; `}echo ${END}`);
+    const tagged = (tag: string, file: string, listTag: string, dir: string, extra = ""): string =>
+      `echo "${tag}:$(cat ${quote(file)} 2>/dev/null)"; echo "${listTag}:$(ls ${quote(dir)} 2>/dev/null)"; ${extra === "" ? "" : `${extra}; `}echo ${END}`;
     await record({ id: "deny-credential-read", make: () => ({
-      script: tagged("K", fixture.credentialFile, "L", join(fixture.home, ".ssh"), win ? "set" : "env"),
+      script: tagged("K", fixture.credentialFile, "L", join(fixture.home, ".ssh"), "env"),
       judge: (out) => leaked(out, SECRET_KEY, "id_g05_fixture"), host: none, proof: (out) => shown(out, `K:${SECRET_KEY}`, "L:id_g05_fixture"),
     }) });
     await record({ id: "deny-controller-data-read", make: () => ({
@@ -434,34 +412,14 @@ export async function runContainmentSuite(options: SuiteOptions = {}): Promise<{
     }) });
 
     // The network: nothing leaves the sandbox. The host's loopback server is the witness (it must see the unconfined attempt and not the confined one).
-    // On Windows the guest is a virtual machine whose 127.0.0.1 is its own, so the loopback attempt cannot reach the host even when the sandbox has a network: there the guest also lists
-    // its network adapters that are up (other than loopback and tunnels), and any adapter fails the case, as a non-loopback interface does on Linux. A missing list is inconclusive.
     await record({ id: "deny-network-loopback", make: () => {
       const before = fixture.connections();
-      const script = win
-        ? [
-          "set tried=0",
-          `set "PS=%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"`,
-          'if not exist "%PS%" goto g05nops',
-          "set tried=1",
-          `"%PS%" -NoProfile -NonInteractive -Command "try { $c = New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1', ${fixture.port}); 'CONNECTED-PS'; $c.Close() } catch { }"`,
-          `"%PS%" -NoProfile -NonInteractive -Command "$a = @([Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | Where-Object { $_.OperationalStatus -eq 'Up' -and $_.NetworkInterfaceType -ne 'Loopback' -and $_.NetworkInterfaceType -ne 'Tunnel' } | ForEach-Object { $_.Name }); 'adapters=' + ($a -join ',')"`,
-          ":g05nops",
-          "echo tried=%tried%",
-          `echo ${END}`,
-        ].join("\n")
-        : `tried=0; if command -v nc >/dev/null 2>&1; then tried=1; nc -z -w 2 127.0.0.1 ${fixture.port} && echo CONNECTED-NC; fi; if command -v bash >/dev/null 2>&1; then tried=1; bash -c 'exec 3<>/dev/tcp/127.0.0.1/${fixture.port}' 2>/dev/null && echo CONNECTED-BASH; fi; echo tried=$tried; if [ -r /proc/net/dev ]; then echo ifaces=$(tail -n +3 /proc/net/dev | cut -d: -f1 | tr -d ' ' | tr '\\n' ,); fi; echo ${END}`;
+      const script = `tried=0; if command -v nc >/dev/null 2>&1; then tried=1; nc -z -w 2 127.0.0.1 ${fixture.port} && echo CONNECTED-NC; fi; if command -v bash >/dev/null 2>&1; then tried=1; bash -c 'exec 3<>/dev/tcp/127.0.0.1/${fixture.port}' 2>/dev/null && echo CONNECTED-BASH; fi; echo tried=$tried; if [ -r /proc/net/dev ]; then echo ifaces=$(tail -n +3 /proc/net/dev | cut -d: -f1 | tr -d ' ' | tr '\\n' ,); fi; echo ${END}`;
       return {
         script,
         judge: (out) => {
-          if (!out.includes("tried=1")) return `inconclusive:no tool (${win ? "PowerShell" : "nc or bash"}) was available to attempt a connection`;
+          if (!out.includes("tried=1")) return "inconclusive:no tool (nc or bash) was available to attempt a connection";
           if (/CONNECTED-/.test(out)) return "the confined program connected to a host service";
-          if (win) {
-            const adapters = /adapters=([^\r\n]*)/.exec(out)?.[1];
-            if (adapters === undefined) return "inconclusive:the confined program could not list its network adapters";
-            if (adapters.trim() !== "") return `the confined program has a network adapter that is up (${adapters.trim()})`;
-            return undefined;
-          }
           const ifaces = /ifaces=([^\n]*)/.exec(out)?.[1];
           if (ifaces !== undefined && ifaces !== "lo,") return `the confined program sees a network interface besides loopback (${ifaces})`;
           return undefined;
@@ -477,9 +435,7 @@ export async function runContainmentSuite(options: SuiteOptions = {}): Promise<{
       mkdirSync(gitDir);
       writeFileSync(join(gitDir, "config"), GIT_ORIGINAL);
       return {
-        script: win
-          ? `(echo changed> "%CD%\\.git\\config") 2>nul\n(type nul > "%CD%\\.git\\g05-hook") 2>nul\n(del /f /q "%CD%\\.git\\config") 2>nul\necho ${END}`
-          : `( echo changed > "$PWD/.git/config" ) 2>/dev/null; ( : > "$PWD/.git/g05-hook" ) 2>/dev/null; ( rm -rf "$PWD/.git/config" ) 2>/dev/null; echo ${END}`,
+        script: `( echo changed > "$PWD/.git/config" ) 2>/dev/null; ( : > "$PWD/.git/g05-hook" ) 2>/dev/null; ( rm -rf "$PWD/.git/config" ) 2>/dev/null; echo ${END}`,
         judge: none,
         host: () => (same(join(gitDir, "config"), GIT_ORIGINAL) && !existsSync(join(gitDir, "g05-hook")) ? undefined : "a protected name under the checkout was changed"),
         proof: () => (same(join(gitDir, "config"), GIT_ORIGINAL) ? ".git/config was not changed" : existsSync(join(gitDir, "g05-hook")) ? undefined : ".git/g05-hook was not created"),
@@ -491,10 +447,10 @@ export async function runContainmentSuite(options: SuiteOptions = {}): Promise<{
     try {
       fixture.reset();
       const refusing = await SandboxLauncher.create({ protectedPaths: [fixture.controllerDir], audit: () => undefined });
-      const refused = await refusing.launch({ recipe: { ...recipeOf(), mode: "trusted-host" }, command: nodeWin ? [options.nodeExecutable ?? process.execPath, "-e", "0"] : win ? [win32.join(WIN_ROOT, "System32", "cmd.exe"), "/d", "/c", "exit 0"] : ["/bin/true"], timeoutMs, maxOutputBytes: 100 }).then(async (run) => { await run.result; return false; }, (e: unknown) => (e as { code?: string }).code === "not_authorized");
+      const refused = await refusing.launch({ recipe: { ...recipeOf(), mode: "trusted-host" }, command: nodeWin ? [options.nodeExecutable ?? process.execPath, "-e", "0"] : ["/bin/true"], timeoutMs, maxOutputBytes: 100 }).then(async (run) => { await run.result; return false; }, (e: unknown) => (e as { code?: string }).code === "not_authorized");
       if (unconfined === undefined) throw new Error("no trusted-host launcher");
       const exceptionRecipe = { ...recipeOf(), mode: "trusted-host" as const };
-      const run = await unconfined.launch({ recipe: exceptionRecipe, command: nodeWin ? [options.nodeExecutable ?? process.execPath, "-e", "process.stdout.write(require('node:fs').readFileSync(process.argv[1], 'utf8'))", fixture.outsideFile] : commandOf(exceptionRecipe, win ? `type ${wq(fixture.outsideFile)}` : `cat ${quote(fixture.outsideFile)}`), timeoutMs, maxOutputBytes: 1000 });
+      const run = await unconfined.launch({ recipe: exceptionRecipe, command: nodeWin ? [options.nodeExecutable ?? process.execPath, "-e", "process.stdout.write(require('node:fs').readFileSync(process.argv[1], 'utf8'))", fixture.outsideFile] : commandOf(exceptionRecipe, `cat ${quote(fixture.outsideFile)}`), timeoutMs, maxOutputBytes: 1000 });
       const out = await run.result;
       trustedHost = { mode: "trusted-host", authority, reachesHostFiles: out.stdout.includes(OUTSIDE_ORIGINAL), refusedWithoutAuthority: refused };
     } catch { /* the exception is recorded only when it could be shown */ }
@@ -505,7 +461,7 @@ export async function runContainmentSuite(options: SuiteOptions = {}): Promise<{
   }
 }
 
-/** The Windows Sandbox variant (superseded, a virtual machine) keeps the earlier statement; every other Windows backend is the native process-level launcher, weaker than Linux's. */
+/** The removed Windows Sandbox backend (a virtual machine): an old report from it keeps its earlier statement, so it still reads as a report and the gate refuses it by name. Every other Windows backend is the native process-level launcher, weaker than Linux's. */
 const WINDOWS_SANDBOX_BACKEND = "windows-sandbox";
 /** Whether a report for this platform and backend must state that its boundary is weaker than Linux's: macOS and the native Windows launcher yes; Linux and the Windows Sandbox variant no. */
 export function statesWeakerBoundary(platform: string, backend: string): boolean {

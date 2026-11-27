@@ -1,4 +1,6 @@
-// Card G05: the controller working-directory check, for the `windows` block of a containment report (scripts/containment-evidence.mjs run --workdir-check FILE).
+// Card G05: the controller working-directory check, for the `nativeWindows` block of a containment report (its `workdirRaw` input, read by parseWorkdirCheck; packages/worker/src/sandbox/
+// containment-windows-native-evidence.ts). It is wired into the owner run once a packaged controller release exists (PACKAGED_CONTROLLER_EXISTS). (Until 2026-11-26 it fed the Windows
+// Sandbox era `windows` block through `containment-evidence.mjs run --workdir-check`, removed with that backend.)
 //   node scripts/g05-workdir-check.mjs --out FILE
 // It generates the real service unit for this platform (packages/controller/src/release/service-units.ts: on Windows the scheduled task), reads the working directory the unit gives the
 // launcher, starts the real release launcher (scripts/nimblenewt-launcher.mjs) from that directory against a disposable release root holding one installed release, and checks the working
