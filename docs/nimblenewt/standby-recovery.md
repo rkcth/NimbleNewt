@@ -5,7 +5,7 @@ This guide is for the person who runs a NimbleNewt installation with a second Po
 ## What is and is not covered
 
 - **Database failover** is making the standby's database writable. NimbleNewt asks PostgreSQL to do it (`pg_promote`), and only when the standby holds everything the recovery manifest lists and the checks below pass.
-- **Controller promotion** is deciding which controller may use that database, and keeping the old controller out. That is a separate step and is not done by the database failover: after a promotion the controller's epoch and holder are exactly as they were. Fencing, the recovery login and consent are card K05's. There is no automatic controller failover in the first release.
+- **Controller promotion** is deciding which controller may use that database, and keeping the old controller out. That is a separate step and is not done by the database failover: after a database promotion the controller's epoch and holder are exactly as they were, and no controller is authorized by it. The controller promotion (below) fences the old controller first and then names the new one. The recovery login, the recovery chat and consent are still to come (card K05). There is no automatic controller failover in the first release.
 - NimbleNewt does not copy the log or speak PostgreSQL's replication protocol. The standby is set up and kept running by you, with PostgreSQL's own streaming replication; NimbleNewt only asks PostgreSQL questions (who is connected, how far behind) and asks it to promote.
 
 ## Asynchronous or synchronous
@@ -37,6 +37,22 @@ Only the controller that holds the current epoch writes. It checks the epoch bef
 
 Ask in chat for the database the controller runs on (for example "is the recovery manifest up to date?"), and the answer says how often the manifest is written, when the latest was written, its epoch and counters, how many records and artifact files it lists, how many audit entries and deliveries were written since (a promotion checked against it cannot vouch for those), and why the last write did not go through, if it did not. Only the owner sees it. The answer reads `manifest.json` only; its other files are checked when a promotion or a restore report reads them.
 
+## Promoting a controller
+
+When the controller that used a store is given up for lost, `promoteController` hands the store to another controller. It runs against the store the new controller will use: the same SQLite file or PostgreSQL schema, or a database promoted as above. Give it the recovery manifest folder, the artifact store the new controller will use, and the holder name the new controller will be started with (the `holder` start option). That name must differ from the old controller's, or a returning old controller could not be told from the new one.
+
+It works in this order, and stops at the first thing that fails:
+
+1. It checks, changing nothing. Someone must have used the store before (a store nobody has used needs no promotion), and no database transfer may hold it. The manifest in the folder must be whole and written under the epoch of the controller being replaced. A manifest from an earlier epoch is stale, because the controller may have written things it does not list, and it is refused. A manifest from a later epoch than the store means the store is an older copy, and that is refused too. The store must hold every record the manifest lists, and the new controller's artifact store must hold every file.
+2. It fences the old controller. It takes the epoch from the one it checked, but only if it has not moved (so a controller that started in the meantime wins, and nothing is fenced). The epoch's holder then names the promotion and the epoch it replaced. From that moment the store refuses every write of the old controller: commands, deliveries, timers, recovery manifests, and taking the store back at its old epoch. The old controller's dispatcher meets the fence at its next round, stops for good and ends the workers it runs.
+3. It records the fence in the store (`controller-authority`, audited as `controller.fenced`).
+4. It writes a new manifest from the store, which nobody else can change now, and checks the new controller's artifact files against it. So the decision is made on a manifest written after the fence, not one the old controller left behind. Work the old controller did after its last manifest is covered as well.
+5. Only then does it name the new controller (audited as `controller.promoted`).
+
+From then on a start on that store is refused unless it uses the name the promotion gave. A returning old controller is refused, and so is any other name. If the promotion stops after the fence (an artifact file the new controller lacks, a full disk), the store stays fenced and no controller may start, the intended one included. The record says why. Fix what it names and run the promotion again: it still knows which controller the first fence replaced. No option skips the fence or a check.
+
+Ask in chat for the database the controller runs on ("was the old controller fenced?"). The owner's answer gives the last promotion, the epoch fenced, the controller named (or why none was) and the manifest it was decided on.
+
 ## SQLite and backups
 
 SQLite has no standby. Its recovery is the last good backup; `reportRestoredStore` compares the restored store with a manifest written before the loss and says how many audit entries, records and artifact files the backup does not have. Backups are unchanged by all of this: a backup made beside a standby restores into any backend with no standby and no manifest.
@@ -47,7 +63,8 @@ After a failover, `measureLoss` compares the writes the controller was told succ
 
 ## What is not here yet
 
-- Apart from the scheduled manifest and its status lines, nothing in this guide can be reached from chat, the status page or the API yet: card K05 adds the recovery chat, the endpoint, fencing of the old controller and the consent step. Promotion, loss measurement and the restore report are building blocks until then.
+- Apart from the scheduled manifest and the status lines (the manifest, and the last controller promotion), nothing in this guide can be reached from chat, the status page or the API yet. Card K05 still adds the recovery chat, the separate recovery login and endpoint, keeping workers stopped until they are reconciled, and the consent step. Database promotion, controller promotion, loss measurement and the restore report are building blocks until then.
+- The controller promotion fences through the store. An old controller still running on its own copy of the database after a database failover (a partition) is not reached by that fence. Its recovery manifests are stopped by the newer manifest in the folder, but its own database still accepts its writes.
 - The manifest folder is a start option, not yet an entry in the configuration document, and copying the folder and the artifact files to the standby host is still yours to arrange.
 - There is no automatic failover. Nothing promotes a standby by itself.
 - It has been tested with both servers on one machine, talking over the local loopback address. A standby on another host, a slow or broken network (including one that is neither up nor down), separate clocks, TLS and connection poolers have not been tested.
