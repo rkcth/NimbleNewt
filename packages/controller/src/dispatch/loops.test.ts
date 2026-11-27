@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { DomainError } from "../domain/errors.js";
+import { text as wellFormed } from "../domain/model.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { activeAgents, assignedTaskIn, attendanceLoops, coverageLoops, budgetNoticeLoops, decisionLoops, eventLoops, meetingLoops, messageLoops, projectIds, recordLoops, responsibilityLoops, archiveLoops, untoldImprovementLoops, untoldLessonLoops, attemptWaker, wakeLoops, recoveryLoops, standupLoops, sourceLoops } from "./loops.js";
 import { buildWorld, workGrants } from "./testing/world.js";
@@ -322,6 +323,36 @@ test("the owner is shown a lesson outcome that has not reached its proposer for 
   const [fails] = untoldLessonLoops({ untold: async (_by, p) => [{ id: `lsn-${p}`, revision: 1, title: "x", status: "accepted", decidedAt: "2026-11-01T00:00:00.000Z" }] }, async () => ["p1", "p2"], async (n) => { order.push(n.projectId); if (n.projectId === "p1") throw new Error("inbox full"); });
   await assert.rejects(fails!.run({ id: "service:dispatcher", kind: "service" } as never), /1 project\(s\): p1: inbox full/);
   assert.deepEqual(order, ["p1", "p2"]);
+  // First review: more untold lessons than one page are all shown (a shown notice does not mark the lesson, so one page would hide the rest for good); pages of 100, each after the last of the one before.
+  const all = Array.from({ length: 230 }, (_, i) => `lsn-${String(i).padStart(3, "0")}`);
+  const pages: string[] = [];
+  const shown: string[] = [];
+  const [paged] = untoldLessonLoops({ untold: async (_by, _p, _ms, limit, afterId) => { pages.push(`${limit}:${afterId ?? "-"}`); const from = afterId === undefined ? 0 : all.indexOf(afterId) + 1; return all.slice(from, from + limit!).map((id) => ({ id, revision: 1, title: "x", status: "rejected", decidedAt: "2026-11-01T00:00:00.000Z" })); } }, async () => ["p1"], async (n) => { shown.push(n.lessonId); });
+  await paged!.run({ id: "service:dispatcher", kind: "service" } as never);
+  assert.deepEqual(shown, all);
+  assert.deepEqual(pages, ["100:-", "100:lsn-099", "100:lsn-199"]);
+  // Bounded: a list that never ends (it cannot, at 500 entries) is read at most five pages a tick.
+  let calls = 0;
+  const [endless] = untoldLessonLoops({ untold: async (_by, _p, _ms, limit) => { calls++; return Array.from({ length: limit! }, (_, i) => ({ id: `lsn-${calls}-${i}`, revision: 1, title: "x", status: "rejected", decidedAt: "2026-11-01T00:00:00.000Z" })); } }, async () => ["p1"], async () => undefined);
+  await endless!.run({ id: "service:dispatcher", kind: "service" } as never);
+  assert.equal(calls, 5);
+  // A title with a character outside the BMP across the cut is cut before it, so the notice is well-formed text the notifications accept (the lesson and the improvement notice alike).
+  const astral = `${"a".repeat(58)}\u{1F600}${"b".repeat(10)}`;
+  const texts: string[] = [];
+  const [l2] = untoldLessonLoops({ untold: async () => [{ id: "lsn-3", revision: 1, title: astral, status: "rejected", decidedAt: "2026-11-01T00:00:00.000Z" }] }, async () => ["p1"], async (n) => { texts.push(n.text); });
+  const [i2] = untoldImprovementLoops({ untold: async () => [{ id: "imp-3", revision: 1, title: astral, disposition: "rejected", decidedAt: "2026-11-01T00:00:00.000Z" }] }, async () => ["p1"], async (n) => { texts.push(n.text); });
+  await l2!.run({ id: "service:dispatcher", kind: "service" } as never);
+  await i2!.run({ id: "service:dispatcher", kind: "service" } as never);
+  for (const t of texts) { assert.equal(wellFormed(t, "detail", { min: 1, max: 200 }), t); assert.ok(t.includes(`"${"a".repeat(58)}…"`), t); }
+  const fits = `${"a".repeat(57)}\u{1F600}${"b".repeat(10)}`;
+  const kept: string[] = [];
+  await untoldLessonLoops({ untold: async () => [{ id: "lsn-4", revision: 1, title: fits, status: "rejected", decidedAt: "2026-11-01T00:00:00.000Z" }] }, async () => ["p1"], async (n) => { kept.push(n.text); })[0]!.run({ id: "service:dispatcher", kind: "service" } as never);
+  assert.ok(kept[0]!.includes(`"${"a".repeat(57)}\u{1F600}…"`), kept[0]);
+  // One lesson's notice that cannot be shown does not hold back the project's other lessons; the project is named as failed.
+  const served: string[] = [];
+  const [one] = untoldLessonLoops({ untold: async () => ["lsn-x", "lsn-y", "lsn-z"].map((id) => ({ id, revision: 1, title: "t", status: "rejected", decidedAt: "2026-11-01T00:00:00.000Z" })) }, async () => ["p1"], async (n) => { if (n.lessonId === "lsn-x") throw new Error("refused"); served.push(n.lessonId); });
+  await assert.rejects(one!.run({ id: "service:dispatcher", kind: "service" } as never), /1 project\(s\): p1: refused/);
+  assert.deepEqual(served, ["lsn-y", "lsn-z"]);
 });
 
 test("archive loop: one project's failure does not skip the others and is raised afterwards (card K06)", async () => {

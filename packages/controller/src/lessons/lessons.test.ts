@@ -440,6 +440,13 @@ for (const backend of backends) {
     assert.deepEqual(await c.lessons.untold(c.host, c.a, week), [{ id: l, revision: rev, title: "Small patches pass review", status: "rejected", proposedBy: c.dev.id, decidedAt }]);
     assert.deepEqual(await c.lessons.untold(c.owner, c.b, week), []);
     assert.equal((await c.lessons.untold(c.owner, c.a, 0)).length, 1);
+    // First review: another project's list that names this lesson does not list it for that project.
+    await new CommandRunner(c.storage, c.epoch, options).command("test.put", { commandId: cid("put"), actor: c.owner.id }, async () => ({ payload: {}, build: async () => ({ ref: { kind: "lesson-index", id: c.b }, creates: true, changes: [{ type: "create" as const, ref: { kind: "lesson-index", id: c.b }, body: { ids: [l] } as never }], detail: {} }) }));
+    assert.deepEqual(await c.lessons.untold(c.owner, c.b, week), []);
+    // A host or service acting for a task (a task credential) may neither list nor mark them.
+    const scoped = { ...c.host, taskScope: { taskId: c.taskA, projectId: c.a } } as Principal;
+    await refuses("forbidden", () => c.lessons.untold(scoped, c.a, week), /may not list untold lesson outcomes/);
+    await refuses("forbidden", () => c.lessons.markTold(scoped, l, rev), /may not mark lesson outcomes told/);
     // Only the owner, a host or a service may list them; bad arguments are refused.
     for (const who of [c.dev, c.mgr, c.reader, c.eve]) await refuses("forbidden", () => c.lessons.untold(who, c.a, week), /may not list untold lesson outcomes/);
     for (const bad of [-1, Number.NaN, Number.POSITIVE_INFINITY, "1" as never]) await refuses("invalid_command", () => c.lessons.untold(c.host, c.a, bad), /olderThanMs/);
@@ -491,6 +498,12 @@ for (const backend of backends) {
     now += week;
     assert.deepEqual((await c.lessons.untold(c.host, c.a, week, 2)).map((x) => x.id), more.slice(0, 2));
     assert.deepEqual((await c.lessons.untold(c.host, c.a, week)).map((x) => x.id), more);
+    // Paged after an entry (first review): the next page starts after it, the last gives none, and an ID that is not on the list gives none rather than starting over.
+    assert.deepEqual((await c.lessons.untold(c.host, c.a, week, 1, more[0]!)).map((x) => x.id), [more[1]]);
+    assert.deepEqual((await c.lessons.untold(c.host, c.a, week, 2, more[1]!)).map((x) => x.id), [more[2]]);
+    assert.deepEqual(await c.lessons.untold(c.host, c.a, week, 100, more[2]!), []);
+    assert.deepEqual(await c.lessons.untold(c.host, c.a, week, 100, "lsn-aaaaaaaaaaaaaaaaaaaa"), []);
+    for (const bad of ["", "../x", 7 as never]) await refuses("invalid_command", () => c.lessons.untold(c.host, c.a, week, 100, bad), /afterId/);
   });
 
   if (backend.name === backends[0]!.name) {

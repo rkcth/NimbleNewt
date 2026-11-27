@@ -1039,9 +1039,10 @@ export class StandupService {
     // leave the agent never told. A newer outcome of the same record that waits replaces it. Before, a second preparation before the meeting removed the line it had just told.
     const existing = await this.#runner.get("standup-brief", briefId);
     const old = existing?.body as unknown as BriefBody | undefined;
+    const toldLines = new Set<BriefEntry>();
     for (const e of old?.advice ?? []) {
       const only = e.cites.length === 1 ? e.cites[0]! : undefined;
-      if (only !== undefined && (only.kind === "lesson" || only.kind === "improvement-item") && !sections.advice.some((x) => x.cites.some((y) => y.kind === only.kind && y.id === only.id))) sections.advice.push(e);
+      if (only !== undefined && (only.kind === "lesson" || only.kind === "improvement-item") && !sections.advice.some((x) => x.cites.some((y) => y.kind === only.kind && y.id === only.id))) { sections.advice.push(e); toldLines.add(e); }
     }
     // Messages are delivered at the boundary by the agent itself (it reads and confirms them); the brief only tells it they are there.
     if (this.#options.waitingMessages !== undefined) {
@@ -1051,7 +1052,12 @@ export class StandupService {
     const next = open.filter((t) => t.body.state !== "blocked").sort((a, b) => b.priority - a.priority || (a.id < b.id ? -1 : 1)).slice(0, STANDUP_LIMITS.priorities);
     for (const t of next) sections.priorities.push({ text: `${cut(t.body.title, 120)} (priority ${t.priority}, ${STATE_WORDS[t.body.state]}).`, cites: [tcite(t)] });
     const more: Partial<Record<BriefSection, number>> = {};
-    for (const s of BRIEF_SECTIONS) if (sections[s].length > STANDUP_LIMITS.section) { more[s] = sections[s].length - STANDUP_LIMITS.section; sections[s] = sections[s].slice(0, STANDUP_LIMITS.section); }
+    // A kept told line is never the one cut (it came from a stored brief, so there are at most as many as the limit): other advice lines that grew since give way, in order, and wait for the next brief.
+    for (const s of BRIEF_SECTIONS) if (sections[s].length > STANDUP_LIMITS.section) {
+      more[s] = sections[s].length - STANDUP_LIMITS.section;
+      let room = STANDUP_LIMITS.section - (s === "advice" ? toldLines.size : 0);
+      sections[s] = sections[s].filter((e) => (s === "advice" && toldLines.has(e)) || room-- > 0).slice(0, STANDUP_LIMITS.section);
+    }
     // Only an outcome whose line is still in the brief after the section limit counts as told; one cut off is told next time (B03 second slice; before, a cut-off improvement decision was marked told too).
     const kept = (kind: string) => ([id, revision]: [string, number]): boolean => sections.advice.some((e) => e.cites.some((c) => c.kind === kind && c.id === id && c.revision === revision));
     const told = { briefed: briefedItems.filter(kept("improvement-item")), lessons: briefedLessons.filter(kept("lesson")) };

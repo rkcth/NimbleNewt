@@ -375,16 +375,21 @@ export class LessonService {
 
   /**
    * Outcomes that have waited longer than `olderThanMs` since they were decided without reaching their proposer (owner, host or service only), so the owner can be shown them and an outcome is never lost
-   * quietly. Each carries the revision it waits at, so the owner is shown it once per revision. Reads the project's current list only (at most 1000), oldest first; at most `limit` (default 50, 1 to 100).
+   * quietly. Each carries the revision it waits at, so the owner is shown it once per revision. Reads the project's current list only (at most 500), oldest first; at most `limit` (default 50, 1 to 100),
+   * after the entry `afterId` when given (an ID no longer on the list gives none, so a caller paging through never starts over).
    */
-  async untold(by: Principal, projectId: string, olderThanMs: number, limit = 50): Promise<{ id: string; revision: number; title: string; status: LessonStatus; proposedBy: string; decidedAt: string }[]> {
+  async untold(by: Principal, projectId: string, olderThanMs: number, limit = 50, afterId?: string): Promise<{ id: string; revision: number; title: string; status: LessonStatus; proposedBy: string; decidedAt: string }[]> {
     if ((by.kind !== "owner" && by.kind !== "host" && by.kind !== "service") || by.taskScope !== undefined) throw new DomainError("forbidden", `${by.id} may not list untold lesson outcomes`);
     if (typeof olderThanMs !== "number" || !Number.isFinite(olderThanMs) || olderThanMs < 0) invalid("olderThanMs", "must be zero or more");
     const most = whole(limit, "limit", 1, LESSON_LIMITS.page);
+    const after = afterId === undefined ? undefined : this.#id(afterId, "afterId");
     const project = checkProjectId(projectId);
     const cutoff = Date.parse(this.#runner.now()) - olderThanMs;
     const out: { id: string; revision: number; title: string; status: LessonStatus; proposedBy: string; decidedAt: string }[] = [];
-    for (const id of (await this.#index(project)).ids) {
+    const ids = (await this.#index(project)).ids;
+    const from = after === undefined ? 0 : ids.indexOf(after) + 1;
+    if (after !== undefined && from === 0) return out;
+    for (const id of ids.slice(from)) {
       if (out.length >= most) break;
       const got = await this.#lesson(id);
       if (got === undefined || got.body.projectId !== project || !got.body.outcomePending) continue;

@@ -130,6 +130,16 @@ export function lessonOutcomeLoops(lessons: { deliverOutcomes(by: Principal, pro
   } }];
 }
 
+/**
+ * A title cut to 60 UTF-16 units for an owner notice (whose detail holds 200), never inside a surrogate pair: a notice with half a pair is refused as malformed text, so the same title would fail on every tick
+ * (B03 second slice, first review; the improvement notice had the same cut).
+ */
+const shortTitle = (title: string): string => {
+  if (title.length <= 60) return title;
+  const head = title.slice(0, 59);
+  return `${/[\uD800-\uDBFF]$/.test(head) ? head.slice(0, -1) : head}…`;
+};
+
 /** M03e: a decision on an improvement that has gone untold for some days is shown to the owner (once per decision), project by project. */
 export function untoldImprovementLoops(improvements: { untold(by: Principal, projectId: string, olderThanMs: number): Promise<readonly { id: string; revision: number; title: string; disposition: string; decidedAt: string }[]> }, projects: () => Promise<readonly string[]>, tell: (notice: { readonly key: string; readonly projectId: string; readonly itemId: string; readonly text: string }) => Promise<unknown>, days = 7): DispatcherLoop[] {
   if (!Number.isFinite(days) || days <= 0) throw new Error("days must be above zero");
@@ -137,7 +147,7 @@ export function untoldImprovementLoops(improvements: { untold(by: Principal, pro
     const failed: string[] = [];
     for (const projectId of await projects()) {
       try {
-        for (const item of await improvements.untold(by, projectId, days * 86_400_000)) await tell({ key: `imu:${item.id}:${item.revision}`, projectId, itemId: item.id, text: `The decision on the improvement "${item.title.length > 60 ? `${item.title.slice(0, 59)}…` : item.title}" (${item.disposition}, decided ${item.decidedAt.slice(0, 10)}) has not reached its proposer for ${days} days or more.` });
+        for (const item of await improvements.untold(by, projectId, days * 86_400_000)) await tell({ key: `imu:${item.id}:${item.revision}`, projectId, itemId: item.id, text: `The decision on the improvement "${shortTitle(item.title)}" (${item.disposition}, decided ${item.decidedAt.slice(0, 10)}) has not reached its proposer for ${days} days or more.` });
       } catch (error) { failed.push(`${projectId}: ${error instanceof Error ? error.message : String(error)}`); }
     }
     if (failed.length > 0) throw new Error(`untold improvement decisions could not be shown for ${failed.length} project(s): ${failed.slice(0, 3).join("; ")}`);
@@ -146,15 +156,27 @@ export function untoldImprovementLoops(improvements: { untold(by: Principal, pro
 
 /**
  * Card B03 (second slice): an evaluated lesson outcome that has not reached its proposer for some days (no task to file it on and the proposer not at a stand-up, or its notice cannot be filed) is shown to the
- * owner, once per lesson and revision (the key), project by project. One project's failure does not stop the others.
+ * owner, once per lesson and revision (the key), project by project. One project's failure, or one lesson's notice that cannot be shown, does not stop the others.
  */
-export function untoldLessonLoops(lessons: { untold(by: Principal, projectId: string, olderThanMs: number): Promise<readonly { id: string; revision: number; title: string; status: string; decidedAt: string }[]> }, projects: () => Promise<readonly string[]>, tell: (notice: { readonly key: string; readonly projectId: string; readonly lessonId: string; readonly text: string }) => Promise<unknown>, days = 7): DispatcherLoop[] {
+export function untoldLessonLoops(lessons: { untold(by: Principal, projectId: string, olderThanMs: number, limit?: number, afterId?: string): Promise<readonly { id: string; revision: number; title: string; status: string; decidedAt: string }[]> }, projects: () => Promise<readonly string[]>, tell: (notice: { readonly key: string; readonly projectId: string; readonly lessonId: string; readonly text: string }) => Promise<unknown>, days = 7): DispatcherLoop[] {
   if (!Number.isFinite(days) || days <= 0) throw new Error("days must be above zero");
   return [{ name: "lessons.untold", run: async (by) => {
     const failed: string[] = [];
     for (const projectId of await projects()) {
       try {
-        for (const l of await lessons.untold(by, projectId, days * 86_400_000)) await tell({ key: `lsu:${l.id}:${l.revision}`, projectId, lessonId: l.id, text: `The outcome of the lesson "${l.title.length > 60 ? `${l.title.slice(0, 59)}…` : l.title}" (${l.status}, decided ${l.decidedAt.slice(0, 10)}) has not reached its proposer for ${days} days or more.` });
+        // Paged through the whole current list (at most 500 lessons, so five pages of 100): showing a notice does not mark the lesson, so with one page the oldest ones would hide every later one for good.
+        let after: string | undefined;
+        let refused: { error: unknown } | undefined;
+        for (let page = 0; page < 5; page++) {
+          const got = await lessons.untold(by, projectId, days * 86_400_000, 100, after);
+          // One notice that cannot be shown does not hold back the project's other lessons; the project is named as failed after them.
+          for (const l of got) {
+            try { await tell({ key: `lsu:${l.id}:${l.revision}`, projectId, lessonId: l.id, text: `The outcome of the lesson "${shortTitle(l.title)}" (${l.status}, decided ${l.decidedAt.slice(0, 10)}) has not reached its proposer for ${days} days or more.` }); } catch (error) { if (refused === undefined) refused = { error }; }
+          }
+          if (got.length < 100) break;
+          after = got[got.length - 1]!.id;
+        }
+        if (refused !== undefined) throw refused.error;
       } catch (error) { failed.push(`${projectId}: ${error instanceof Error ? error.message : String(error)}`); }
     }
     if (failed.length > 0) throw new Error(`untold lesson outcomes could not be shown for ${failed.length} project(s): ${failed.slice(0, 3).join("; ")}`);

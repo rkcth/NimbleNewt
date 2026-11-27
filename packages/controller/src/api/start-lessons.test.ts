@@ -132,6 +132,8 @@ test("a lesson outcome with no task reaches its proposer in the stand-up brief t
     };
     const annLesson = await lessonOf(ann, "a", "Shorter locks speed builds");
     const zedLesson = await lessonOf(zed, "z", "Fewer locks speed builds");
+    // First review: a second untold lesson of Zed's, so the owner's notices must be one per lesson (a key shared by the project would show only one).
+    const zedLesson2 = await lessonOf(zed, "z2", "Lock-free builds");
     const pending = async (id: string): Promise<boolean> => (await ok(boot.token, "lesson.get", { lessonId: id })).item.outcomePending as boolean;
     const tick = async (): Promise<readonly { name: string; ok: boolean }[]> => { const t = await c.dispatch!.dispatcher.tick(); await c.dispatch!.dispatcher.idle(); return t.loops; };
     const loops = await tick();
@@ -158,7 +160,7 @@ test("a lesson outcome with no task reaches its proposer in the stand-up brief t
     skew = 8 * 86_400_000;
     for (let i = 0; i < 3; i++) { const l = await tick(); assert.ok(l.some((x) => x.name === "lessons.untold" && x.ok), JSON.stringify(l.filter((x) => x.name === "lessons.untold"))); }
     const items = await shown();
-    assert.deepEqual(items.map((b) => [b.ref.id, b.projectId, b.kind, b.count]), [[zedLesson, project, "maintenance", 1]]);
-    assert.match(items[0]!.detail, /^The outcome of the lesson "Fewer locks speed builds" \(rejected, decided \d{4}-\d\d-\d\d\) has not reached its proposer for 7 days or more\.$/);
+    assert.deepEqual(items.map((b) => [b.ref.id, b.projectId, b.kind, b.level, b.count]).sort((x, y) => (x[0] < y[0] ? -1 : 1)), [[zedLesson, project, "maintenance", "notice", 1], [zedLesson2, project, "maintenance", "notice", 1]].sort((x, y) => (x[0]! < y[0]! ? -1 : 1)));
+    assert.match(items.find((b) => b.ref.id === zedLesson)!.detail, /^The outcome of the lesson "Fewer locks speed builds" \(rejected, decided \d{4}-\d\d-\d\d\) has not reached its proposer for 7 days or more\.$/);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

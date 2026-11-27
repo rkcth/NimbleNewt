@@ -816,7 +816,7 @@ for (const backend of backends) {
     // Another project's lesson named on this project's list, and a pending lesson that is not on the list: neither is carried.
     await c.put("lesson", foreign, lesson(foreign, { projectId: c.b, title: "Secret plan lesson" }));
     await c.put("lesson", offList, lesson(offList, { title: "Not listed" }));
-    await c.put("lesson", ofB, lesson(ofB, { proposedBy: c.pB, status: "accepted", finding: "Held in three reviews", title: "Review early" }));
+    await c.put("lesson", ofB, lesson(ofB, { proposedBy: c.pB, status: "accepted", finding: `Held in three reviews${" and again".repeat(80)}`, title: "Review early" }));
     await c.put("lesson-index", c.a, { ids: [mineL, toldL, foreign, ofB, 7, "lsn-ffffffffffffffffffff"] });
     const told: [string, number][] = [];
     const tracking = c.make({ onLessonBriefed: async (_by: unknown, id: string, revision: number) => { told.push([id, revision]); } });
@@ -826,8 +826,14 @@ for (const backend of backends) {
     assert.deepEqual(lines(c.pA).map((e) => [e.text, e.cites]), [[`Your lesson "Small patches pass review" (version 2) was rejected: Size made no difference`, [{ kind: "lesson", id: mineL, revision: 1 }]]]);
     assert.deepEqual(lines(c.pB).map((e) => e.cites[0]!.id), [ofB], "each brief carries its own agent's outcomes only, and a told one is not carried");
     assert.match(lines(c.pB)[0]!.text, /\(version 2\) was accepted\. Finding: Held in three reviews/);
+    // First review: a long finding is cut, as an improvement's outcome line is (400 characters and the mark).
+    assert.ok([...lines(c.pB)[0]!.text].length <= 402 && lines(c.pB)[0]!.text.endsWith("..."), lines(c.pB)[0]!.text);
     assert.deepEqual(lines(c.pC), []);
     assert.deepEqual(told.sort(), [[mineL, 1], [ofB, 1]]);
+    // First review: a hook that fails for one lesson does not keep the others from being told (each is tried; a failed one is told again next time).
+    const tried: string[] = [];
+    await c.make({ onLessonBriefed: async (_by: unknown, id: string) => { tried.push(id); if (tried.length === 1) throw new Error("storage busy"); } }).prepare(c.host, w.occ);
+    assert.deepEqual(tried.sort(), [mineL, ofB].sort());
 
     // The real lesson service marks it told at that revision: a told rejected lesson leaves the project's list; a lesson changed after the brief (a newer revision) stays pending.
     const { LessonService } = await import("../lessons/index.js");
@@ -899,6 +905,24 @@ for (const backend of backends) {
     }
     await make().prepare(c.host, w.occ);
     assert.deepEqual(told.sort(), [I, L]);
+    // First review: once told, both lines stay in this meeting's brief even when the section fills up again (the five questions open again): a told line is never the one cut; a question gives way.
+    const update = async (kind: string, id: string, patch: Record<string, unknown>): Promise<void> => {
+      const r = new CommandRunner(c.storage, c.epoch, options);
+      const cur = (await r.get(kind, id))!;
+      await r.command("test.patch", { commandId: cid("pt"), actor: c.owner.id }, async () => ({ payload: {}, build: async () => ({ ref: { kind, id }, creates: false, changes: [{ type: "update" as const, ref: { kind, id }, expectedRevision: cur.revision, body: { ...(cur.body as object), ...patch } as never }], detail: {} }) }));
+    };
+    await update("lesson", L, { outcomePending: false });
+    await update("improvement-item", I, { returnPending: false });
+    for (const q of asked.slice(0, 5)) await update("inquiry", q, { state: "open" });
+    told.length = 0;
+    at("2026-10-21T05:30:00.000Z");
+    await make().prepare(c.host, w.occ);
+    const full = (await c.standups.briefs(c.owner, w.occ)).find((b) => b.agent === c.pA) as unknown as BriefBody;
+    assert.equal(full.advice.length, 25);
+    assert.deepEqual(full.advice.filter((e) => e.cites.some((x) => x.id === L || x.id === I)).map((e) => e.cites[0]!.id).sort(), [I, L]);
+    assert.equal(full.advice.filter((e) => e.cites.some((x) => x.kind === "inquiry")).length, 23);
+    assert.equal(full.more.advice, A.more.advice, "the same lines as the first time, so the same number left out");
+    assert.deepEqual(told, []);
   });
 
   suite("a full list of waiting outcomes never blocks a state change: the outcome goes on an overflow list, is listed again when there is room, is mentioned on the next agenda, and one that fits nowhere is marked", async (c) => {
