@@ -111,8 +111,11 @@ export class IntegratorWake {
    */
   async landingOf(taskId: string): Promise<{ readonly budgetTaskId: string; readonly projectId: string; readonly branch: string; readonly agentId: string } | undefined> {
     const found = await this.#runner.get(LANDING_TASK_KIND, taskId);
-    const b = found?.body as Partial<LandingTaskBody> | undefined;
-    if (b === undefined || typeof b.frontTaskId !== "string" || !ID.test(b.frontTaskId) || typeof b.projectId !== "string" || typeof b.branch !== "string" || typeof b.agentId !== "string") return undefined;
+    if (found === undefined) return undefined;
+    const b = found.body as Partial<LandingTaskBody> | null;
+    // A record that does not read as one the wake writes is damage, never "no landing task": read as none, the task would run as ordinary work paid from no allowance. The dispatcher's claim of that one task fails.
+    if (b === null || typeof b !== "object" || typeof b.frontTaskId !== "string" || !ID.test(b.frontTaskId) || typeof b.projectId !== "string" || !ID.test(b.projectId) || typeof b.branch !== "string" || !BRANCH.test(b.branch)
+      || typeof b.agentId !== "string" || !ID.test(b.agentId) || b.wakeId !== IntegratorWake.wakeIdOf(b.projectId, b.branch)) throw new DomainError("integrity", `the landing record of task ${taskId} is damaged`);
     const owner = (await this.#deps.assignments.getAssignment(taskId))?.owner;
     if (owner === undefined || owner.kind !== "agent" || owner.id !== b.agentId) return undefined;
     return { budgetTaskId: b.frontTaskId, projectId: b.projectId, branch: b.branch, agentId: b.agentId };
@@ -242,13 +245,10 @@ export class IntegratorWake {
     const task = await this.#deps.projects.getTask(taskId);
     if (task === undefined) throw new DomainError("not_found", `landing task ${taskId} is missing`);
     if (task.state === "proposed") await this.#deps.projects.transitionTask({ commandId: `${base}:ready`, actor: WAKE_ACTOR, taskId, expectedRevision: task.revision, to: "ready" });
-    // Already assigned (by someone else before the records were written): the wake is that agent's, whoever this round would have chosen.
+    // Given to someone already (a holder of assignment.manage, in the moment before the records were written): the records still name the integrator this round chose, so the task stays its assignee's ordinary
+    // work (`landingOf` answers only for the named integrator) and is not assigned here; the wake ends when the task ends. Never the assignee's word: that would make any agent a landing task's integrator.
     const assigned = await this.#deps.assignments.getAssignment(taskId);
-    let agentId = w.agentId;
-    if (assigned?.owner !== undefined) {
-      if (assigned.owner.kind !== "agent") throw new DomainError("invalid_command", `landing task ${taskId} is owned by someone other than an agent`);
-      agentId = assigned.owner.id;
-    }
+    const agentId = w.agentId;
     const at = this.#runner.now();
     const body: IntegratorWakeBody = { projectId: w.projectId, branch: w.branch, frontTaskId: w.frontTaskId, taskId, agentId, state: "open", frontWakes: w.frontWakes, wakes, at };
     const link: LandingTaskBody = { projectId: w.projectId, branch: w.branch, frontTaskId: w.frontTaskId, agentId, wakeId: w.wakeId, at };
@@ -266,7 +266,7 @@ export class IntegratorWake {
         return { ref, creates: now === undefined, changes, detail: { taskId, agentId, wakes } };
       },
     }));
-    if (assigned?.owner === undefined) await this.#assign(taskId, agentId, w.branch, w.wakeId);
+    if (assigned === undefined) await this.#assign(taskId, agentId, w.branch, w.wakeId);
     return { taskId, agentId };
   }
 

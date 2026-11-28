@@ -159,6 +159,14 @@ for (const backend of backends) {
       assert.equal(((await r.queue.queuesWithEntries()).queues.find((q) => q.projectId === e)?.entries.length), 1, "the queue has approved work behind the reserved first place");
       await r.person("yan", lands([e]));
       assert.deepEqual((await r.wake.round()).woken.filter((x) => x.projectId === e), []);
+      // An integrator holding a live lease of one project it serves is busy for the others (one project at a time), judged on the leases the round read once.
+      const [g, hh] = [await r.project("Ginkgo"), await r.project("Hazel")];
+      const frontG = await r.queued(g);
+      const lee = await r.person("lee", lands([g, hh]));
+      await r.leaseOps.acquire(lee, { commandId: "lee1", taskId: frontG, branch: "main", ttlMs: 10 * MIN });
+      await r.queued(hh);
+      const busyLee = await r.wake.round();
+      assert.deepEqual(busyLee.woken.filter((x) => x.projectId === g || x.projectId === hh), [], JSON.stringify(busyLee));
     } finally { await r.close(); }
   });
 
@@ -238,6 +246,27 @@ for (const backend of backends) {
       await r.person("bbb", lands([c3]));
       const throwing = IntegratorWake.withEpoch(r.w.storage, r.w.epoch, { ...r.deps, assignments: { getAssignment: (t) => r.w.assignments.getAssignment(t), assignTask: async () => { throw new TypeError("broken"); } } }, r.options);
       await assert.rejects(() => throwing.round(), TypeError);
+      await assert.rejects(() => throwing.round(), TypeError, "nor when the next round finishes the same wake");
+      // Given to someone else in the moment between ready and the records (a holder of assignment.manage): the records still name the integrator the round chose, the task is not assigned again, and it is its
+      // assignee's ordinary work (no landing place, nothing of the queued work's allowance), never a landing task of an agent the round did not choose.
+      const c4 = await r.project("Elder");
+      await r.queued(c4);
+      await r.person("ccc", lands([c4]));
+      const grabbing = IntegratorWake.withEpoch(r.w.storage, r.w.epoch, { ...r.deps, projects: { createTask: (c) => r.w.projects.createTask(c), getTask: (t) => r.w.projects.getTask(t), transitionTask: async (c) => {
+        const out = await realTransition(c);
+        await r.w.assignments.assignTask({ commandId: "grab", actor: r.w.owner.id, taskId: c.taskId, owner: { kind: "agent", id: "zed" } });
+        return out;
+      } } }, r.options);
+      const grabbed = await grabbing.round();
+      const t4 = await r.tasksOf(c4);
+      assert.equal(t4.length, 1);
+      assert.deepEqual(grabbed.woken.filter((x) => x.projectId === c4).map((x) => x.agentId), ["ccc"], JSON.stringify(grabbed));
+      assert.equal(((await r.w.storage.getAggregate({ kind: WAKE_KIND, id: IntegratorWake.wakeIdOf(c4, "main") }))?.body as { agentId?: string } | undefined)?.agentId, "ccc");
+      assert.equal(((await r.w.storage.getAggregate({ kind: LANDING_TASK_KIND, id: t4[0]! }))?.body as { agentId?: string } | undefined)?.agentId, "ccc");
+      assert.equal((await r.w.assignments.getAssignment(t4[0]!))?.owner?.id, "zed", "the assignment stands");
+      assert.equal(await r.wake.landingOf(t4[0]!), undefined, "zed's ordinary work");
+      assert.deepEqual((await r.wake.round()).woken.filter((x) => x.projectId === c4), [], "not assigned on a later round either");
+      assert.equal((await r.w.assignments.getAssignment(t4[0]!))?.owner?.id, "zed");
       // A damaged wake record (or one stored under another branch's ID): nobody is woken anywhere, and the owner's view says not known.
       const realId = IntegratorWake.wakeIdOf(a, "main");
       const good = (await r.w.storage.getAggregate({ kind: WAKE_KIND, id: realId }))!.body as Record<string, unknown>;
@@ -253,11 +282,15 @@ for (const backend of backends) {
       assert.equal((await r.wake.round()).stopped, undefined, "repaired");
       await r.raw(WAKE_KIND, "iwk-damaged", good);
       assert.equal((await r.wake.round()).stopped, "the wake records could not all be read", "a good body under another ID is misplaced");
-      // A landing-task record that does not read as one is no landing task (the dispatcher admits it as ordinary work).
-      await r.raw(LANDING_TASK_KIND, "task-hostile", { frontTaskId: "../../x", projectId: a, branch: "main", agentId: "ivy" });
-      assert.equal(await r.wake.landingOf("task-hostile"), undefined);
-      await r.raw(LANDING_TASK_KIND, "task-hostile2", { frontTaskId: frontA, projectId: 7, branch: "main", agentId: "ivy" });
-      assert.equal(await r.wake.landingOf("task-hostile2"), undefined);
+      // A landing-task record that does not read as one is damage, not "no landing task": read as none, the task would run as ordinary work paid from no allowance.
+      const linkOk = { projectId: a, branch: "main", frontTaskId: frontA, agentId: "ivy", wakeId: IntegratorWake.wakeIdOf(a, "main"), at: "2026-01-01T00:00:00.000Z" };
+      assert.equal((await (async () => { await r.raw(LANDING_TASK_KIND, foreign, linkOk); return r.wake.landingOf(foreign); })()), undefined, "a well-formed record is read (and answers nothing while nobody is assigned)");
+      let h = 0;
+      for (const bad of [{ ...linkOk, frontTaskId: "../../x" }, { ...linkOk, projectId: 7 }, { ...linkOk, branch: "main\n", wakeId: IntegratorWake.wakeIdOf(a, "main\n") }, { ...linkOk, projectId: "../p", wakeId: IntegratorWake.wakeIdOf("../p", "main") }, { ...linkOk, agentId: "../x" }, (({ wakeId: _w, ...rest }) => rest)(linkOk), { ...linkOk, wakeId: IntegratorWake.wakeIdOf(a, "old") }, {}]) {
+        h++;
+        await r.raw(LANDING_TASK_KIND, `task-hostile${h}`, bad);
+        await assert.rejects(() => r.wake.landingOf(`task-hostile${h}`), (e: unknown) => e instanceof DomainError && e.code === "integrity", JSON.stringify(bad));
+      }
       // A landing task given to someone else after its wake is that agent's ordinary work: no landing place, and it does not spend the queued work's allowance.
       assert.equal((await r.wake.landingOf(made[0]!))?.budgetTaskId, frontA);
       const asg = (await r.w.assignments.getAssignment(made[0]!))!;
@@ -283,6 +316,52 @@ for (const backend of backends) {
       const late = await r.project("Late");
       await r.queued(late);
       assert.deepEqual((await r.wake.round({ throttled: true })).woken.map((x) => [x.projectId, x.agentId]), [[late, "late"]]);
+    } finally { await r.close(); }
+  });
+
+  test(`${backend.name}: a damaged landing record keeps its task from starting at all; a sound one of another agent leaves it ordinary work (card P10b)`, async () => {
+    const r = await rig();
+    try {
+      const w = r.w;
+      const ann = await w.agent("ann", workGrants(w.project));
+      let ran = 0;
+      w.worker.script = async () => { ran++; return { status: "completed", text: "x" }; };
+      const t = await w.task("Damaged", ann);
+      const sound = { projectId: w.project, branch: "main", frontTaskId: t.taskId, agentId: "someone-else", wakeId: IntegratorWake.wakeIdOf(w.project, "main"), at: "2026-01-01T00:00:00.000Z" };
+      await r.raw(LANDING_TASK_KIND, t.taskId, { ...sound, frontTaskId: "../x" });
+      w.dispatcher = w.restart({ landingOf: (x) => r.wake.landingOf(x) });
+      const tick = await w.dispatcher.tick();
+      assert.ok(!tick.started.includes(t.attemptId!), JSON.stringify(tick));
+      await w.dispatcher.idle();
+      assert.equal(ran, 0);
+      await r.raw(LANDING_TASK_KIND, t.taskId, sound);
+      const later = await w.dispatcher.tick();
+      assert.ok(later.started.includes(t.attemptId!), JSON.stringify(later));
+      await w.dispatcher.idle();
+      assert.equal(ran, 1);
+    } finally { await r.close(); }
+  });
+
+  test(`${backend.name}: a landing attempt does not start once the queued work's allowance is used up, though the landing task has none of its own (card P10b)`, async () => {
+    const r = await rig();
+    try {
+      const w = r.w;
+      const frontA = await r.queued(w.project);
+      await w.budgets.open(w.owner, { commandId: "bo", taskId: frontA, currency: "USD", costMicros: 10_000, computeMs: 3_600_000 });
+      await w.budgets.charge(w.dispatcherPrincipal, { commandId: "use-up", activity: "model-call", taskId: frontA, costMicros: 10_000 });
+      const ivy = await w.agent("ivy", [...workGrants(w.project), ...lands([w.project])]);
+      let ran = 0;
+      w.worker.script = async () => { ran++; return { status: "completed", text: "x" }; };
+      w.dispatcher = w.restart({ landingOf: (t) => r.wake.landingOf(t) });
+      const woken = await r.wake.round();
+      const landingTask = woken.woken[0]!.taskId;
+      const asg = (await w.assignments.getAssignment(landingTask))!;
+      const attempt = (await w.assignments.admitAttempt({ commandId: "adm-l", actor: "inbox", taskId: landingTask, expectedRevision: asg.revision, generation: asg.generation, owner: { kind: "agent", id: ivy.aid }, harness: "pi" })).id;
+      const tick = await w.dispatcher.tick();
+      assert.ok(!tick.started.includes(attempt), JSON.stringify(tick));
+      await w.dispatcher.idle();
+      assert.equal(ran, 0);
+      assert.equal(await w.budgets.report(w.owner, landingTask), undefined, "the landing task has no allowance that could have let it start");
     } finally { await r.close(); }
   });
 
