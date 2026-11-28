@@ -337,6 +337,17 @@ The checkpoint set (one set of the six questions, 3,093 tokens): 6 of 6 answers 
 
 **Local guard report (accepted default).** Per meeting, `server.json` holds the `/stats` and `/sessions` readings before and after and `evictionsCausedByMeeting`: 0 in six of the eight complete meetings, 18 for the agent-first meeting, 65 for the 20-member meeting (with foreign traffic in that window, above). A snapshot store reserved for meetings needs a server setting and is left alone.
 
+### Fifth local batch (Radiance 2.3.0, 2026-11-28 06:23 to 07:09 UTC): the rule-6 pair at 20 members completed
+
+Budget set and committed before the first call (`2964ea26`): $0 cloud, a 3,000,000-token cap on Radiance; 888,414 used. A first attempt at the once-written meeting (05:21 UTC) failed after 11 calls (24,497 tokens), when other clients made the server slow and one call waited about 300 s ("fetch failed"). The retry and the rolling meeting then ran on a quiet server (the request counter rose by exactly their own calls).
+
+| Meeting | Outcome | Calls | Tokens | Cached input | Time |
+|---|---|---|---|---|---|
+| 20 members, chair notes once (`tldr-facts`) | passed 20-0 | 86 | 381,492 | 56.0% | 1,027 s |
+| 20 members, chair notes rolling (`tldr-facts-rolling`) | passed 20-0 | 127 | 482,425 | 44.9% | 1,744 s |
+
+Rolling cost 26% more tokens and 70% more time and changed no outcome. Both notes files name all 20 members. Rule 6 keeps its verdict ("worked once; rolling is not worth it"), now with a completed local pair (one meeting per cell). Raw files: `evidence/m00-raw/batch5/`; figures: `evidence/m00-radiance-batch5.json`; details in implementation-notes, "Live runs on Radiance 2026-11-28".
+
 ## Reproduce
 
 `node prototypes/meeting/run.mjs --scenario ship-owner --variant m00-full --chair pi:gpt-6.1-sol --budget <file> --cap-tokens 3000000`; for OpenRouter `--chair or:z-ai/glm-5.3-prime --price-in 2.8 --price-cached 0.56 --price-out 8.8 --cap-usd 8`; `--provider fake` for a smoke test without a key; `checkpoint.mjs --spec pi:gpt-6.1-sol`; `analyze.mjs 2026-10-23`; `compare.mjs 2026-10-2`. Local server: `run.mjs --scenario tool-adoption --variant m00-structural-p1 --provider radiance --model qwen3.8-flash-next-iq4r --effort medium --fixed-max 6000 --budget <file> --cap-tokens 6000000` (key and address from Pi's own configuration, the `/stats` idle check first; exit code 3 means the server was busy and nothing was sent); `checkpoint.mjs --spec radiance:qwen3.8-flash-next-iq4r`; `radiance-report.mjs 2026-11-17` for the per-run figures.

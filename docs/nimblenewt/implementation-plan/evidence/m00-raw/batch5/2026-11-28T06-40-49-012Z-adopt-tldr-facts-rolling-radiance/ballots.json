@@ -1,0 +1,273 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "yes",
+      "reason": "The cached-scan figure of roughly one minute eliminates my original CI-cost concern, per-rule tuning and Hana's test-directory disables protect signal quality, and the strict day-fourteen per-vertical vote prevents the indefinite-tuning drift I've seen before—my one caveat (Lintwise isn't a dependency auditor) is resolved by Jin's separate lockfile scan outside this policy."
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "yes",
+      "reason": "Priya's cached-scan figure of roughly one minute collapses my queue-throughput concern, the 3-minute fail-open timeout and kill-switch remain in place, and the CI-dashboard-driven auto-demote at fourteen-minute median build gives me the operational guardrail I need without a team vote."
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "yes",
+      "reason": "Secrets rules go hard day one fail-closed with no warning window, and Jin's separate lockfile/CVE scan outside this policy closes the dependency-audit gap I flagged, so the lint gate no longer pretends to be a security tool while still catching the code-quality bugs it's actually good at."
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "yes",
+      "reason": "Every condition I raised—changed-files scanning, two-week warning window, per-rule tuning over a blanket budget, Hana's permanent test-directory disables, fail-closed secrets, educational messages with fix examples, and Ben's strict day-fourteen vote—is codified in Theo's single YAML, and Priya's one-minute cached-scan figure removes the CI-cost objection that originally made me hesitate."
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "yes",
+      "reason": "The policy now guarantees a full two-week warning window covering my SQL and Python pipelines, changed-files-only scanning, per-rule tuning, and a per-vertical day-fourteen vote, so I can verify dialect handling against Postgres and BigQuery and replay my two config-typo outages before any rule goes hard on my merges."
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "yes",
+      "reason": "The policy now mandates per-rule tuning over a blanket budget, permanent test-directory disables for intentional patterns, Vera's weekly hit-rate review with kill authority, and a strict day-fourteen per-vertical vote—so if the 8% tuned FP rate I flagged in round 2 hasn't dropped by then, I can still block promotion, but the structural protections for test signal are sufficient to adopt now."
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "yes",
+      "reason": "Every condition I set in round one—per-vertical sign-off, per-rule tuning over a blanket budget, Hana's permanent test-directory disables, Elena's day-one-hard secrets pass, the separate lockfile scan outside this policy, and Vera's weekly hit-rate data as a prerequisite for the day-fourteen vote—is now codified in the single YAML I will author, so the motion as it stands is exactly the merge policy I own."
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "yes",
+      "reason": "The policy now mandates educational messages with a \"write this instead\" example, a full two-week warning window that protects my early merges, and per-rule tuning that prevents a single noisy rule from blocking me—so Lintwise finally feels like the patient senior reviewer I need while I'm still learning our conventions."
+    },
+    {
+      "agent": "b1",
+      "name": "Ravi",
+      "vote": "yes",
+      "reason": "My six months of real use caught three null-handling bugs with zero false alarms, the cached-scan figure removes my CI-cost concern, every original ask—changed-files scanning, per-vertical rule selection via per-rule tuning, the strict two-week window—is codified in Theo's YAML, and the remaining SQL-dialect verification I'll do on staging before the day-fourteen vote."
+    },
+    {
+      "agent": "b2",
+      "name": "Mei",
+      "vote": "yes",
+      "reason": "The cached-scan figure of roughly one minute, the three-minute fail-open lint timeout, and the CI-dashboard-driven auto-demote at fourteen-minute median build together protect my queue throughput, so the gate no longer threatens the pipeline I own."
+    },
+    {
+      "agent": "b3",
+      "name": "Noah",
+      "vote": "yes",
+      "reason": "The policy now guarantees secrets fail-closed on day one with no warning window and commits Jin to a separate lockfile/CVE scan outside this policy, resolving both halves of my security-scope concern; my remaining staging-incident replay is a pre-vote validation step, not a structural gap in the motion."
+    },
+    {
+      "agent": "b4",
+      "name": "Zoe",
+      "vote": "yes",
+      "reason": "Every condition I raised—changed-files scanning, the two-week warning window explicitly covering JSX/hook false positives, per-rule tuning over a blanket budget, and educational messages with a \"write this instead\" example—is now codified in Theo's single YAML, and Tom and I will co-tune the JS rule set during the warning window to bring my 30% untuned noise down before the day-fourteen vote."
+    },
+    {
+      "agent": "b5",
+      "name": "Omar",
+      "vote": "yes",
+      "reason": "The policy now guarantees changed-files-only scanning, a full two-week warning window covering my SQL and Python pipeline code, per-rule tuning over a blanket budget, and mandatory educational messages with fix examples—and the day-fourteen per-vertical vote gives me a hard checkpoint to verify Postgres and BigQuery dialect handling before any rule goes hard on my dbt models."
+    },
+    {
+      "agent": "b6",
+      "name": "Hana",
+      "vote": "yes",
+      "reason": "The three permanent test-directory disables, the test-dir-scoped per-rule hit-rate check before the day-fourteen vote, and the two-week warning window fully covering test files protect the one signal I trust most, and per-rule tuning over a blanket budget keeps noise from eroding QA confidence."
+    },
+    {
+      "agent": "b7",
+      "name": "Ben",
+      "vote": "yes",
+      "reason": "The policy now reflects exactly the consolidated structure I insisted on—single YAML, tiered timeouts, strict two-week per-vertical vote, per-rule tuning, and auto-demote from the CI dashboard—closing the two prior repo-wide reversal failure modes I flagged, and I will co-author and validate the kill-switch on staging before day fourteen."
+    },
+    {
+      "agent": "b8",
+      "name": "Ida",
+      "vote": "yes",
+      "reason": "Every condition I asked for—full warning-window coverage, changed-files-only scanning, educational messages with a \"write this instead\" example, and Vera's intern-readable weekly summary—is now baked into Theo's policy, so the gate genuinely helps me learn conventions instead of guessing, and I trust Jin's YAML and Ben's strict timeline to keep it from drifting."
+    },
+    {
+      "agent": "b9",
+      "name": "Kofi",
+      "vote": "yes",
+      "reason": "The ~1-minute cached scan removes my queue-throughput objection, the auto-demote at fourteen-minute median from the CI dashboard and kill-switch authority protect the pipeline I own, and I'll validate on staging before the day-fourteen vote—but I see no reason to withhold support now that Theo's YAML encodes every operational guardrail I asked for."
+    },
+    {
+      "agent": "b10",
+      "name": "Lena",
+      "vote": "yes",
+      "reason": "The consolidated policy addresses every concern I raised—changed-files scanning, warning window covering React Native hook and ref patterns, educational messages with fix examples, day-one fail-closed secrets, and per-rule tuning over a blanket budget—and I'll validate the co-tuned ruleset against my React Native patterns before the day-fourteen vote."
+    },
+    {
+      "agent": "b11",
+      "name": "Theo",
+      "vote": "yes",
+      "reason": "The consolidated policy—changed-files scanning at ~1 min cached, tiered timeouts with day-one fail-closed secrets, per-rule tuning over a blanket budget, permanent test-directory disables, a strict two-week window ending in a per-vertical hard/soft vote, CI-dashboard auto-demote, and a separate lockfile audit outside this gate—addresses every material risk raised without fragmenting into twenty per-person exceptions, and I will ship the YAML by Thursday."
+    },
+    {
+      "agent": "b12",
+      "name": "Vera",
+      "vote": "yes",
+      "reason": "Six months of hands-on use showed real bug-catching value at roughly one minute of cached CI cost, and the policy now addresses my core concerns—per-rule tuning with weekly hit-rate review, permanent test-directory disables, day-one secrets, and a strict two-week gate with no drift—so the signal-to-noise ratio is enforceable before the gate goes hard."
+    }
+  ],
+  "ballotHistory": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "yes",
+      "reason": "The cached-scan figure of roughly one minute eliminates my original CI-cost concern, per-rule tuning and Hana's test-directory disables protect signal quality, and the strict day-fourteen per-vertical vote prevents the indefinite-tuning drift I've seen before—my one caveat (Lintwise isn't a dependency auditor) is resolved by Jin's separate lockfile scan outside this policy.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "yes",
+      "reason": "Priya's cached-scan figure of roughly one minute collapses my queue-throughput concern, the 3-minute fail-open timeout and kill-switch remain in place, and the CI-dashboard-driven auto-demote at fourteen-minute median build gives me the operational guardrail I need without a team vote.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "yes",
+      "reason": "Secrets rules go hard day one fail-closed with no warning window, and Jin's separate lockfile/CVE scan outside this policy closes the dependency-audit gap I flagged, so the lint gate no longer pretends to be a security tool while still catching the code-quality bugs it's actually good at.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "yes",
+      "reason": "Every condition I raised—changed-files scanning, two-week warning window, per-rule tuning over a blanket budget, Hana's permanent test-directory disables, fail-closed secrets, educational messages with fix examples, and Ben's strict day-fourteen vote—is codified in Theo's single YAML, and Priya's one-minute cached-scan figure removes the CI-cost objection that originally made me hesitate.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "yes",
+      "reason": "The policy now guarantees a full two-week warning window covering my SQL and Python pipelines, changed-files-only scanning, per-rule tuning, and a per-vertical day-fourteen vote, so I can verify dialect handling against Postgres and BigQuery and replay my two config-typo outages before any rule goes hard on my merges.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "yes",
+      "reason": "The policy now mandates per-rule tuning over a blanket budget, permanent test-directory disables for intentional patterns, Vera's weekly hit-rate review with kill authority, and a strict day-fourteen per-vertical vote—so if the 8% tuned FP rate I flagged in round 2 hasn't dropped by then, I can still block promotion, but the structural protections for test signal are sufficient to adopt now.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "yes",
+      "reason": "Every condition I set in round one—per-vertical sign-off, per-rule tuning over a blanket budget, Hana's permanent test-directory disables, Elena's day-one-hard secrets pass, the separate lockfile scan outside this policy, and Vera's weekly hit-rate data as a prerequisite for the day-fourteen vote—is now codified in the single YAML I will author, so the motion as it stands is exactly the merge policy I own.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "yes",
+      "reason": "The policy now mandates educational messages with a \"write this instead\" example, a full two-week warning window that protects my early merges, and per-rule tuning that prevents a single noisy rule from blocking me—so Lintwise finally feels like the patient senior reviewer I need while I'm still learning our conventions.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b1",
+      "name": "Ravi",
+      "vote": "yes",
+      "reason": "My six months of real use caught three null-handling bugs with zero false alarms, the cached-scan figure removes my CI-cost concern, every original ask—changed-files scanning, per-vertical rule selection via per-rule tuning, the strict two-week window—is codified in Theo's YAML, and the remaining SQL-dialect verification I'll do on staging before the day-fourteen vote.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b2",
+      "name": "Mei",
+      "vote": "yes",
+      "reason": "The cached-scan figure of roughly one minute, the three-minute fail-open lint timeout, and the CI-dashboard-driven auto-demote at fourteen-minute median build together protect my queue throughput, so the gate no longer threatens the pipeline I own.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b3",
+      "name": "Noah",
+      "vote": "yes",
+      "reason": "The policy now guarantees secrets fail-closed on day one with no warning window and commits Jin to a separate lockfile/CVE scan outside this policy, resolving both halves of my security-scope concern; my remaining staging-incident replay is a pre-vote validation step, not a structural gap in the motion.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b4",
+      "name": "Zoe",
+      "vote": "yes",
+      "reason": "Every condition I raised—changed-files scanning, the two-week warning window explicitly covering JSX/hook false positives, per-rule tuning over a blanket budget, and educational messages with a \"write this instead\" example—is now codified in Theo's single YAML, and Tom and I will co-tune the JS rule set during the warning window to bring my 30% untuned noise down before the day-fourteen vote.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b5",
+      "name": "Omar",
+      "vote": "yes",
+      "reason": "The policy now guarantees changed-files-only scanning, a full two-week warning window covering my SQL and Python pipeline code, per-rule tuning over a blanket budget, and mandatory educational messages with fix examples—and the day-fourteen per-vertical vote gives me a hard checkpoint to verify Postgres and BigQuery dialect handling before any rule goes hard on my dbt models.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b6",
+      "name": "Hana",
+      "vote": "yes",
+      "reason": "The three permanent test-directory disables, the test-dir-scoped per-rule hit-rate check before the day-fourteen vote, and the two-week warning window fully covering test files protect the one signal I trust most, and per-rule tuning over a blanket budget keeps noise from eroding QA confidence.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b7",
+      "name": "Ben",
+      "vote": "yes",
+      "reason": "The policy now reflects exactly the consolidated structure I insisted on—single YAML, tiered timeouts, strict two-week per-vertical vote, per-rule tuning, and auto-demote from the CI dashboard—closing the two prior repo-wide reversal failure modes I flagged, and I will co-author and validate the kill-switch on staging before day fourteen.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b8",
+      "name": "Ida",
+      "vote": "yes",
+      "reason": "Every condition I asked for—full warning-window coverage, changed-files-only scanning, educational messages with a \"write this instead\" example, and Vera's intern-readable weekly summary—is now baked into Theo's policy, so the gate genuinely helps me learn conventions instead of guessing, and I trust Jin's YAML and Ben's strict timeline to keep it from drifting.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b9",
+      "name": "Kofi",
+      "vote": "yes",
+      "reason": "The ~1-minute cached scan removes my queue-throughput objection, the auto-demote at fourteen-minute median from the CI dashboard and kill-switch authority protect the pipeline I own, and I'll validate on staging before the day-fourteen vote—but I see no reason to withhold support now that Theo's YAML encodes every operational guardrail I asked for.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b10",
+      "name": "Lena",
+      "vote": "yes",
+      "reason": "The consolidated policy addresses every concern I raised—changed-files scanning, warning window covering React Native hook and ref patterns, educational messages with fix examples, day-one fail-closed secrets, and per-rule tuning over a blanket budget—and I'll validate the co-tuned ruleset against my React Native patterns before the day-fourteen vote.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b11",
+      "name": "Theo",
+      "vote": "yes",
+      "reason": "The consolidated policy—changed-files scanning at ~1 min cached, tiered timeouts with day-one fail-closed secrets, per-rule tuning over a blanket budget, permanent test-directory disables, a strict two-week window ending in a per-vertical hard/soft vote, CI-dashboard auto-demote, and a separate lockfile audit outside this gate—addresses every material risk raised without fragmenting into twenty per-person exceptions, and I will ship the YAML by Thursday.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b12",
+      "name": "Vera",
+      "vote": "yes",
+      "reason": "Six months of hands-on use showed real bug-catching value at roughly one minute of cached CI cost, and the policy now addresses my core concerns—per-rule tuning with weekly hit-rate review, permanent test-directory disables, day-one secrets, and a strict two-week gate with no drift—so the signal-to-noise ratio is enforceable before the gate goes hard.",
+      "trigger": "original ballot"
+    }
+  ],
+  "result": {
+    "yes": 20,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  }
+}
