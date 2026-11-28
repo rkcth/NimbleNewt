@@ -302,18 +302,24 @@ export class IntegratorWake {
   /**
    * Ends a wake's landing task (cancelled) when nothing runs on it: true when this call ended it. A task with an attempt admitted or running is left alone (the attempt ends as usual; a later round ends the task). The
    * transition carries a check of the assignment's revision, so an attempt admitted between the look and the write makes the write fail rather than end a task under a running attempt. A task with no assignment yet
-   * (the round assigns it first) is not ended here. The command ID derives from the task and the reason, so a repeat after a crash is the same command.
+   * (a round that stopped between the wake's records and its assignment) is ended too: no attempt can run on a task with no assignment, and an admission carries a check of the task's revision, which the end
+   * changes, so nothing is admitted on the ended task. Left open, such a wake would never end once its queue is empty (only a queue's first place finishes a wake), and its integrator would stay counted busy in every
+   * project it serves. An assignment made between the look and the write makes the write fail (a later round judges the task again). The command ID derives from the task and the reason, so a repeat after a crash is the same command.
    */
   async #end(taskId: string, why: "landed" | "taken"): Promise<boolean> {
     const ref: AggregateRef = { kind: "assignment", id: assignmentIdOf(taskId) };
     const asg = await this.#runner.get("assignment", ref.id);
-    if (asg === undefined || (asg.body as { activeAttemptId?: unknown }).activeAttemptId !== undefined) return false;
+    if (asg !== undefined && (asg.body as { activeAttemptId?: unknown }).activeAttemptId !== undefined) return false;
     const task = await this.#deps.projects.getTask(taskId);
     if (task === undefined || task.state === "done" || task.state === "cancelled") return false;
     await this.#deps.projects.transitionTask({ commandId: `iwk-end:${taskId}:${why}`, actor: WAKE_ACTOR, taskId, expectedRevision: task.revision, to: "cancelled" }, {
       payload: { landingEnd: why },
       check: async () => {
         const now = await this.#runner.get("assignment", ref.id);
+        if (asg === undefined) {
+          if (now !== undefined) throw new DomainError("invalid_transition", `landing task ${taskId} was assigned meanwhile; a later round judges it again`);
+          return { changes: [], detail: { landingEnd: why } };
+        }
         if (now === undefined || now.revision !== asg.revision || (now.body as { activeAttemptId?: unknown }).activeAttemptId !== undefined) throw new DomainError("invalid_transition", `landing task ${taskId} has an attempt now; it ends through that attempt`);
         return { changes: [{ type: "check", ref, expectedRevision: now.revision }], detail: { landingEnd: why } };
       },

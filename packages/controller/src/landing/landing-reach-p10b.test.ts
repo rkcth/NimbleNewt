@@ -524,4 +524,73 @@ for (const backend of backends) {
       await refuses("unauthenticated", () => w.credentials.authenticate(s1.credential));
     } finally { await r.close(); }
   });
+  test(`${backend.name}: a wake left unassigned whose work then leaves the queue is ended, so its integrator is not counted busy for ever (card P10b, second review)`, async () => {
+    const r = await rig();
+    try {
+      const [a, b] = [await r.project("Apple"), await r.project("Birch")];
+      const frontA = await r.queued(a);
+      await r.person("ivy", integrates([a, b]));
+      // The round stops after the wake's records and before its assignment (a refused assignment): the wake is open, its task assigned to nobody.
+      let failing = true;
+      const flaky = IntegratorWake.withEpoch(r.w.storage, r.w.epoch, { queue: r.queue, leases: r.leases, capacity: r.capacity, projects: r.w.projects, assignments: { getAssignment: (t) => r.w.assignments.getAssignment(t), assignTask: async (c) => { if (failing) { failing = false; throw new DomainError("unavailable", "store fault"); } return r.w.assignments.assignTask(c); } }, landingBranch: async () => "main", activeAgent: async () => true }, r.options);
+      const one = await flaky.round();
+      assert.deepEqual([one.woken.length, one.unreadable], [0, 1], JSON.stringify(one));
+      const open = (await r.wake.now()).open;
+      assert.equal(open.length, 1);
+      const tA = open[0]!.taskId;
+      assert.equal(await r.w.assignments.getAssignment(tA), undefined);
+      // Before the next round, the work leaves the queue (the owner landed it or took it out): no queue is left to finish the wake from.
+      await r.queue.remove({ commandId: "out-a", actor: "controller", projectId: a, branch: "main", taskId: frontA, reason: "taken out" });
+      const two = await r.wake.round();
+      assert.deepEqual(two.ended?.map((x) => [x.taskId, x.why]), [[tA, "landed"]], JSON.stringify(two));
+      assert.equal((await r.w.projects.getTask(tA))?.state, "cancelled");
+      assert.equal(await r.w.assignments.getAssignment(tA), undefined, "nothing was assigned to the ended task");
+      // ivy is free again: Birch's work wakes it.
+      await r.queued(b);
+      const three = await r.wake.round();
+      assert.deepEqual(three.woken.map((x) => [x.projectId, x.agentId]), [[b, "ivy"]], JSON.stringify(three));
+    } finally { await r.close(); }
+  });
+
+  test(`${backend.name}: an unassigned wake assigned in the moment before its end keeps its task; a live hold of an integrator that is not active is not "taken" (card P10b, second review)`, async () => {
+    const r = await rig();
+    try {
+      const a = await r.project("Apple");
+      const frontA = await r.queued(a);
+      await r.person("ivy", integrates([a]));
+      const zoe = await r.person("zoe", integrates([a]));
+      let failing = true;
+      const deps = { queue: r.queue, leases: r.leases, capacity: r.capacity, projects: r.w.projects, landingBranch: async () => "main", activeAgent: async () => true };
+      const flaky = IntegratorWake.withEpoch(r.w.storage, r.w.epoch, { ...deps, assignments: { getAssignment: (t) => r.w.assignments.getAssignment(t), assignTask: async (c) => { if (failing) { failing = false; throw new DomainError("unavailable", "store fault"); } return r.w.assignments.assignTask(c); } } }, r.options);
+      const one = await flaky.round();
+      assert.equal(one.woken.length, 0, JSON.stringify(one));
+      const tA = (await r.wake.now()).open[0]!.taskId;
+      await r.queue.remove({ commandId: "out-a", actor: "controller", projectId: a, branch: "main", taskId: frontA, reason: "taken out" });
+      // The end's look sees no assignment; the owner assigns the task before the end's write: the write is refused and the task stays the assignee's.
+      let reads = 0;
+      const projects = {
+        ...r.w.projects, createTask: r.w.projects.createTask.bind(r.w.projects), transitionTask: r.w.projects.transitionTask.bind(r.w.projects),
+        getTask: async (id: string) => {
+          if (id === tA && ++reads === 2) await r.w.assignments.assignTask({ commandId: "own-asg", actor: r.w.owner.id, taskId: tA, owner: { kind: "agent", id: "ivy" }, reason: "the owner's choice" });
+          return r.w.projects.getTask(id);
+        },
+      };
+      const racing = IntegratorWake.withEpoch(r.w.storage, r.w.epoch, { ...deps, projects: projects as never, assignments: r.w.assignments }, r.options);
+      const two = await racing.round();
+      assert.deepEqual([two.ended, two.unreadable, (await r.w.projects.getTask(tA))?.state], [undefined, 1, "ready"], JSON.stringify(two));
+      assert.equal((await r.w.assignments.getAssignment(tA))?.owner?.id, "ivy");
+
+      // New work; zoe holds the branch but is not active (as the controller sees her): that hold does not make the wake "taken".
+      await r.end(tA);
+      await r.queued(a);
+      const three = await r.wake.round();
+      const t2 = three.woken[0]!.taskId;
+      await r.leaseOps.acquire(zoe, { commandId: "zoe", taskId: frontA, branch: "main", ttlMs: 30 * MIN });
+      const notActive = IntegratorWake.withEpoch(r.w.storage, r.w.epoch, { ...deps, assignments: r.w.assignments, activeAgent: async (id: string) => id !== "zoe" }, r.options);
+      const four = await notActive.round();
+      assert.deepEqual([four.ended, (await r.w.projects.getTask(t2))?.state], [undefined, "ready"], JSON.stringify(four));
+      const five = await r.wake.round();
+      assert.deepEqual(five.ended?.map((x) => [x.taskId, x.why]), [[t2, "taken"]], JSON.stringify(five));
+    } finally { await r.close(); }
+  });
 }
