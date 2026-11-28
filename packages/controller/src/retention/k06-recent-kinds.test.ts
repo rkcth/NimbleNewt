@@ -233,6 +233,9 @@ for (const backend of backends) {
     assert.deepEqual([note.projectId, note.detail], ["", stoppedText({ told: "many" } as never, ok)]);
     assert.match(note.detail, / 0 task\(s\) were told/);
     assert.match(affectedLine(stopped), /0 task\(s\) found and 0 told/);
+    // An unfinished stop: the line says the owner's notice could not be sent only when it was not (second review).
+    assert.doesNotMatch(affectedLine(stopped), /could not be sent/);
+    assert.match(affectedLine({ ...stopped, stopped: { ...stopped.stopped!, told: false } }), /kept failing for 14 days and was stopped: .* The owner's notice of this could not be sent\.$/);
     assert.equal((await c.storage.getAggregate({ kind: "adoption-look", id: forged }))!.body["stopped"], undefined);
     // A finished tool look whose finish notice kept failing: stopped with its result in the notice (counts, partial kept as it was, no `partial` added).
     const toolDone = "adp-eeeeeeeeeeeeeeeeeeee"; const toldDone = "adp-ffffffffffffffffffff"; const nul = "adp-gggggggggggggggggggg";
@@ -276,6 +279,17 @@ for (const backend of backends) {
     assert.deepEqual([sk.stopped?.told, sk.stopped?.finished, sk.partial, sk.notified], [true, true, undefined, true]);
     assert.equal(c.notices.length, before3, "no stop notice for an owner already told");
     assert.equal(affectedLine(sk), "Which tasks applied the practice is not recorded, so no task was found or told.");
+    // A stopped look listed again (a restored list): it leaves the list at its turn, its record is not written and no notice is given (second review: it kept its place for good).
+    await c.put("adoption-looks", "installation", { pending: [forged, stuck, ok] });
+    const skBefore = JSON.stringify(await c.storage.getAggregate({ kind: "adoption-look", id: stuck }));
+    const okBefore = JSON.stringify(await c.storage.getAggregate({ kind: "adoption-look", id: ok }));
+    const before4 = c.notices.length;
+    const svc4 = c.make({ looks: c.ports({ notifyOk: true }) });
+    for (let i = 0; i < 3; i++) await svc4.sweepAffected();
+    assert.deepEqual(await c.pending(), [forged]);
+    assert.equal(JSON.stringify(await c.storage.getAggregate({ kind: "adoption-look", id: stuck })), skBefore);
+    assert.equal(JSON.stringify(await c.storage.getAggregate({ kind: "adoption-look", id: ok })), okBefore);
+    assert.equal(c.notices.length, before4, "no notice for a stopped look");
     // Bad and odd clocks never stop a look.
     assert.equal(AffectedWorkLook.overdue("not a time", new Date(t0).toISOString()), false);
     assert.equal(AffectedWorkLook.overdue(new Date(t0).toISOString(), "not a time"), false);

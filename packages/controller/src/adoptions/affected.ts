@@ -135,8 +135,9 @@ export class AffectedWorkLook {
       const got = await this.read(adoptionId);
       if (got === undefined) return undefined;
       const look = got.body;
-      // A stopped look is over: it is not carried on and the owner's finish notice is not sent for it.
-      if (stoppedOf(look) !== undefined) return look;
+      // A stopped look is over: it is not carried on and the owner's finish notice is not sent for it. One still in the pending list (a damaged or restored store: the stop write also unlists) leaves it,
+      // as a told one does, so it does not take a place there for good (second K06 review).
+      if (stoppedOf(look) !== undefined) { await this.#unlist(adoptionId); return look; }
       if (look.state === "done") {
         // A told look still in the pending list (only a damaged or restored store holds one: the told write also unlists) leaves it, so it does not take a place there for good.
         if (look.notified !== true) await this.#finish(ports, adoptionId, look, got.revision); else await this.#unlist(adoptionId);
