@@ -207,20 +207,21 @@ for (const backend of backends) {
     // Without the catalog no tool is adopted (fail closed); a practice still is.
     await c.make().withdraw(c.owner, { commandId: cid("w"), adoptionId: id, expectedRevision: await c.rev(id), reason: "make room" });
     const exp2 = await c.experiment();
-    const t2 = await c.ask(exp2, tool());
+    // (dev has 4 requests waiting here; the next ones are asked by the reader, since one asker has at most 5 waiting.)
+    const t2 = await c.ask(exp2, tool(), c.reader);
     await refuses("unavailable", async () => c.make({ tools: undefined }).approve(c.maint, { commandId: cid("ap"), adoptionId: t2, expectedRevision: await c.rev(t2), review: "r" }));
-    const p2 = await c.ask(exp2);
+    const p2 = await c.ask(exp2, PRACTICE, c.reader);
     await c.make({ tools: undefined }).approve(c.maint, { commandId: cid("ap"), adoptionId: p2, expectedRevision: await c.rev(p2), review: "r" });
     assert.equal((await c.body(p2)).status, "active");
     // A catalog that cannot answer is no answer: refused, not adopted.
     await c.make().decline(c.owner, { commandId: cid("d"), adoptionId: t2, expectedRevision: await c.rev(t2), reason: "make room" });
-    const t3 = await c.ask(await c.experiment(), tool());
-    await refuses("not_found", async () => c.make({ tools: { get: async () => { throw new DomainError("forbidden", "no"); } } }).approve(c.maint, { commandId: cid("ap"), adoptionId: t3, expectedRevision: await c.rev(t3), review: "r" }));
-    await assert.rejects(() => c.make({ tools: { get: async () => { throw new Error("disk gone"); } } }).approve(c.maint, { commandId: cid("ap"), adoptionId: t3, expectedRevision: 1, review: "r" }), /disk gone/);
+    const t3 = await c.ask(await c.experiment(), tool(), c.reader);
+    await refuses("not_found", async () => c.make({ tools: { standingOf: (nm, v) => c.cat.standingOf(nm, v), get: async () => { throw new DomainError("forbidden", "no"); } } }).approve(c.maint, { commandId: cid("ap"), adoptionId: t3, expectedRevision: await c.rev(t3), review: "r" }));
+    await assert.rejects(() => c.make({ tools: { standingOf: (nm, v) => c.cat.standingOf(nm, v), get: async () => { throw new Error("disk gone"); } } }).approve(c.maint, { commandId: cid("ap"), adoptionId: t3, expectedRevision: 1, review: "r" }), /disk gone/);
     // A catalog answering another name or version than asked is not that version.
     const real = (await c.cat.get(c.owner, "toolbox.fetch", "1.0.0"))!;
-    await refuses("not_found", () => c.make({ tools: { get: async () => ({ ...real, version: "0.9.0" }) as never } }).approve(c.maint, { commandId: cid("ap"), adoptionId: t3, expectedRevision: 1, review: "r" }));
-    await refuses("not_found", () => c.make({ tools: { get: async () => ({ ...real, name: "toolbox.other" }) as never } }).approve(c.maint, { commandId: cid("ap"), adoptionId: t3, expectedRevision: 1, review: "r" }));
+    await refuses("not_found", () => c.make({ tools: { standingOf: (nm, v) => c.cat.standingOf(nm, v), get: async () => ({ ...real, version: "0.9.0" }) as never } }).approve(c.maint, { commandId: cid("ap"), adoptionId: t3, expectedRevision: 1, review: "r" }));
+    await refuses("not_found", () => c.make({ tools: { standingOf: (nm, v) => c.cat.standingOf(nm, v), get: async () => ({ ...real, name: "toolbox.other" }) as never } }).approve(c.maint, { commandId: cid("ap"), adoptionId: t3, expectedRevision: 1, review: "r" }));
     assert.equal((await c.body(t3)).status, "requested");
   });
 
@@ -395,18 +396,22 @@ for (const backend of backends) {
     // A reviewer who registered the version, or wrote its executable, is not independent (the owner always is).
     const real = (await c.cat.get(c.owner, "toolbox.fetch", "1.0.0"))!;
     const t = await c.ask(await c.experiment(), tool());
-    const as = (over: Record<string, unknown>) => c.make({ tools: { get: async () => ({ ...real, ...over }) as never } });
+    const as = (over: Record<string, unknown>) => c.make({ tools: { standingOf: (nm, v) => c.cat.standingOf(nm, v), get: async () => ({ ...real, ...over }) as never } });
     await refuses("forbidden", async () => as({ registeredBy: c.maint.id }).approve(c.maint, { commandId: cid("ap"), adoptionId: t, expectedRevision: await c.rev(t), review: "r" }), /not independent/);
     await refuses("forbidden", async () => as({ executable: { ...real.instructional, author: c.maint.id } }).approve(c.maint, { commandId: cid("ap"), adoptionId: t, expectedRevision: await c.rev(t), review: "r" }), /not independent/);
     assert.equal((await c.body(t)).status, "requested");
     await as({ registeredBy: c.owner.id }).approve(c.owner, { commandId: cid("ap"), adoptionId: t, expectedRevision: await c.rev(t), review: "r" });
-    // At most 300 adoptions are kept in a project: the next request is refused and stores nothing.
+    // A list of 300 whose oldest are ended (here IDs with no open adoption) no longer refuses: the oldest ended one leaves the list in the same write and is counted as archived (the retention slice).
     const runner = new CommandRunner(c.storage, c.epoch, options);
     const index = (await runner.get("adoption-index", c.a))!;
     const ids = (index.body as { ids: string[] }).ids;
     const full = [...ids, ...Array.from({ length: 300 - ids.length }, (_, i) => `adp-${String.fromCharCode(97 + (i % 26)).repeat(19)}${String.fromCharCode(97 + Math.floor(i / 26))}`)];
     await runner.command("test.fill", { commandId: cid("t"), actor: c.owner.id }, async () => ({ payload: {}, build: async () => ({ ref: { kind: "adoption-index", id: c.a }, creates: false, changes: [{ type: "update" as const, ref: { kind: "adoption-index", id: c.a }, expectedRevision: index.revision, body: { ...(index.body as object), ids: full } as never }], detail: {} }) }));
-    await refuses("unavailable", async () => c.ask(await c.experiment()), /300 adoptions/);
-    assert.equal(((await runner.get("adoption-index", c.a))!.body as { ids: string[] }).ids.length, 300);
+    const next = await c.ask(await c.experiment());
+    const after = (await runner.get("adoption-index", c.a))!.body as { ids: string[]; archived: number };
+    const openIds = Object.values((index.body as { open: Record<string, string> }).open);
+    const dropped = full.find((x) => !openIds.includes(x))!;
+    assert.deepEqual([after.ids.length, after.ids.at(-1), after.archived, after.ids.includes(dropped)], [300, next, 1, false]);
+    assert.deepEqual(after.ids.slice(0, -1), full.filter((x) => x !== dropped), "only the oldest ended one left the list, in order");
   });
 }

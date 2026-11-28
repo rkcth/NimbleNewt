@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { ArtifactService, FileBlobStore } from "../artifacts/index.js";
 import { ScriptedInterpreter } from "../chat/index.js";
+import { ManualTimer } from "../dispatch/testing/timer.js";
+import { PI } from "../dispatch/testing/world.js";
+import { defaultReply } from "../meetings/floor-suite.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { startController } from "./index.js";
 
@@ -54,6 +57,80 @@ test("a status question in the owner chat of the started controller is answered 
     // A made-up task is not a fabricated answer.
     const none = await turn("s4", "how is the moon task going", { kind: "task", taskId: "task-aaaaaaaaaaaaaaaaaaaa" });
     assert.notEqual(none.outcomes[0]!.status, "answered", JSON.stringify(none.outcomes));
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("the status view, the Needs-you list and the floor's Needs-you read write nothing after a start, even when the stored list of open inquiries is missing or stale; they still list the open inquiry, and the scheduled turn stores the list (cards U05, M05)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-status-"));
+  let clock = Date.now();
+  const say: Record<string, unknown[]> = {};
+  const start = () => startController({
+    storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+    dispatch: { timer: new ManualTimer(), manual: true, intervalMs: 1000, clock: () => new Date(clock).toISOString() },
+    notifications: { clock: () => new Date(clock).toISOString() },
+    meetingFloor: { runner: { turn: async (r) => defaultReply(r) } },
+    chat: { interpreter: new ScriptedInterpreter((input) => say[input.text] ?? []) },
+  });
+  let c = await start();
+  const INDEX = { kind: "meeting-floor-inquiries", id: "installation" };
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = (await c.services.principals.authenticate(boot.token))!;
+    const call = async (op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    const project = (await call("project.create", { name: "Garden" }, "p1")).result.id as string;
+    await c.services.principals.enroll(rob, { commandId: "e-ann", kind: "agent", name: "ann", grants: [{ action: "task.read", project }, { action: "meeting.attend", project }] });
+    const ann = (await c.services.principals.issueCredential(rob, "agent:ann")).token;
+    const urgent = await call("meeting.call-urgent", { projectId: project, title: "Frost", reason: "frost tonight", roster: ["agent:ann"], durationMinutes: 180 }, "mu1");
+    const rec = (await call("meeting.record.open", { occurrenceId: urgent.result.id, chair: "agent:ann" }, "mo1")).result.id as string;
+    assert.ok((await c.api.handle(ann, { v: 1, op: "meeting.record.join", commandId: "j1", args: { recordId: rec } } as never) as any).ok);
+    assert.ok((await call("meeting.floor.start", { recordId: rec }, "fs1")).ok);
+    assert.ok((await call("meeting.floor.inquiry-open", { recordId: rec }, "iq1")).ok);
+    const stored = async (): Promise<{ revision: number; ids: unknown } | undefined> => { const a = await c.storage.getAggregate(INDEX); return a === undefined ? undefined : { revision: a.revision, ids: (a.body as { ids?: unknown }).ids }; };
+    assert.deepEqual((await stored())?.ids, [rec], "opening the inquiry listed it");
+    const write = async (change: (revision: number | undefined) => unknown): Promise<void> => {
+      const found = await c.storage.getAggregate(INDEX);
+      await c.storage.applyOperation({ operationId: `seed-${clock}-${Math.random()}`, epoch: c.epoch, actor: "test", correlationId: "seed", at: new Date(clock).toISOString(), changes: [{ ref: INDEX, ...(change(found?.revision) as object) }], audit: [{ type: "seed", subject: INDEX, detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);
+    };
+    let n = 0;
+    for (const [label, change] of [
+      ["missing", (r: number | undefined) => ({ type: "delete", expectedRevision: r })],
+      ["stale (it leaves the open inquiry out)", (r: number | undefined) => (r === undefined ? { type: "create", body: { ids: [] } } : { type: "update", expectedRevision: r, body: { ids: [] } })],
+      ["untrustworthy (not a list)", (r: number | undefined) => (r === undefined ? { type: "create", body: { ids: "x" } } : { type: "update", expectedRevision: r, body: { ids: "x" } })],
+    ] as const) {
+      await write(change);
+      // a start: the new floor service has not checked the list yet
+      await c.close();
+      c = await start();
+      const token = (await c.services.principals.authenticate(boot.token)) === undefined ? undefined : boot.token;
+      assert.ok(token !== undefined);
+      const listBefore = await stored();
+      // every operation commits at least one audit entry (storage refuses one without), so counting them counts every write; the owner chat's own message records are left out, as in the test above
+      const audit = async (): Promise<string[]> => {
+        const out: string[] = [];
+        for (let after = 0; ;) { const page = await c.storage.listAudit({ afterSeq: after, limit: 500 }); for (const x of page) if (!x.type.startsWith("chat.")) out.push(x.type); if (page.length < 500) return out; after = page.at(-1)!.seq; }
+      };
+      const before = await audit();
+      {
+        const needs = await call("status.ask", { request: { kind: "needs_you" } });
+        assert.ok(needs.ok, JSON.stringify(needs));
+        assert.deepEqual((needs.result.item.items as { kind: string; id: string }[]).filter((i) => i.kind === "meeting-inquiry").map((i) => i.id), [rec], `${label}: the open inquiry is on the Needs-you list`);
+        const floorNeeds = await call("meeting.floor.needs-you", {});
+        assert.deepEqual((floorNeeds.result.items as { recordId: string }[]).map((i) => i.recordId), [rec], `${label}: and on the floor's own Needs-you`);
+        const overview = await call("status.ask", { request: { kind: "overview", projectId: project } });
+        assert.ok(overview.ok, JSON.stringify(overview));
+        for (const [text, request] of [[`what needs me ${n}`, { kind: "needs_you" }], [`what is going on in Garden ${n}`, { kind: "overview", projectId: project }]] as const) {
+          say[text] = [{ kind: "status", request, evidence: text, basis: "owner" }];
+          const r = await c.chat!.submit(boot.token, { messageId: `m-${n++}`, text });
+          assert.equal(r.outcomes[0]!.status, "answered", JSON.stringify(r.outcomes));
+        }
+      }
+      assert.deepEqual((await audit()).slice(before.length), [], `${label}: answering writes nothing`);
+      assert.deepEqual(await stored(), listBefore, `${label}: the stored list is left as it was`);
+      // the write path puts it right: the scheduled turn (the reminder) stores the list built from the floors
+      clock += 1000;
+      await c.dispatch!.dispatcher.tick();
+      assert.deepEqual((await stored())?.ids, [rec], `${label}: the scheduled turn stores the list again`);
+    }
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 

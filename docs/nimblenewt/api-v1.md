@@ -1647,7 +1647,7 @@ Result: `{ item }`.
 
 #### `experiment.list`
 
-The experiments of a project, oldest first, a page at a time (results of every kind are kept); `status` keeps one status. Needs meeting.read or meeting.manage.
+The experiments of a project, oldest first, a page at a time (results of every kind are kept); `status` keeps one status. The list holds every open experiment and the newest ended ones (300 in all); `archived` counts the ended ones that left it, each still readable by its ID. Needs meeting.read or meeting.manage.
 
 Arguments:
 
@@ -1656,11 +1656,11 @@ Arguments:
 - `afterId` (optional): continue after this experiment
 - `limit` (optional): at most 100
 
-Result: `{ item: { items, next? } }`.
+Result: `{ item: { items, next?, archived? } }`.
 
 #### `adoption.in-force`
 
-The adoption of a target now in force in a project, if any (what a later use consults); a withdrawn, declined or only asked one is not. A practice is named with its experiment; a tool version is one target per project, whichever experiment adopted it. Needs meeting.read or meeting.manage.
+The adoption of a target now in force in a project, if any (what a later use consults); a withdrawn, declined or only asked one is not. A practice is named with its experiment; a tool version is one target per project, whichever experiment adopted it, and is not in force while the catalog no longer offers that exact version (revoked, set aside or gone). Needs meeting.read or meeting.manage.
 
 Arguments:
 
@@ -1682,7 +1682,7 @@ Result: `{ item }`.
 
 #### `adoption.list`
 
-The adoptions of a project, oldest first, a page at a time (none is deleted); `status` keeps one status. Needs meeting.read or meeting.manage.
+The adoptions of a project, oldest first, a page at a time (none is deleted); `status` keeps one status. The list holds every open adoption and the newest ended ones (300 in all); `archived` counts the ended ones that left it, each still readable by its ID. Needs meeting.read or meeting.manage.
 
 Arguments:
 
@@ -1691,7 +1691,7 @@ Arguments:
 - `afterId` (optional): continue after this adoption
 - `limit` (optional): at most 100
 
-Result: `{ item: { items, next? } }`.
+Result: `{ item: { items, next?, archived? } }`.
 
 #### `owncode.settings`
 
@@ -5953,7 +5953,7 @@ Result: `{ revision, marked }` (the lessons marked with a stale premise).
 
 #### `experiment.propose`
 
-Proposes a bounded baseline experiment: what problem it addresses, the affected work, the change, effort, running cost, benefit, how it will be evaluated and when it stops (each in words), `affectedKey` (a short label of the affected work, so a saving is counted once) and optionally the lesson it tests. It changes nothing until a manager who is not the proposer pins its criteria. Needs meeting.agenda or meeting.manage.
+Proposes a bounded baseline experiment: what problem it addresses, the affected work, the change, effort, running cost, benefit, how it will be evaluated and when it stops (each in words), `affectedKey` (a short label of the affected work, so a saving is counted once) and optionally the lesson it tests. It changes nothing until a manager who is not the proposer pins its criteria. At most 300 open (proposed, running or paused) in a project and at most 5 of one proposer waiting for criteria; when 300 are listed the oldest concluded or withdrawn one leaves the list (archived: kept, readable by its ID). Needs meeting.agenda or meeting.manage.
 
 Arguments:
 
@@ -6025,7 +6025,7 @@ Result: `{ revision, verdict }`.
 
 #### `experiment.withdraw`
 
-The proposer, the owner or a manager: withdraws an experiment that has not started, with a reason. It stays listed.
+The proposer, the owner or a manager: withdraws an experiment that has not started, with a reason. It is kept; it stays listed until newer experiments move it out (archived, still readable by its ID).
 
 Arguments:
 
@@ -6038,7 +6038,7 @@ Result: `{ revision }`.
 
 #### `adoption.request`
 
-Asks to adopt what an experiment the controller judged improved tried (card B05), in the asker's words: `target` is `{ kind: practice }` (the change the experiment tried) or `{ kind: tool, name, version }` (one exact shared toolbox version already published through the toolbox's own review). Whoever may read the experiment asks; nothing is in force until an independent reviewer approves. One open adoption per target.
+Asks to adopt what an experiment the controller judged improved tried (card B05), in the asker's words: `target` is `{ kind: practice }` (the change the experiment tried) or `{ kind: tool, name, version }` (one exact shared toolbox version already published through the toolbox's own review). Whoever may read the experiment asks; nothing is in force until an independent reviewer approves. One open adoption per target; at most 300 open (asked or in force) in a project and at most 5 of one asker waiting for a review; when 300 are listed the oldest declined or withdrawn one leaves the list (archived: kept, readable by its ID).
 
 Arguments:
 
@@ -6051,7 +6051,7 @@ Result: `{ id, replayed }`.
 
 #### `adoption.approve`
 
-Approves an asked adoption with the review in words (card B05): the owner, or a manager of the project's meetings who neither proposed the experiment nor asked. A tool also needs the reviewer's own toolbox.manage for the project, and a shared, published, unrevoked version the reviewer can read and did not register or write. Nothing is published, installed or granted.
+Approves an asked adoption with the review in words (card B05): the owner, or a manager of the project's meetings who neither proposed the experiment nor asked. A tool also needs the reviewer's own toolbox.manage for the project, and a shared, published version that is neither revoked nor set aside, that the reviewer can read and did not register or write. Nothing is published, installed or granted.
 
 Arguments:
 
@@ -6064,7 +6064,7 @@ Result: `{ revision }`.
 
 #### `adoption.decline`
 
-Declines an asked adoption with a reason (a reviewer who could approve it, or its asker). It stays listed and the target is free for a new request.
+Declines an asked adoption with a reason (a reviewer who could approve it, or its asker). The target is free for a new request; the adoption is kept and stays listed until newer ones move it out (archived, still readable by its ID).
 
 Arguments:
 
@@ -6077,7 +6077,7 @@ Result: `{ revision }`.
 
 #### `adoption.withdraw`
 
-Withdraws an adoption in force with a reason (the owner, a manager of the project's meetings, or its asker): it is no longer in force, nothing is deleted or undone. Final; adopting again is a new request.
+Withdraws an adoption in force with a reason (the owner, a manager of the project's meetings, or its asker): it is no longer in force; only the adoption and its index are written, so nothing else (no task, effect or catalog record) is deleted or undone. Final; adopting again is a new request.
 
 Arguments:
 

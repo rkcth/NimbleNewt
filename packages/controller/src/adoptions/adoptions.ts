@@ -1,5 +1,6 @@
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
+import { keptWindow, waitingOf } from "../domain/kept-window.js";
 import { onlyKnown, projectId as checkProjectId, revision as checkRevision, type View } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import { allows, inTaskScope } from "../security/access.js";
@@ -25,12 +26,23 @@ import { clean, invalid, plain, whole } from "../standups/shared.js";
  *   a new request with a new review. Nothing is deleted.
  * - **Every transition is a stored record** written by one command (idempotent by command ID), so a controller restart between any two steps loses nothing and a repeat is answered from the record.
  *
- * Not here (later slices): telling the tasks and paused work that use an adopted change, reconciling them on withdrawal (paused dependencies, completed external effects), and setting a withdrawn tool
- * version aside in the catalog.
+ * - **Retention (retention slice).** Only OPEN adoptions (asked or in force) count toward the project's limit (`ADOPTION_LIMITS.open`), and one asker has at most `ADOPTION_LIMITS.waiting` requests
+ *   waiting for a review in a project at once, so asking and taking back cannot fill the project. The list keeps the newest `ADOPTION_LIMITS.listed`; when it is full, the oldest ENDED adoption (declined
+ *   or withdrawn) leaves the list in the same write as the new request and is counted as `archived`. An archived adoption is kept unchanged and stays readable by its ID with the same rights.
+ *
+ * - **Honest future use (standing slice).** A tool version set aside in the catalog (deprecated, or rolled back past) is not adopted, and a tool adoption approved earlier is not in force while the
+ *   catalog no longer offers its exact version (revoked, set aside, gone, or another digest). Asking writes nothing; `standing` says why it is not used.
+ * - **Nothing else is undone.** Withdrawal (by a decision or a regression) writes only the adoption and its index: no task, effect, timer or catalog record is touched, so a completed external effect
+ *   stays as it was recorded.
+ *
+ * Not here (later slices): telling the tasks and paused work that use an adopted change and reconciling them on withdrawal (paused dependencies), and setting a withdrawn tool version aside in the
+ * catalog.
  */
 export const ADOPTION_STATUSES = ["requested", "active", "declined", "withdrawn"] as const;
 export type AdoptionStatus = (typeof ADOPTION_STATUSES)[number];
 
+/** Where an adopted tool version stands in the catalog now (`live` is the only one in force); a practice is always `live` while its adoption is active. */
+export type ToolStanding = "live" | "revoked" | "set-aside" | "gone" | "unavailable";
 export type AdoptionTarget = { readonly kind: "practice" } | { readonly kind: "tool"; readonly name: string; readonly version: string };
 export interface Report {
   readonly n: number;
@@ -67,27 +79,41 @@ export interface AdoptionBody {
   readonly history: readonly { readonly at: string; readonly by: string; readonly to: AdoptionStatus; readonly cause?: string }[];
 }
 
-export const ADOPTION_LIMITS = { text: 600, reports: 20, history: 12, page: 100, listed: 300, retries: 8, value: 1e9, name: 120, version: 60 } as const;
+/** `listed`: the adoptions a project lists (open and the newest ended); `open`: the most open (asked or in force) at once in a project; `waiting`: the most of one asker's requests waiting for a review in a project. */
+export const ADOPTION_LIMITS = { text: 600, reports: 20, history: 12, page: 100, listed: 300, open: 300, waiting: 5, retries: 8, value: 1e9, name: 120, version: 60 } as const;
 const ADOPTION_ID = /^adp-[a-z2-7]{20}$/;
 const EXPERIMENT_ID = /^exp-[a-z2-7]{20}$/;
 const TOOL_NAME = /^[a-z0-9_][a-z0-9_.-]{0,119}$/;
 const TOOL_VERSION = /^[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}(-[0-9a-z][0-9a-z.-]{0,30})?$/;
-interface IndexBody { readonly ids: readonly string[]; /** Target key to the one open (asked or in force) adoption of it. */ readonly open: Readonly<Record<string, string>> }
+interface IndexBody {
+  readonly ids: readonly string[];
+  /** Target key to the one open (asked or in force) adoption of it. */
+  readonly open: Readonly<Record<string, string>>;
+  /** Asked adoptions waiting for a review: ID to its asker (retention slice; absent in an index written before it, then rebuilt from the records). */
+  readonly waiting?: Readonly<Record<string, string>>;
+  /** How many ended adoptions have left the list (kept, readable by ID). */
+  readonly archived?: number;
+}
+interface Index { readonly ids: readonly string[]; readonly open: Readonly<Record<string, string>>; readonly waiting: Readonly<Record<string, string>>; readonly archived: number; readonly revision: number }
 const OPEN: readonly AdoptionStatus[] = ["requested", "active"];
 
 /** One open adoption per key: a practice per experiment, a tool version per project (whichever experiment asks). */
 export const targetKey = (experimentId: string, t: AdoptionTarget): string => (t.kind === "practice" ? `practice:${experimentId}` : `tool:${t.name}@${t.version}`);
 
 export interface AdoptionOptions extends RunnerOptions {
-  /** The catalog, to find a tool version as the reviewer sees it. Without it no tool is adopted (fail closed); practices still are. */
-  readonly tools?: Pick<CatalogService, "get">;
+  /**
+   * The catalog: `get` finds a tool version as the reviewer sees it; `standingOf` says whether it is revoked or set aside now (asked at approval and by every `inForce` of a tool). Without it no tool is
+   * adopted and no tool adoption is answered as in force (fail closed); practices still are.
+   */
+  readonly tools?: AdoptionCatalog;
 }
+export type AdoptionCatalog = Pick<CatalogService, "get" | "standingOf">;
 
 export class AdoptionService {
   readonly #runner: CommandRunner;
-  readonly #tools: Pick<CatalogService, "get"> | undefined;
+  readonly #tools: AdoptionCatalog | undefined;
 
-  private constructor(runner: CommandRunner, tools: Pick<CatalogService, "get"> | undefined) { this.#runner = runner; this.#tools = tools; }
+  private constructor(runner: CommandRunner, tools: AdoptionCatalog | undefined) { this.#runner = runner; this.#tools = tools; }
 
   static withEpoch(storage: ControllerStorage, epoch: number, options: AdoptionOptions = {}): AdoptionService {
     const { tools, ...rest } = options;
@@ -111,11 +137,15 @@ export class AdoptionService {
         const index = await this.#index(exp.projectId);
         const key = targetKey(experimentId, target);
         if (index.open[key] !== undefined) throw new DomainError("invalid_command", `${key} already has an open adoption (${index.open[key]}); it is decided or withdrawn first`, { field: "target" });
-        if (index.ids.length >= ADOPTION_LIMITS.listed) throw new DomainError("unavailable", `${ADOPTION_LIMITS.listed} adoptions are kept in this project, the most; none is deleted`);
+        if (waitingOf(index.waiting, by.id) >= ADOPTION_LIMITS.waiting) throw new DomainError("unavailable", `you already have ${ADOPTION_LIMITS.waiting} adoption requests waiting for a review in this project, the most; one is decided or taken back first`);
+        if (Object.keys(index.open).length >= ADOPTION_LIMITS.open) throw new DomainError("unavailable", `${ADOPTION_LIMITS.open} adoptions are open (asked or in force) in this project, the most; one is decided or withdrawn first`);
+        const openIds = new Set(Object.values(index.open));
+        const kept = keptWindow(index.ids, (x) => openIds.has(x), ADOPTION_LIMITS.listed, id);
+        if (kept === undefined) throw new DomainError("unavailable", `${ADOPTION_LIMITS.listed} adoptions are listed in this project and all are open; one is decided or withdrawn first`);
         const nowIso = this.#runner.now();
         const body: AdoptionBody = { projectId: exp.projectId, experimentId, criteriaDigest: exp.criteriaDigest!, target, requestedBy: by.id, reason, status: "requested", reports: [], reportCount: 0, history: [{ at: nowIso, by: by.id, to: "requested" }] };
         const ref: AggregateRef = { kind: "adoption", id };
-        return { ref, creates: true, changes: [{ type: "create", ref, body: clean(body) }, this.#indexChange(exp.projectId, index, [...index.ids, id], { ...index.open, [key]: id })], detail: { projectId: exp.projectId, experimentId } };
+        return { ref, creates: true, changes: [{ type: "create", ref, body: clean(body) }, this.#indexChange(exp.projectId, index, { ids: kept.ids, open: { ...index.open, [key]: id }, waiting: { ...index.waiting, [id]: by.id }, archived: index.archived + kept.archived.length })], detail: { projectId: exp.projectId, experimentId } };
       },
     })));
     return { id: result.id, replayed: result.replayed };
@@ -155,13 +185,16 @@ export class AdoptionService {
         const key = targetKey(b.experimentId, b.target);
         if (index.open[key] !== id) throw new DomainError("integrity", `adoption ${id} is not the open adoption of ${key}`);
         const next: AdoptionBody = { ...b, status: "active", approvedBy: by.id, review, grantBasis, ...(targetDigest === undefined ? {} : { targetDigest }), history: this.#history(b, nowIso, by.id, "active") };
-        return { ref: { kind: "adoption", id }, creates: false, changes: [{ type: "update", ref: { kind: "adoption", id }, expectedRevision: got.found.revision, body: clean(next) }], detail: { projectId: b.projectId } };
+        // Approved, it no longer waits for a review, so it leaves its asker's waiting count in the same write (it stays open).
+        const { [id]: _w, ...waiting } = index.waiting;
+        void _w;
+        return { ref: { kind: "adoption", id }, creates: false, changes: [{ type: "update", ref: { kind: "adoption", id }, expectedRevision: got.found.revision, body: clean(next) }, this.#indexChange(b.projectId, index, { ...index, waiting })], detail: { projectId: b.projectId } };
       },
     })));
     return { revision: result.revision };
   }
 
-  /** Declines an asked adoption with a reason (a reviewer who could approve it, or its asker taking it back). It stays listed and the target is free for a new request. */
+  /** Declines an asked adoption with a reason (a reviewer who could approve it, or its asker taking it back). The target is free for a new request; the adoption is kept and stays listed until newer ones move it out (archived). */
   async decline(by: Principal, command: NoActor & { adoptionId: string; expectedRevision: number; reason: string }): Promise<{ revision: number }> {
     return this.#close(by, command, "adoption.decline", "requested", "declined");
   }
@@ -217,17 +250,31 @@ export class AdoptionService {
   /**
    * The adoption of a target now in force in a project, if any: what a later use consults. A practice is named with its experiment; a tool version is one target in the project whichever experiment
    * adopted it (`experimentId` is then ignored). Whoever may read the project's adoptions; anyone else, or a target with none in force, gets `undefined`.
+   * A tool adoption approved earlier is not in force while the catalog no longer offers that exact version: revoked, set aside (deprecated or rolled back past), gone, or with another digest. Nothing is
+   * written by asking: the adoption stays `active` (a manager withdraws it; a set-aside version is in force again once the owner rolls back to it), and `standing` tells its readers why it is not used.
    */
   async inForce(viewer: Principal, query: { projectId: string; experimentId?: string; target: unknown }): Promise<{ adoptionId: string; experimentId: string; revision: number; targetDigest?: string } | undefined> {
     const projectId = checkProjectId(query.projectId);
     const target = this.#target(query.target);
     const experimentId = target.kind === "tool" ? "" : typeof query.experimentId === "string" && EXPERIMENT_ID.test(query.experimentId) ? query.experimentId : invalid("experimentId", "is not an experiment ID");
     if (!this.#mayRead(viewer, projectId)) return undefined;
-    const open = (await this.#index(projectId)).open[targetKey(experimentId, target)];
+    const open = (await this.#index(projectId, false)).open[targetKey(experimentId, target)];
     const found = open === undefined ? undefined : await this.#runner.get("adoption", open);
     const b = found?.body as unknown as AdoptionBody | undefined;
     if (found === undefined || b === undefined || b.status !== "active" || b.projectId !== projectId || targetKey(b.experimentId, b.target) !== targetKey(experimentId, target)) return undefined;
+    // A tool adoption is in force only while the catalog still offers the exact version it approved: not revoked, not set aside, the same digest (fail closed without a catalog).
+    if (b.target.kind === "tool" && (await this.#toolStanding(b.target, b.targetDigest)) !== "live") return undefined;
     return { adoptionId: open!, experimentId: b.experimentId, revision: found.revision, ...(b.targetDigest === undefined ? {} : { targetDigest: b.targetDigest }) };
+  }
+
+  /**
+   * Why an adoption in force is or is not used now (card B05): `live` for an active practice, or an active tool whose exact version the catalog still offers; otherwise the tool's standing (`revoked`,
+   * `set-aside`, `gone`, `unavailable`). An adoption that is not active, or one the viewer may not read, answers `undefined` (the same as an ID that does not exist).
+   */
+  async standing(viewer: Principal, adoptionId: string): Promise<ToolStanding | undefined> {
+    const got = await this.get(viewer, adoptionId);
+    if (got === undefined || got.status !== "active") return undefined;
+    return got.target.kind === "practice" ? "live" : this.#toolStanding(got.target, got.targetDigest);
   }
 
   /** One adoption: the owner, a reader or manager of the project's meetings, or its asker. Anyone else gets `undefined`. */
@@ -239,12 +286,12 @@ export class AdoptionService {
   }
 
   /** The adoptions of a project, oldest first, paged (whoever may read them). `status` keeps one status. */
-  async list(viewer: Principal, projectId: string, page: { afterId?: string; limit?: number; status?: string } = {}): Promise<{ items: View<AdoptionBody>[]; next?: string } | undefined> {
+  async list(viewer: Principal, projectId: string, page: { afterId?: string; limit?: number; status?: string } = {}): Promise<{ items: View<AdoptionBody>[]; next?: string; archived?: number } | undefined> {
     const project = checkProjectId(projectId);
     if (!this.#mayRead(viewer, project)) return undefined;
     const limit = page.limit === undefined ? 20 : whole(page.limit, "limit", 1, ADOPTION_LIMITS.page);
     const status = page.status === undefined ? undefined : ((ADOPTION_STATUSES as readonly string[]).includes(page.status) ? page.status : invalid("status", `must be one of ${ADOPTION_STATUSES.join(", ")}`));
-    const index = await this.#index(project);
+    const index = await this.#index(project, false);
     const start = page.afterId === undefined ? 0 : index.ids.indexOf(page.afterId) + 1;
     if (page.afterId !== undefined && start === 0) invalid("afterId", "is not in the list");
     const items: View<AdoptionBody>[] = [];
@@ -253,7 +300,7 @@ export class AdoptionService {
       const found = await this.#runner.get("adoption", index.ids[pos]!);
       if (found !== undefined && (status === undefined || (found.body as unknown as AdoptionBody).status === status)) items.push(view<AdoptionBody>(found));
     }
-    return { items, ...(pos < index.ids.length ? { next: index.ids[pos - 1]! } : {}) };
+    return { items, ...(pos < index.ids.length ? { next: index.ids[pos - 1]! } : {}), ...(index.archived > 0 ? { archived: index.archived } : {}) };
   }
 
   // ---- internals -------------------------------------------------------------------------------------------------------------
@@ -289,8 +336,9 @@ export class AdoptionService {
     const key = targetKey(b.experimentId, b.target);
     if (index.open[key] !== id) throw new DomainError("integrity", `adoption ${id} is not the open adoption of ${key}`);
     const { [key]: _gone, ...open } = index.open;
-    void _gone;
-    return this.#indexChange(b.projectId, index, index.ids, open);
+    const { [id]: _waited, ...waiting } = index.waiting;
+    void _gone; void _waited;
+    return this.#indexChange(b.projectId, index, { ...index, open, waiting });
   }
 
   async #toolDigest(by: Principal, t: { name: string; version: string }): Promise<string> {
@@ -300,10 +348,30 @@ export class AdoptionService {
       if (error instanceof DomainError && (error.code === "not_found" || error.code === "forbidden" || error.code === "invalid_command")) found = undefined; else throw error;
     }
     if (found === undefined || found.version !== t.version || found.name !== t.name) throw new DomainError("not_found", `${t.name} ${t.version} is not a published version you can read; adopting does not publish a tool (that is the toolbox's own review)`);
+    // The reviewer's own independence (a right) is checked before anything about where the version stands (state).
+    if (by.kind !== "owner" && (found.registeredBy === by.id || found.instructional.author === by.id || found.executable?.author === by.id)) throw new DomainError("forbidden", `${by.id} registered or wrote ${t.name} ${t.version}, so its review of the adoption is not independent`);
     if (found.layer !== "toolbox") throw new DomainError("invalid_command", `${t.name} is not a shared toolbox tool; only a shared version already published through the toolbox's review is adopted (a personal or protected one is not)`, { field: "target" });
     if (found.revoked !== undefined) throw new DomainError("invalid_command", `${t.name} ${t.version} is revoked and is not adopted`, { field: "target" });
-    if (by.kind !== "owner" && (found.registeredBy === by.id || found.instructional.author === by.id || found.executable?.author === by.id)) throw new DomainError("forbidden", `${by.id} registered or wrote ${t.name} ${t.version}, so its review of the adoption is not independent`);
+    // Where the version stands now: revoked by the entry's own list, or set aside (deprecated, or a rollback went below it), is not adopted; a digest other than the one just read is not that version.
+    const standing = await this.#toolStanding(t, found.digest);
+    if (standing === "revoked") throw new DomainError("invalid_command", `${t.name} ${t.version} is revoked and is not adopted`, { field: "target" });
+    if (standing === "set-aside") throw new DomainError("invalid_command", `${t.name} ${t.version} was set aside in the catalog (deprecated, or rolled back past) and is not adopted; a version still chosen is`, { field: "target" });
+    if (standing !== "live") throw new DomainError("not_found", `${t.name} ${t.version} is not a published version you can read; adopting does not publish a tool (that is the toolbox's own review)`);
     return found.digest;
+  }
+
+  /**
+   * Where an approved (or about to be approved) tool version stands in the catalog now: `live`, `revoked`, `set-aside`, `gone` (not published, dropped, or another digest than `digest`), or `unavailable`
+   * (no catalog here). A catalog refusal is `gone`; any other error is passed on, never taken for `live`.
+   */
+  async #toolStanding(t: { name: string; version: string }, digest: string | undefined): Promise<ToolStanding> {
+    if (this.#tools === undefined) return "unavailable";
+    let s: Awaited<ReturnType<CatalogService["standingOf"]>>;
+    try { s = await this.#tools.standingOf(t.name, t.version); } catch (error) {
+      if (error instanceof DomainError && (error.code === "not_found" || error.code === "forbidden" || error.code === "invalid_command")) return "gone"; else throw error;
+    }
+    if (s === undefined || digest === undefined || s.digest !== digest) return "gone";
+    return s.revoked ? "revoked" : s.setAside ? "set-aside" : "live";
   }
 
   #target(raw: unknown): AdoptionTarget {
@@ -361,15 +429,26 @@ export class AdoptionService {
   }
   #id(value: unknown): string { return typeof value === "string" && ADOPTION_ID.test(value) ? value : invalid("adoptionId", "is not an adoption ID"); }
 
-  async #index(projectId: string): Promise<{ ids: readonly string[]; open: Readonly<Record<string, string>>; revision: number }> {
+  /** `writing`: the waiting map is needed (a read that only lists or answers `inForce` skips rebuilding it for an older index). */
+  async #index(projectId: string, writing = true): Promise<Index> {
     const found = await this.#runner.get("adoption-index", projectId);
     const b = found?.body as unknown as IndexBody | undefined;
-    return found === undefined || b === undefined ? { ids: [], open: {}, revision: 0 } : { ids: b.ids, open: b.open, revision: found.revision };
+    if (found === undefined || b === undefined) return { ids: [], open: {}, waiting: {}, archived: 0, revision: 0 };
+    const archived = typeof b.archived === "number" && Number.isSafeInteger(b.archived) && b.archived >= 0 ? b.archived : 0;
+    const isMap = (m: unknown): m is Record<string, string> => m !== null && typeof m === "object" && !Array.isArray(m);
+    if (!writing || isMap(b.waiting)) return { ids: b.ids, open: b.open, waiting: isMap(b.waiting) ? b.waiting : {}, archived, revision: found.revision };
+    // An index written before the retention slice (or a damaged waiting map): the asked adoptions are found among the open ones (at most ADOPTION_LIMITS.open reads), and written with the next change of the index.
+    const waiting: Record<string, string> = {};
+    for (const openId of Object.values(b.open).slice(0, ADOPTION_LIMITS.open)) {
+      const a = (await this.#runner.get("adoption", openId))?.body as unknown as AdoptionBody | undefined;
+      if (a?.status === "requested" && typeof a.requestedBy === "string") waiting[openId] = a.requestedBy;
+    }
+    return { ids: b.ids, open: b.open, waiting, archived, revision: found.revision };
   }
 
-  #indexChange(projectId: string, index: { revision: number }, ids: readonly string[], open: Readonly<Record<string, string>>): Change {
+  #indexChange(projectId: string, index: { revision: number }, next: { ids: readonly string[]; open: Readonly<Record<string, string>>; waiting: Readonly<Record<string, string>>; archived: number }): Change {
     const ref: AggregateRef = { kind: "adoption-index", id: projectId };
-    const body = { ids: [...ids], open: { ...open } } as unknown as JsonObject;
+    const body = { ids: [...next.ids], open: { ...next.open }, waiting: { ...next.waiting }, archived: next.archived } as unknown as JsonObject;
     return index.revision === 0 ? { type: "create", ref, body } : { type: "update", ref, expectedRevision: index.revision, body };
   }
 

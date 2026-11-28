@@ -607,6 +607,22 @@ export class CatalogService {
   }
 
   /**
+   * Where one exact version stands now, as the store says (card B05: an adoption in force is consulted against it). No principal and no content, like `revocationOf`: the caller has already checked its
+   * own right to the thing it asks about. `revoked` is read from the entry's list (not from the revocation record, so a missing record still counts as revoked); `setAside` is the owner's (or a
+   * maintainer's) deprecation or a rollback past it. A name that is not canonical, a version not published in the entry, or one whose version record is gone (dropped by retention) answer `undefined`.
+   */
+  async standingOf(name: string, version: string): Promise<{ readonly digest: string; readonly revoked: boolean; readonly setAside: boolean } | undefined> {
+    const parsed = parseName(name);
+    if (parsed === null || typeof version !== "string" || !VERSION.test(version)) return undefined;
+    const entry = await this.#entryOf(parsed.canonical);
+    if (entry === undefined || !Array.isArray(entry.versions) || !entry.versions.includes(version)) return undefined;
+    const found = (await this.#runner.get("catalog-version", versionIdOf(parsed.canonical, version)))?.body as unknown as VersionBody | undefined;
+    if (found === undefined || found.version !== version || typeof found.digest !== "string") return undefined;
+    // A damaged list fails toward stricter: a `revoked` that is not a list counts as revoked, a `deprecated` present but not a list as set aside.
+    return { digest: found.digest, revoked: !Array.isArray(entry.revoked) || entry.revoked.includes(version), setAside: entry.deprecated !== undefined && (!Array.isArray(entry.deprecated) || entry.deprecated.includes(version)) };
+  }
+
+  /**
    * The owner sets versions aside without withdrawing them (card T02): they are no longer chosen when a caller names no version, but a task that pinned one still resolves and runs it (a resume does not break), and
    * the record is kept for inspection. A revoked version is a different thing and is refused.
    */
