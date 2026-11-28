@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
-import { CatalogService } from "../catalog/index.js";
+import { CatalogService, versionIdOf } from "../catalog/index.js";
 import { DeskService } from "../context/index.js";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
+import { derivedId } from "../domain/ids.js";
 import { CommandRunner } from "../domain/runner.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { EnvironmentService } from "../environments/index.js";
 import { ExperimentService } from "../experiments/index.js";
 import { PrincipalService, type Grant, type Principal } from "../security/index.js";
+import { StatusService } from "../status/index.js";
 import type { ControllerStorage, OperationInput } from "../storage/types.js";
 import { AdoptionService, type AdoptionCatalog } from "./index.js";
 
@@ -43,7 +45,7 @@ const tool = (name: string, version = "1.0.0") => ({ kind: "tool", name, version
 
 interface Ctx {
   owner: Principal; mgr: Principal; dev: Principal; reader: Principal; eve: Principal; maint: Principal;
-  a: string; storage: ControllerStorage; epoch: number; cat: CatalogService;
+  a: string; storage: ControllerStorage; epoch: number; cat: CatalogService; exps: ExperimentService;
   make(o?: { tools?: AdoptionCatalog | undefined; storage?: ControllerStorage }): AdoptionService;
   experiment(): Promise<string>;
   ask(experimentId: string, target?: Record<string, unknown>, by?: Principal): Promise<string>;
@@ -83,7 +85,7 @@ for (const backend of backends) {
         await env.change(owner, { commandId: cid("env"), agentId: dev.id, manifest: MANIFEST, reason: "first" });
         const note = (await desks.write(author, { commandId: cid("w"), projectId: a, kind: "note", title: "fetch", body: "Use fetch to read a page.", visibility: "shared", status: "accepted" } as never)).id;
         const ctx: Ctx = {
-          owner, mgr, dev, reader, eve, maint, a, storage: world.storage, epoch, cat, make,
+          owner, mgr, dev, reader, eve, maint, a, storage: world.storage, epoch, cat, exps, make,
           register: async (nm, v) => { await cat.register(owner, { commandId: cid("r"), name: nm, kind: "skill", version: v, manifest: SKILL, instructionsRecordId: note } as never); },
           experiment: async () => {
             const id = (await exps.propose(dev, { commandId: cid("x"), projectId: a, title: "Checklist prompt", proposal: PROPOSAL, affectedKey: `reviews ${n}` } as never)).id;
@@ -214,6 +216,63 @@ for (const backend of backends) {
     const practice = await c.ask(exp, PRACTICE);
     await c.approve(practice, c.owner, c.make({ tools: undefined }));
     assert.equal((await c.make({ tools: undefined }).inForce(c.owner, { projectId: c.a, experimentId: exp, target: PRACTICE }))?.adoptionId, practice, "a practice needs no catalog");
+  });
+
+  suite("first review: a damaged catalog entry fails toward stricter, independence is refused before where the version stands, and the status view says not in force when the standing cannot be read", async (c) => {
+    await c.register("toolbox.fetch", "1.0.0");
+    await c.register("toolbox.grab", "1.0.0");
+    const runner = new CommandRunner(c.storage, c.epoch, options);
+    const damage = async (name: string, over: Record<string, unknown>, ref = { kind: "catalog-entry", id: derivedId("cat", name) }): Promise<void> => {
+      const stored = (await runner.get(ref.kind, ref.id))!;
+      await runner.command("test.damage", { commandId: cid("t"), actor: c.owner.id }, async () => ({ payload: {}, build: async () => ({ ref, creates: false, changes: [{ type: "update" as const, ref, expectedRevision: stored.revision, body: { ...(stored.body as Record<string, unknown>), ...over } as never }], detail: {} }) }));
+    };
+    const real = (await c.cat.standingOf("toolbox.fetch", "1.0.0"))!;
+    // A `deprecated` that is not a list is set aside; a `revoked` that is not a list is revoked.
+    await damage("toolbox.fetch", { deprecated: "1.0.0" });
+    assert.deepEqual(await c.cat.standingOf("toolbox.fetch", "1.0.0"), { digest: real.digest, revoked: false, setAside: true });
+    await damage("toolbox.fetch", { deprecated: { "1.0.0": true } });
+    assert.equal((await c.cat.standingOf("toolbox.fetch", "1.0.0"))?.setAside, true);
+    await damage("toolbox.fetch", { deprecated: [], revoked: null });
+    assert.deepEqual(await c.cat.standingOf("toolbox.fetch", "1.0.0"), { digest: real.digest, revoked: true, setAside: false });
+    await damage("toolbox.fetch", { revoked: [] });
+    assert.deepEqual(await c.cat.standingOf("toolbox.fetch", "1.0.0"), { ...real });
+    // The entry no longer lists the version (its record still there), or the version record names another version: neither is offered.
+    await damage("toolbox.fetch", { versions: [] });
+    assert.equal(await c.cat.standingOf("toolbox.fetch", "1.0.0"), undefined, "not in the entry's list");
+    await damage("toolbox.fetch", { versions: ["1.0.0"] });
+    assert.deepEqual(await c.cat.standingOf("toolbox.fetch", "1.0.0"), { ...real });
+    const vref = { kind: "catalog-version", id: versionIdOf("toolbox.fetch", "1.0.0") };
+    await damage("toolbox.fetch", { version: "9.9.9" }, vref);
+    assert.equal(await c.cat.standingOf("toolbox.fetch", "1.0.0"), undefined, "the record is of another version");
+    await damage("toolbox.fetch", { version: "1.0.0" }, vref);
+    assert.deepEqual(await c.cat.standingOf("toolbox.fetch", "1.0.0"), { ...real });
+
+    // A reviewer who registered the version is told it is not independent, whatever the version's standing (rights before state).
+    const exp = await c.experiment();
+    const id = await c.ask(exp, tool("toolbox.fetch"), c.reader);
+    const mine = (s: Awaited<ReturnType<AdoptionCatalog["standingOf"]>>, revoked = false): AdoptionService => c.make({ tools: { get: async (by, nm, v) => { const g = (await c.cat.get(by, nm, v))!; return { ...g, registeredBy: c.maint.id, ...(revoked ? { revoked: { revokedBy: c.owner.id, reason: "x", at: g.createdAt } } : {}) } as never; }, standingOf: async () => s } });
+    for (const [why, svc] of [["live", mine(real)], ["set aside", mine({ ...real, setAside: true })], ["revoked by list", mine({ ...real, revoked: true })], ["gone", mine(undefined)], ["revoked record", mine(real, true)]] as const) {
+      await refuses("forbidden", () => c.approve(id, c.maint, svc), /not independent/);
+      void why;
+    }
+    assert.equal(await c.rev(id), 1, "nothing was written");
+
+    // The status view: an approved tool whose standing cannot be read is shown as not in force, and the rest of the view still answers.
+    await c.approve(id);
+    const practice = await c.ask(exp, PRACTICE);
+    await c.approve(practice, c.owner);
+    const view = (adoptions: Pick<AdoptionService, "list" | "standing">) => StatusService.withEpoch(c.storage, c.epoch, { assignments: {} as never, waits: {} as never, blockers: {} as never, contracts: {} as never, experiments: c.exps, adoptions }, options);
+    const text = async (adoptions: Pick<AdoptionService, "list" | "standing">) => (await view(adoptions).ask(c.owner, { kind: "experiments", projectId: c.a }))!.lines.map((l) => l.text).join("\n");
+    const svc = c.make();
+    const tl = new RegExp(`Adoption of tool toolbox\\.fetch 1\\.0\\.0 from experiment ${exp}: `);
+    assert.match(await text(svc), new RegExp(`${tl.source}in force, approved by agent:maint`));
+    const failing = { list: svc.list.bind(svc), standing: async () => { throw new Error("store down"); } };
+    const out = await text(failing);
+    assert.match(out, new RegExp(`${tl.source}approved by agent:maint \\(grant: meeting\\.manage, toolbox\\.manage\\), but not in force now: its standing in the catalog cannot be read right now, so it is not used\\.`));
+    assert.match(out, /Adoption of the practice it tried from experiment exp-[a-z2-7]+: in force, approved by owner:rob/, "the practice is still shown in force");
+    const changed = await text({ list: svc.list.bind(svc), standing: async () => undefined });
+    assert.match(changed, new RegExp(`${tl.source}approved by agent:maint .*, but not in force now: it changed while this view was read; ask again, so it is not used\\.`));
+    assert.doesNotMatch(changed, new RegExp(`${tl.source}in force`));
   });
 
   suite("withdrawal, by a decision or a regression, and declining write only the adoption and its index: recorded external effects and the catalog stay exactly as they were", async (c) => {

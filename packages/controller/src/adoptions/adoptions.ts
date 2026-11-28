@@ -348,6 +348,8 @@ export class AdoptionService {
       if (error instanceof DomainError && (error.code === "not_found" || error.code === "forbidden" || error.code === "invalid_command")) found = undefined; else throw error;
     }
     if (found === undefined || found.version !== t.version || found.name !== t.name) throw new DomainError("not_found", `${t.name} ${t.version} is not a published version you can read; adopting does not publish a tool (that is the toolbox's own review)`);
+    // The reviewer's own independence (a right) is checked before anything about where the version stands (state).
+    if (by.kind !== "owner" && (found.registeredBy === by.id || found.instructional.author === by.id || found.executable?.author === by.id)) throw new DomainError("forbidden", `${by.id} registered or wrote ${t.name} ${t.version}, so its review of the adoption is not independent`);
     if (found.layer !== "toolbox") throw new DomainError("invalid_command", `${t.name} is not a shared toolbox tool; only a shared version already published through the toolbox's review is adopted (a personal or protected one is not)`, { field: "target" });
     if (found.revoked !== undefined) throw new DomainError("invalid_command", `${t.name} ${t.version} is revoked and is not adopted`, { field: "target" });
     // Where the version stands now: revoked by the entry's own list, or set aside (deprecated, or a rollback went below it), is not adopted; a digest other than the one just read is not that version.
@@ -355,7 +357,6 @@ export class AdoptionService {
     if (standing === "revoked") throw new DomainError("invalid_command", `${t.name} ${t.version} is revoked and is not adopted`, { field: "target" });
     if (standing === "set-aside") throw new DomainError("invalid_command", `${t.name} ${t.version} was set aside in the catalog (deprecated, or rolled back past) and is not adopted; a version still chosen is`, { field: "target" });
     if (standing !== "live") throw new DomainError("not_found", `${t.name} ${t.version} is not a published version you can read; adopting does not publish a tool (that is the toolbox's own review)`);
-    if (by.kind !== "owner" && (found.registeredBy === by.id || found.instructional.author === by.id || found.executable?.author === by.id)) throw new DomainError("forbidden", `${by.id} registered or wrote ${t.name} ${t.version}, so its review of the adoption is not independent`);
     return found.digest;
   }
 

@@ -618,7 +618,8 @@ export class CatalogService {
     if (entry === undefined || !Array.isArray(entry.versions) || !entry.versions.includes(version)) return undefined;
     const found = (await this.#runner.get("catalog-version", versionIdOf(parsed.canonical, version)))?.body as unknown as VersionBody | undefined;
     if (found === undefined || found.version !== version || typeof found.digest !== "string") return undefined;
-    return { digest: found.digest, revoked: !Array.isArray(entry.revoked) || entry.revoked.includes(version), setAside: Array.isArray(entry.deprecated) && entry.deprecated.includes(version) };
+    // A damaged list fails toward stricter: a `revoked` that is not a list counts as revoked, a `deprecated` present but not a list as set aside.
+    return { digest: found.digest, revoked: !Array.isArray(entry.revoked) || entry.revoked.includes(version), setAside: entry.deprecated !== undefined && (!Array.isArray(entry.deprecated) || entry.deprecated.includes(version)) };
   }
 
   /**
