@@ -1,0 +1,1 @@
+{"name": "m00-structural-one-round-p1", "firstRound": "blind", "rounds": 1, "transcriptMode": "full", "promptOrder": "shared-first", "chairQuestions": 2, "chairQuestionCheck": "structural", "deskCheck": true, "tokenLimit": 220, "objectionCheck": true, "maxObjectionReruns": 2, "parallel": 1, "allowTabling": true, "directQuestions": true, "deskRead": true}
