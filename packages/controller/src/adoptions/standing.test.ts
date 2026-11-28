@@ -246,6 +246,13 @@ for (const backend of backends) {
     assert.equal(await c.cat.standingOf("toolbox.fetch", "1.0.0"), undefined, "the record is of another version");
     await damage("toolbox.fetch", { version: "1.0.0" }, vref);
     assert.deepEqual(await c.cat.standingOf("toolbox.fetch", "1.0.0"), { ...real });
+    // Second review: a version record whose digest is missing or not text vouches for nothing.
+    for (const digest of [null, 7, { value: real.digest }]) {
+      await damage("toolbox.fetch", { digest }, vref);
+      assert.equal(await c.cat.standingOf("toolbox.fetch", "1.0.0"), undefined, `digest ${JSON.stringify(digest)}`);
+    }
+    await damage("toolbox.fetch", { digest: real.digest }, vref);
+    assert.deepEqual(await c.cat.standingOf("toolbox.fetch", "1.0.0"), { ...real });
 
     // A reviewer who registered the version is told it is not independent, whatever the version's standing (rights before state).
     const exp = await c.experiment();
@@ -273,6 +280,11 @@ for (const backend of backends) {
     const changed = await text({ list: svc.list.bind(svc), standing: async () => undefined });
     assert.match(changed, new RegExp(`${tl.source}approved by agent:maint .*, but not in force now: it changed while this view was read; ask again, so it is not used\\.`));
     assert.doesNotMatch(changed, new RegExp(`${tl.source}in force`));
+    // Second review: a service with no catalog says so, rather than giving a catalog reason.
+    const bare = c.make({ tools: undefined });
+    const none = await text({ list: bare.list.bind(bare), standing: bare.standing.bind(bare) });
+    assert.match(none, new RegExp(`${tl.source}approved by agent:maint .*, but not in force now: the catalog cannot be consulted here, so it is not used\\.`));
+    assert.match(none, /Adoption of the practice it tried from experiment exp-[a-z2-7]+: in force, approved by owner:rob/, "a practice needs no catalog");
   });
 
   suite("withdrawal, by a decision or a regression, and declining write only the adoption and its index: recorded external effects and the catalog stay exactly as they were", async (c) => {
