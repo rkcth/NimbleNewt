@@ -531,6 +531,56 @@ for (const backend of backends) {
     assert.deepEqual([await gate(t1), await gate(t2)], ["active", "active"], "the owner's resume stands");
   });
 
+  suite("the stop look follows a held Suspend only once L02 says it is over: one that needs recovery is followed, a phase the look does not know is waited for, a finished Stop that still holds is left alone", async (c) => {
+    const f = fakeStops();
+    await c.enable();
+    const tasks: string[] = [];
+    for (let i = 0; i < 3; i++) tasks.push(await c.approve(await c.ask(c.dev, { what: `held change ${i}` })));
+    await c.svc.disable(c.owner, { commandId: cid("dis"), expectedRevision: (await c.svc.settings(c.owner))!.revision });
+    const running: OwnCodeRunning[] = tasks.map((t, i) => ({ attemptId: `att-h${i}`, taskId: t, projectId: c.devProject }));
+    const look = () => c.svc.stopRefused(c.owner, { stops: f.stops, running: async () => ({ items: running, next: 0 }) });
+    f.held.set(tasks[0]!, "suspend"); f.heldPhase.set(tasks[0]!, "recovery-required");
+    f.held.set(tasks[1]!, "suspend"); f.heldPhase.set(tasks[1]!, "a-phase-added-later");
+    f.held.set(tasks[2]!, "stop"); f.heldPhase.set(tasks[2]!, "done");
+    assert.deepEqual(await look(), { stopped: ["att-h0"], failed: [] });
+    assert.deepEqual(f.asked.map((x) => x.commandId), ["owncode-stop:att-h0"]);
+    // Once L02 says the unknown phase's request is done, it is followed too; the Stop that holds is still left alone.
+    f.heldPhase.set(tasks[1]!, "done");
+    assert.deepEqual(await look(), { stopped: ["att-h1"], failed: [] });
+    assert.ok(!f.asked.some((x) => x.taskId === tasks[2]), "a finished Stop that holds is left to itself");
+  });
+
+  suite("with L02's own Stop: a Suspend blocked at its deadline is waited for; once the owner chooses a restart from an earlier boundary (the task still paused), the look's own Stop prepares afresh and ends the work", async (c) => {
+    await c.enable();
+    const t1 = await c.approve(await c.ask());
+    await c.svc.disable(c.owner, { commandId: cid("dis"), expectedRevision: (await c.svc.settings(c.owner))!.revision });
+    let settles = false;
+    const busy: InventoryItem[] = [{ kind: "process", ref: "proc-1", state: "running" } as InventoryItem];
+    const rt: StopPorts = {
+      inventory: async () => (settles ? [] : busy), cleanup: async () => ({ remaining: settles ? [] : busy }),
+      checkpoint: async () => ({ checkpointId: "cp-1", durable: true, artifactsDurable: true }), terminate: async () => ({ ended: true, unresolved: [] }),
+    };
+    const pauses = PauseService.withEpoch(c.storage, c.epoch, {}, options);
+    const stops = StopService.withEpoch(c.storage, c.epoch, PauseService.withEpoch(c.storage, c.epoch, {}, options), rt, options);
+    const live: OwnCodeRunning[] = [{ attemptId: "att-b1", taskId: t1, projectId: c.devProject }];
+    const look = () => c.svc.stopRefused(c.owner, { stops, running: async () => ({ items: live, next: 0 }) });
+    const T1 = { kind: "task", id: t1 } as const;
+    const sus = await stops.request(c.owner, { commandId: cid("sus"), scope: T1, mode: "suspend", reason: "maintenance" });
+    now += 61_000;
+    await stops.advance(c.owner, { intentId: sus.intentId });
+    assert.equal((await stops.get(c.owner, sus.intentId))!.phase, "blocked");
+    assert.deepEqual(await look(), { stopped: [], failed: [] }, "a blocked Suspend is waited for");
+    assert.equal((await stops.get(c.owner, sus.intentId))!.mode, "suspend");
+    await stops.choose(c.owner, { commandId: cid("ch"), intentId: sus.intentId, choice: "restart-earlier-boundary" });
+    assert.equal((await stops.get(c.owner, sus.intentId))!.phase, "recovery-required");
+    assert.equal((await pauses.gate(c.owner, T1))?.intent, "pause", "the task is still paused");
+    settles = true;
+    assert.deepEqual(await look(), { stopped: ["att-b1"], failed: [] });
+    const own = (await stops.get(c.owner, derivedId("stp", scopedCommandId(c.owner.id, "owncode-stop:att-b1"))))!;
+    assert.deepEqual([own.mode, own.phase, own.outcome?.state, own.reusedFrom], ["stop", "done", "stopped", undefined], JSON.stringify(own));
+    assert.deepEqual(await look(), { stopped: [], failed: [] }, "asked once");
+  });
+
   suite("the stop look reads a bounded part of the live list per tick and goes on from where it stopped, so work beyond the first part is reached on a later tick", async (c) => {
     const f = fakeStops();
     await c.enable();
