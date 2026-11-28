@@ -394,6 +394,11 @@ export interface RemoteDeps {
   readonly restoreWaits?: (hostId: string, attemptId: string) => Promise<boolean>;
   /** Whether a worker that reconnected may take its still-owned attempt up again by itself (`auto`) or only once the owner approves (`owner`), card H09b. Absent or failing: `owner`. Read at every decision. */
   readonly reaccept?: () => Promise<"auto" | "owner">;
+  /**
+   * Whether the attempt is held after a controller promotion until it is reconciled (card K05): its reconnecting worker takes it up again only once the owner approves, whatever `reaccept` says, and an offer of it is
+   * not taken up. Failing: held. Absent: nothing is held.
+   */
+  readonly recoveryHeld?: (attemptId: string) => Promise<boolean>;
   /** How long the controller keeps the lease of an attempt that waits for the owner's decision alive, in ms, from the moment the waiting was recorded; `undefined`: it does not (off). Absent: 24 hours. */
   readonly patienceMs?: () => Promise<number | undefined>;
   /** How long, in ms, a worker's heartbeats are accepted before it has confirmed its dispatch contract (a slow sandbox start; after a restart with a changed recipe). Absent or undefined: the attempt lease. */
@@ -1405,7 +1410,10 @@ export class RemoteWorkerService {
       try { reasons = await this.#admissionReasons(host.id, b!); } catch (error) { this.#reportError(error); throw new DomainError("unavailable", `whether ${host.id} may open the workspace of attempt ${id} could not be checked; ask again`); }
       if (reasons.length > 0) throw new DomainError("unavailable", `attempt ${id} is not taken up again on ${host.id}: ${reasons.join("; ")}`.slice(0, 600));
     }
-    const mode = await this.#reacceptMode();
+    const held = await this.#recoveryHeld(id);
+    // An offer the fenced controller made is not taken up while its workers are held (card K05): the new controller's dispatcher ends it as lost and admits a replacement once the hold is released.
+    if (held && b!.state === "offered") throw new DomainError("fenced", `the offer of attempt ${id} was made by a controller that was fenced; it is not taken up`);
+    const mode = held ? "owner" : await this.#reacceptMode();
     const patience = await this.#patienceMs();
     let waiting = false;
     let marker: PlacementBody["reaccept"];
@@ -1492,6 +1500,11 @@ export class RemoteWorkerService {
     return { items, ...(after === undefined ? {} : { next: after }) };
   }
 
+  async #recoveryHeld(attemptId: string): Promise<boolean> {
+    if (this.#deps.recoveryHeld === undefined) return false;
+    try { return await this.#deps.recoveryHeld(attemptId); } catch { return true; }
+  }
+
   async #reacceptMode(): Promise<"auto" | "owner"> {
     try { return (await this.#deps.reaccept?.()) === "auto" ? "auto" : "owner"; } catch { return "owner"; }
   }
@@ -1530,7 +1543,8 @@ export class RemoteWorkerService {
     const mode = await this.#reacceptMode();
     const patience = await this.#patienceMs();
     const verdicts: ReconcileVerdict[] = [];
-    for (const h of held) verdicts.push(await this.#verdict(host, session, mode, patience, h.attemptId, h.placement));
+    // An attempt held after a controller promotion waits for the owner whatever the setting says (card K05).
+    for (const h of held) verdicts.push(await this.#verdict(host, session, mode === "auto" && await this.#recoveryHeld(h.attemptId) ? "owner" : mode, patience, h.attemptId, h.placement));
     const counts: Record<string, number> = {};
     for (const v of verdicts) counts[v.verdict] = (counts[v.verdict] ?? 0) + 1;
     const missing = held.length >= REMOTE_LIMITS.held ? [] : await this.#missing(host.id, new Set(held.map((h) => h.attemptId)));

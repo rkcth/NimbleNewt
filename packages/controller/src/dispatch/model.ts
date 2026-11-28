@@ -9,6 +9,8 @@ import type { TurnEndKind } from "./ports.js";
  */
 
 export const DISPATCH_KIND = "dispatch";
+/** The record of live dispatches: the attempts that have a claim and have not finished (read by the workers hold of a controller promotion, card K05). */
+export const DISPATCH_LIVE = { kind: "dispatch-live", id: "live" } as const;
 export const operationKind = (attemptId: string): string => `tool-op-${attemptId}`;
 
 /** `parked`: every call the agent still has to make waits for an approval, the turn ended, and the attempt gave its place back; it goes on (from the checkpoint, in a new run of the same attempt) when a decision comes. */

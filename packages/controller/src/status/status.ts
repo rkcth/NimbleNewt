@@ -5,6 +5,7 @@ import type { AssignmentService } from "../domain/assignments.js";
 import type { SimulationService } from "../simulation/scopes.js";
 import type { RecoveryWatermarkStatus } from "../recovery/service.js";
 import type { ControllerAuthority } from "../recovery/controller.js";
+import type { WorkersHold } from "../recovery/hold.js";
 import type { ActivityBody, AssignmentBody, AttemptBody, GenerationBody } from "../domain/assignment-model.js";
 import { defaultBasis, type BlockerBasis, type BlockerBody, type BlockerService, type BlockerType } from "../domain/blockers.js";
 import { versionIdOf } from "../catalog/catalog.js";
@@ -601,6 +602,33 @@ export function controllerAuthorityLines(a: ControllerAuthority | "unreadable", 
   return lines;
 }
 
+/** How many hosts and attempts the owner's lines on the workers hold name (the rest are counted). */
+export const WORKERS_HOLD_SHOWN = { hosts: 5, attempts: 5 } as const;
+/**
+ * The workers held after a controller promotion (card K05, clause 3) in plain lines, read only and bounded: whether the successor's workers are still held, which hosts are not reconciled and which of their
+ * attempts are still open, and what was kept as evidence of the fenced controller's work. No path; every stored text is quoted through `shown`.
+ */
+export function workersHoldLines(h: WorkersHold | "unreadable", ref: Cite): Line[] {
+  if (h === "unreadable") return [line("The record of the workers held after the controller promotion cannot be read, so no work starts until that is resolved.", ref)];
+  const lines: Line[] = [];
+  const total = h.attempts.length, ended = h.attempts.filter((a) => a.resolved?.how === "ended").length, taken = h.attempts.filter((a) => a.resolved?.how === "taken-up").length;
+  const results = h.attempts.filter((a) => a.storedResult).length;
+  const listed = `${total}${h.truncated ? "+" : ""} attempt${total === 1 ? "" : "s"} of the fenced controller ${total === 1 && !h.truncated ? "was" : "were"} running`;
+  if (h.state === "released") {
+    lines.push(line(total === 0 && !h.truncated ? `Workers after promotion ${shown(h.promotionId, 48)}: nothing of the fenced controller was running, so no worker was held.` : `Workers after promotion ${shown(h.promotionId, 48)}: ${listed}; all ${h.hosts.length} host${h.hosts.length === 1 ? " was" : "s were"} reconciled and work started again${h.releasedAt === undefined ? "" : ` at ${shown(h.releasedAt, 40)}`} (${ended} ended, ${taken} taken up again with your approval).`, ref));
+  } else {
+    const open = h.hosts.filter((x) => x.reconciledAt === undefined);
+    lines.push(line(`Workers held until reconciled since ${shown(h.heldAt, 40)} (promotion ${shown(h.promotionId, 48)}): no work starts. ${listed}; ${open.length} of ${h.hosts.length} host${h.hosts.length === 1 ? " is" : "s are"} not reconciled yet${h.truncated && open.length === 0 ? ", and attempts beyond the list still run" : ""}.`, ref));
+    for (const x of open.slice(0, WORKERS_HOLD_SHOWN.hosts)) {
+      const waiting = h.attempts.filter((a) => a.hostId === x.hostId && a.resolved === undefined);
+      lines.push(line(`${shown(x.hostId, 80)}: ${waiting.length} attempt${waiting.length === 1 ? "" : "s"} still open (${waiting.slice(0, WORKERS_HOLD_SHOWN.attempts).map((a) => shown(a.attemptId, 60)).join(", ")}${waiting.length > WORKERS_HOLD_SHOWN.attempts ? `, and ${waiting.length - WORKERS_HOLD_SHOWN.attempts} more` : ""}); each ends by its lease, or is taken up again once you approve it (reconnect.pending).`, ref));
+    }
+    if (open.length > WORKERS_HOLD_SHOWN.hosts) lines.push(line(`${open.length - WORKERS_HOLD_SHOWN.hosts} more host(s) are not reconciled yet.`, ref));
+  }
+  if (results > 0) lines.push(line(`${results} result${results === 1 ? "" : "s"} a worker sent to the fenced controller ${results === 1 ? "was" : "were"} not taken as new work; ${results === 1 ? "it is" : "they are"} kept as evidence with the attempt's placement.`, ref));
+  return lines;
+}
+
 const RETENTION_SHOWN = { quotaScopes: 10, deletions: 5, runs: 5, backups: 9, backupLine: 330, valueLine: 330, bulkLogs: 3 } as const;
 /**
  * Card K06d, second review: the chat shows the first 30 lines of a status answer (`CHAT_LIMITS.statusLines`, the same number; a test holds them equal), so the whole retention answer is kept to that many
@@ -829,6 +857,8 @@ export interface StatusDeps {
   readonly recoveryWatermark?: { status(): Promise<RecoveryWatermarkStatus> };
   /** The last controller promotion of this store (card K05), read only, shown in the `database_transfer` view when there was one. */
   readonly controllerAuthority?: { get(): Promise<ControllerAuthority | "unreadable" | undefined> };
+  /** The workers held after the last controller promotion (card K05), read only, shown in the `database_transfer` view after the promotion. */
+  readonly workersHold?: { get(): Promise<WorkersHold | "unreadable" | undefined> };
   readonly databaseTransfer?: { status(): Promise<{ readonly source: { readonly name: string; readonly kind: string }; readonly targets: readonly { readonly name: string; readonly kind: string }[]; readonly journal?: { readonly id: string; readonly phase: string; readonly to: { readonly name: string }; readonly note?: string; readonly failure?: { readonly reason: string; readonly destinationClean: boolean }; readonly restart?: { readonly state: string; readonly reason?: string } } }>; settings(): Promise<{ readonly enabled: boolean; readonly restart: boolean; readonly restartOffered: boolean }> };
   readonly shutdown?: { readiness(by: Principal): Promise<{ readonly ready: boolean; readonly paused: boolean; readonly unsettled: readonly { readonly kind: string; readonly ref: string; readonly state: string }[]; readonly tracked?: readonly { readonly kind: string; readonly ref: string; readonly state: string }[]; readonly truncated: boolean }> };
   /** What the latest suspension or stop of a scope spent on cleanup (card L02d). Absent: the view is not offered. */
@@ -2412,7 +2442,8 @@ export class StatusService {
     const at = this.#runner.now();
     const here = cite("installation", "installation");
     const authority = this.#deps.controllerAuthority === undefined ? undefined : await this.#deps.controllerAuthority.get();
-    const recovery = [...(authority === undefined ? [] : controllerAuthorityLines(authority, here)), ...(this.#deps.recoveryWatermark === undefined ? [] : recoveryWatermarkLines(await this.#deps.recoveryWatermark.status(), here))];
+    const held = authority === undefined || this.#deps.workersHold === undefined ? undefined : await this.#deps.workersHold.get();
+    const recovery = [...(authority === undefined ? [] : controllerAuthorityLines(authority, here)), ...(held === undefined ? [] : workersHoldLines(held, here)), ...(this.#deps.recoveryWatermark === undefined ? [] : recoveryWatermarkLines(await this.#deps.recoveryWatermark.status(), here))];
     if (this.#deps.databaseTransfer === undefined) return this.#deps.recoveryWatermark === undefined && authority === undefined ? undefined : { observedAt: at, lines: recovery };
     const st = await this.#deps.databaseTransfer.status(), se = await this.#deps.databaseTransfer.settings();
     const lines: Line[] = [line(`The controller database is ${shown(st.source.name)} (${shown(st.source.kind)}). It can be moved to: ${st.targets.length === 0 ? "nowhere (no destination is configured)" : st.targets.map((t) => `${shown(t.name)} (${shown(t.kind)})`).join(", ")}.`, here)];
