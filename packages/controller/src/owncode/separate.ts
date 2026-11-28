@@ -215,15 +215,33 @@ const related = (a: FsLocation, b: FsLocation): boolean => fsUnder(a, b) || fsUn
  */
 async function gitPlaces(fs: SeparationFs, canon: string): Promise<{ readonly top?: string; readonly folders: string[] }> {
   if (fs.readText === undefined) return { folders: [] };
+  // Second review of the fourth slice: git passes over a `.git` folder that is not a git folder (no HEAD, objects or refs) and goes on up. Such a `.git` is kept as a place too, and the walk goes on, so
+  // only adding is possible: a folder that git would take as its work tree further up is never missed.
+  const passed: string[] = [];
   for (let at = canon, n = 0; ; at = dirname(at), n++) {
     if (n >= SEPARATE_LIMITS.depth) throw new CannotTell(`it is more than ${SEPARATE_LIMITS.depth} folders deep`);
-    const folders = await gitPlacesAt(fs, at);
-    if (folders !== undefined) return { ...(at === canon ? {} : { top: at }), folders };
-    if (dirname(at) === at) return { folders: [] };
+    const found = await gitPlacesAt(fs, at);
+    if (found !== undefined && found.final) return { ...(at === canon ? {} : { top: at }), folders: [...passed, ...found.folders] };
+    if (found !== undefined) passed.push(...found.folders);
+    if (dirname(at) === at) return { folders: passed };
   }
 }
-/** The git folders of the `.git` at `canon`, or `undefined` when there is no `.git` there. */
-async function gitPlacesAt(fs: SeparationFs, canon: string): Promise<string[] | undefined> {
+/**
+ * Whether git takes the folder `gitDir` as a git folder (git's `is_git_directory`): a HEAD that is a plain file naming a ref under `refs/` or an object ID, and `objects` and `refs` folders in its common
+ * folder. Anything else (missing, unreadable, a HEAD link) is "not certain", which only makes the walk above go on.
+ */
+async function isGitFolder(fs: SeparationFs, gitDir: string, common: string): Promise<boolean> {
+  const folder = async (p: string): Promise<boolean> => { try { await fs.readText!(p, 1); return false; } catch (error) { return (error as NodeJS.ErrnoException)?.code === "EISDIR"; } };
+  try {
+    // A HEAD that is a link: git looks at the link's text, which is not read here, so it is not certain.
+    if ((await fs.realpath(`${gitDir}${sep}HEAD`)) !== join(await fs.realpath(gitDir), "HEAD")) return false;
+    const head = await fs.readText!(`${gitDir}${sep}HEAD`, 256);
+    if (!/^(ref:[ \t]*refs\/\S|[0-9a-f]{40}(?:[0-9a-f]{24})?[ \t\r]*(?:\n|$))/.test(head)) return false;
+  } catch { return false; }
+  return (await folder(`${common}${sep}objects`)) && (await folder(`${common}${sep}refs`));
+}
+/** The git folders of the `.git` at `canon`, or `undefined` when there is no `.git` there; `final` when git stops there (a `.git` file, which git follows or fails on, or a `.git` folder git takes as one). */
+async function gitPlacesAt(fs: SeparationFs, canon: string): Promise<{ readonly folders: string[]; readonly final: boolean } | undefined> {
   const read = async (path: string, what: string): Promise<string> => {
     // One byte past the limit is asked for, so a longer file is known to be longer (and is not judged by its start).
     const text = await fs.readText!(path, SEPARATE_LIMITS.gitFileBytes + 1);
@@ -234,6 +252,7 @@ async function gitPlacesAt(fs: SeparationFs, canon: string): Promise<string[] | 
   const under = (base: string, named: string): string => (isAbsolute(named) ? named : `${base}${sep}${named}`);
   const dotGit = join(canon, ".git");
   let gitDir: string;
+  let isFile = true;
   try {
     const text = await read(dotGit, "its .git file");
     const named = /^gitdir:[ \t]*(.+?)[ \t\r]*$/m.exec(text)?.[1];
@@ -246,6 +265,7 @@ async function gitPlacesAt(fs: SeparationFs, canon: string): Promise<string[] | 
     // A .git folder (or a link to one): itself, and the common folder it may name too.
     if (code !== "EISDIR") throw new CannotTell(`its .git could not be read${typeof code === "string" ? ` (${code})` : ""}`);
     gitDir = dotGit;
+    isFile = false;
   }
   const out = [gitDir];
   try {
@@ -256,7 +276,7 @@ async function gitPlacesAt(fs: SeparationFs, canon: string): Promise<string[] | 
     const code = (error as NodeJS.ErrnoException)?.code;
     if (code !== "ENOENT") throw new CannotTell(`its git folder's commondir could not be read${typeof code === "string" ? ` (${code})` : ""}`);
   }
-  return out;
+  return { folders: out, final: isFile || (await isGitFolder(fs, gitDir, out[out.length - 1]!)) };
 }
 
 /**
