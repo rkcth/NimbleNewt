@@ -22217,3 +22217,9 @@ No interpreter prompt text, API summary text, task-plan file or card status chan
 - Another planted floor is put right by the reminder, without a reminder being sent.
 
 Undoing each of the three changes in the built file makes the scenario fail.
+
+**Second review of the fix (clean-context Claude agent, 2026-11-27 EST; same branch; not pushed; no card flipped).** All three changes were checked against every end of a floor: its own end, a record that ends mid-unit, the owner's done, `#closeOut` and `sweep`. Each now leaves no inquiry, no `pausedAt`, closed notices, and the list entry removed in the same write. A repeat, or two callers racing, changes nothing more. A floor is marked ended only after its record has closed, so a close-out never ends an inquiry the owner is still in. A vote held for the inquiry is voided by the record's `finish` and is never resumed by these paths. The sweep's new write is bounded by the list (at most `openInquiries` floors, one guarded write each), and one failing floor does not stop it. Two problems were found and fixed:
+- The floor's own end (`end`) cleared the inquiry but did not close its notices. It now closes them like the other ends.
+- The unit-boundary end overwrote an `endedAt` the owner's end had already set. It now keeps the first one.
+
+Tests added: notices, `pausedAt`, the first `endedAt`, the unit not left in flight, and a repeated done that changes nothing. Also two new scenarios: the owner ends the meeting during a unit while the inquiry is open; and a failing close-out followed by another floor in the same reminder. 19 deliberate breakages of the changed lines: 17 caught by the first test additions, 19 after.

@@ -580,7 +580,7 @@ export class MeetingFloorService {
       // the meeting ended (the owner's end command takes effect at this boundary): the unit is dropped, nothing completed is undone. An open inquiry ends with it (its notices are closed), as when the floor is ended or closed out,
       // so it leaves the list of open inquiries and the Needs-you list.
       const now = this.#runner.now();
-      await this.#update(recordId, by, `ended-${unit.id}`, (b) => ({ ...b, inflight: undefined, state: "ended", endedAt: now, inquiry: undefined, clock: { ...b.clock, pausedAt: undefined } }));
+      await this.#update(recordId, by, `ended-${unit.id}`, (b) => ({ ...b, inflight: undefined, state: "ended", endedAt: b.state === "ended" ? b.endedAt : now, inquiry: undefined, clock: { ...b.clock, pausedAt: undefined } }));
       if (fresh.inquiry !== undefined) await this.#deps.settleOwner?.({ recordId, projectId: fresh.projectId, kinds: ["inquiry-open", "inquiry-idle"] }).catch(() => undefined);
       return { waiting: "meeting-ended", phase: "none" };
     }
@@ -1243,7 +1243,10 @@ export class MeetingFloorService {
     const { recordId } = await this.#open(command.recordId);
     const out = await this.#deps.records.finish(this.#deps.service, { commandId: `fl-end-${base(recordId)}-${hash(by.id, command.commandId)}`, recordId, ...(command.reason === undefined ? {} : { reason: recordText(command.reason, 400) }) });
     const now = this.#runner.now();
+    const had = (await this.#load(recordId))?.body;
     await this.#update(recordId, by, "ended", (b) => (b.state === "ended" ? undefined : { ...b, state: "ended", endedAt: now, inquiry: undefined, inflight: undefined, clock: { ...b.clock, pausedAt: undefined } }));
+    // An inquiry open when the owner ends the meeting ends with it: its notices are closed, as at the other ends of a floor.
+    if (had?.inquiry !== undefined) await this.#deps.settleOwner?.({ recordId, projectId: had.projectId, kinds: ["inquiry-open", "inquiry-idle"] }).catch(() => undefined);
     // What the meeting left open becomes owned follow-up work now; a failure here never undoes the end (the scheduled turn tries again).
     await this.#endFollowUps(recordId).catch(() => undefined);
     return out;
