@@ -11,7 +11,9 @@ import { PI, ScriptedWorker, workGrants } from "../dispatch/testing/world.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { HostService } from "../hosts/hosts.js";
 import { NotificationService } from "../notifications/index.js";
+import { derivedId } from "../domain/ids.js";
 import { OWNCODE_OFF } from "../owncode/index.js";
+import { scopedCommandId } from "../security/credentials.js";
 import { startController } from "./index.js";
 
 // Card B06, second slice, through the composed controller with a local worker host whose agents run until they are stopped: an attempt already running in the NimbleNewt development project is stopped
@@ -98,7 +100,9 @@ test("work already running on NimbleNewt's own code is stopped through L02's Sto
     const p1 = await c.dispatch!.dispatcher.runningAttempts(c.dispatch!.principal, { from: p0.next, limit: 2 });
     assert.deepEqual([p0.items.length, p0.next, p1.items.length, p1.next], [1, 1, 2, 1]);
     assert.deepEqual(new Set([...p0.items, ...p1.items].map((x) => x.attemptId)), new Set([a1, aw]));
-    assert.deepEqual(p0.items.concat(p1.items).find((x) => x.attemptId === aw), { attemptId: aw, taskId: weed, projectId: garden });
+    const seenW = p0.items.concat(p1.items).find((x) => x.attemptId === aw)!;
+    assert.deepEqual({ ...seenW, at: undefined }, { attemptId: aw, taskId: weed, projectId: garden, at: undefined });
+    assert.deepEqual([p0.items.map((x) => x.at), p1.items.map((x) => x.at)], [[0], [1, 0]], "each item carries its position in the live list");
     const annP = await c.services.principals.authenticate(annToken);
     await assert.rejects(() => c.dispatch!.dispatcher.runningAttempts(annP, { from: 0, limit: 5 }), /may not list live attempts/);
     assert.deepEqual(await intentsFor(c, t1), [], "approved work that runs is not stopped");
@@ -120,14 +124,21 @@ test("work already running on NimbleNewt's own code is stopped through L02's Sto
     assert.equal(gate.intent, "pause", "the task stays stopped until the owner resumes it");
     assert.match(gate.reason ?? "", /withdrew the approval/);
     assert.equal((await dispatchOf(c, aw)).state, "running", "other work is not touched");
-    const notices = async (): Promise<{ ref: { id: string }; detail?: string }[]> => (await NotificationService.withEpoch(c.storage, c.epoch).inbox(owner)).items.filter((i) => i.ref.kind === "task" && (i.detail ?? "").includes("Stopped NimbleNewt development work")) as never;
+    const notices = async (): Promise<{ ref: { id: string }; detail?: string; count?: number }[]> => (await NotificationService.withEpoch(c.storage, c.epoch).inbox(owner)).items.filter((i) => i.ref.kind === "task" && /^Attempt att-[a-z2-7]{20} was stopped/.test(i.detail ?? "")) as never;
     assert.deepEqual((await notices()).map((i) => i.ref.id), [t1]);
-    assert.ok((await notices())[0]!.detail!.startsWith(`Attempt ${a1} was stopped (L02 Stop stp-`), (await notices())[0]!.detail);
+    // The gate's own words, whole (they fit the notice limit here).
+    assert.equal((await notices())[0]!.detail, `Attempt ${a1} was stopped: task ${t1}: its request ${r1} is withdrawn (the owner withdrew the approval), so no work starts`);
     // Nothing more on the next tick, and no new attempt of the withdrawn task starts.
     await c.dispatch!.dispatcher.tick();
     assert.equal((await intentsFor(c, t1)).length, 1);
     assert.equal((await notices()).length, 1);
     await assert.rejects(() => start(t1));
+    // The owner can resume the task the dispatcher's Stop paused (lifecycle.resume); a tick does not pause it again (its attempt is over), and its next start is still refused by the gate.
+    assert.ok((await call(c, boot.token, "lifecycle.resume", { scope: { kind: "task", id: t1 }, reason: "looked at it" }, "rs-t1")).ok);
+    await c.dispatch!.dispatcher.tick();
+    assert.notEqual((await c.services.pauses.gate(owner, { kind: "task", id: t1 }))?.intent, "pause", "resumed, and not paused again");
+    const asg = (await c.services.assignments.getAssignment(t1))!;
+    await assert.rejects(() => c.services.assignments.admitAttempt({ commandId: "ad-again", actor: "inbox", taskId: t1, expectedRevision: asg.revision, generation: asg.generation, owner: asg.owner as never, harness: "pi" }), /withdrew the approval/);
 
     // The second approved request's attempt runs; the feature is switched off: it is stopped too, saying the owner can enable it; the garden runs on.
     const a2 = await start(t2, bo);
@@ -140,6 +151,12 @@ test("work already running on NimbleNewt's own code is stopped through L02's Sto
     assert.equal((await dispatchOf(c, a2)).state, "finished");
     const [stop2] = await intentsFor(c, t2);
     assert.ok(stop2!.reason.endsWith(OWNCODE_OFF), stop2!.reason);
+    // The look finds its own earlier request by the ID L02 derives from the asker and the command ID; this is that ID.
+    const stop2Id = (await c.storage.listAggregates("stop-intent", { limit: 200 })).find((x) => (x.body as unknown as Intent).scope.id === t2)!.id;
+    assert.equal(stop2Id, derivedId("stp", scopedCommandId(c.dispatch!.principal.id, `owncode-stop:${a2}`)));
+    // Too long to fit whole, so the notice names the Stop that keeps the gate's words; never cut.
+    const n2 = (await notices()).find((i) => i.ref.id === t2)!;
+    assert.equal(n2.detail, `Attempt ${a2} was stopped: work on NimbleNewt's own code may not run now. The full reason is on Stop ${stop2Id}. The task stays paused until the owner resumes it.`);
     assert.equal((await dispatchOf(c, aw)).state, "running");
     assert.deepEqual((await notices()).map((i) => i.ref.id).sort(), [t1, t2].sort());
 

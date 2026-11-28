@@ -6,9 +6,10 @@ import { derivedId } from "../domain/ids.js";
 import { CommandRunner } from "../domain/runner.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
+import { scopedCommandId } from "../security/credentials.js";
 import { PrincipalService, type Principal } from "../security/index.js";
 import type { ControllerStorage } from "../storage/types.js";
-import { OWNCODE_OFF, OWNCODE_STOP, OwnCodeService, taskIdOf, type OwnCodeOptions, type OwnCodeRunning, type OwnCodeStops } from "./index.js";
+import { OWNCODE_OFF, OWNCODE_STOP, OwnCodeService, ownCodeStopNotice, ownCodeStopReason, taskIdOf, type OwnCodeOptions, type OwnCodeRunning, type OwnCodeStops } from "./index.js";
 
 // Card B06, first slice: optional agent work on NimbleNewt's own code. Off by default (a request is refused with a message saying the owner can enable it); on, an agent asks first and only the owner approves;
 // no attempt starts in the development project without an approved request, and a withdrawn approval stops further starts. Real storage on each backend, real admissions through the attempt gate; the only
@@ -31,21 +32,28 @@ function fakeStops() {
   const asked: { by: string; commandId: string; taskId: string; mode: string; reason: string }[] = [];
   const advanced: string[] = [];
   const known = new Map<string, string>();
+  /** The Stop records, by the ID L02 derives from the asker and the command ID. */
+  const intents = new Map<string, { phase: string; reason: string }>();
   const failFor = new Set<string>();
+  /** Every call of `request`, replays included (a replay of L02's request still touches the task's pause). */
+  const calls = { request: 0 };
   const stops: OwnCodeStops = {
     holding: async (taskId) => (held.has(taskId) ? { intentId: `stp-held-${taskId}`, mode: held.get(taskId)! } : undefined),
     request: async (by, command) => {
+      calls.request++;
       if (failFor.has(command.scope.id)) throw new DomainError("unavailable", "the stop could not be recorded");
       const old = known.get(command.commandId);
       if (old !== undefined) return { intentId: old, replayed: true };
-      const intentId = `stp-${known.size}`;
+      const intentId = derivedId("stp", scopedCommandId(by.id, command.commandId));
       known.set(command.commandId, intentId);
+      intents.set(intentId, { phase: "preparing", reason: command.reason });
       asked.push({ by: by.id, commandId: command.commandId, taskId: command.scope.id, mode: command.mode, reason: command.reason });
       return { intentId, replayed: false };
     },
     advance: async (_by, command) => { advanced.push(command.intentId); },
+    get: async (_by, intentId) => intents.get(intentId),
   };
-  return { stops, held, asked, advanced, failFor };
+  return { stops, held, asked, advanced, failFor, intents, known, calls };
 }
 
 interface Ctx {
@@ -374,8 +382,10 @@ for (const backend of backends) {
     assert.deepEqual(r, { stopped: ["att-hand"], failed: [] });
     assert.deepEqual(f.asked.map((x) => [x.commandId, x.taskId, x.mode, x.by]), [["owncode-stop:att-hand", byHand, "stop", c.owner.id]]);
     assert.match(f.asked[0]!.reason, /^Stopped NimbleNewt development work: task .* came from no approved request/);
-    assert.deepEqual(f.advanced, ["stp-0"], "the Stop's first steps run at once");
+    assert.deepEqual(f.advanced, [f.known.get("owncode-stop:att-hand")], "the Stop's first steps run at once");
     f.held.set(byHand, "stop");
+    // Its Stop has ended it (in the real list it would no longer be running; here it stays listed, and an ended Stop is not told again).
+    f.intents.get(f.known.get("owncode-stop:att-hand")!)!.phase = "done";
 
     // The owner withdraws the approval of A: A is stopped, with the gate's reason; B (still approved) and the garden are not.
     await c.svc.withdraw(c.owner, { commandId: cid("w"), requestId: reqA, expectedRevision: await c.rev(reqA), reason: "not wanted now" });
@@ -383,16 +393,25 @@ for (const backend of backends) {
     assert.deepEqual(r, { stopped: [attA], failed: [] });
     assert.equal(f.asked.at(-1)!.taskId, a);
     assert.match(f.asked.at(-1)!.reason, /the owner withdrew the approval\), so no work starts$/);
-    assert.ok(told.at(-1)!.startsWith(`${attA}|stp-1|Stopped NimbleNewt development work: task ${a}`), told.at(-1));
-    // The next tick: A's Stop is in force (the Stop's sweep carries it on), so nothing is asked again.
+    const stopA = f.known.get(`owncode-stop:${attA}`)!;
+    assert.ok(told.at(-1)!.startsWith(`${attA}|${stopA}|Stopped NimbleNewt development work: task ${a}`), told.at(-1));
+    // The next tick: A's Stop is in progress (the Stop's sweep carries it on), so nothing is asked again; the owner's notice is sent again under the same command ID (sent once: see the composed test).
     f.held.set(a, "stop");
+    let told0 = told.length;
     assert.deepEqual(await look(), { stopped: [], failed: [] });
-    assert.equal(f.asked.length, 2);
-    // If the Stop is not seen as in force (its pause was lifted), the same command ID is replayed: nothing more is done, nothing is advanced or told again.
+    assert.deepEqual([f.asked.length, f.advanced.length, told.length], [2, 2, told0 + 1]);
+    assert.equal(told.at(-1), told.at(-2), "the same notice, for the same Stop");
+    // The owner resumed A while its Stop was being prepared (L02 cancelled it): the Stop is not asked for again (that would touch the task's pause), nothing is advanced or told again.
     f.held.delete(a);
-    const told0 = told.length;
+    f.intents.get(stopA)!.phase = "cancelled";
+    told0 = told.length;
+    const calls0 = f.calls.request;
     assert.deepEqual(await look(), { stopped: [], failed: [] });
-    assert.deepEqual([f.asked.length, f.advanced.length, told.length], [2, 2, told0]);
+    assert.deepEqual([f.asked.length, f.advanced.length, told.length, f.calls.request], [2, 2, told0, calls0]);
+    // Nor once the Stop is over.
+    f.intents.get(stopA)!.phase = "done";
+    assert.deepEqual(await look(), { stopped: [], failed: [] });
+    assert.deepEqual([f.asked.length, f.advanced.length, told.length, f.calls.request], [2, 2, told0, calls0]);
 
     // The feature is switched off: B is stopped too, saying the owner can enable it.
     await c.svc.disable(c.owner, { commandId: cid("dis"), expectedRevision: (await c.svc.settings(c.owner))!.revision });
@@ -453,5 +472,53 @@ for (const backend of backends) {
     assert.deepEqual(asked, [[0, OWNCODE_STOP.look], [100, OWNCODE_STOP.look]]);
     await look();
     assert.deepEqual(asked.at(-1), [50, OWNCODE_STOP.look], "and wraps round");
+  });
+
+  // First review of the B06 second slice: a look cut short by the per-tick limit goes on from the first attempt it did not judge (also when the whole list fits in one look, where `next` is where it began),
+  // so failures at the front never keep the rest running; the owner's notice is never cut and fits the notice limit; a notice lost after the Stop was recorded is sent on a later tick.
+  suite("a look cut short goes on from the first attempt not judged, the owner's notice fits whole, and a lost notice is sent on a later tick", async (c) => {
+    const f = fakeStops();
+    await c.enable();
+    const tasks: string[] = [];
+    for (let i = 0; i < OWNCODE_STOP.perTick + 2; i++) tasks.push((await c.projects.createTask({ commandId: cid("t"), actor: c.owner.id, projectId: c.devProject, title: `by hand ${i}` })).id);
+    const live: OwnCodeRunning[] = tasks.map((t, i) => ({ attemptId: `att-${i}`, taskId: t, projectId: c.devProject }));
+    // The dispatcher's read as it is: the whole list fits, so `next` is where the look began; each item carries its position.
+    const froms: number[] = [];
+    const running = async (from: number, limit: number) => { froms.push(from); const n = Math.min(limit, live.length); return { items: Array.from({ length: n }, (_, i) => ({ ...live[(from + i) % live.length]!, at: (from + i) % live.length })), next: (from + n) % live.length }; };
+    const told: string[] = [];
+    let lose = true;
+    const look = () => c.svc.stopRefused(c.owner, { stops: f.stops, running, told: async (x) => { if (lose && x.attemptId === "att-5") throw new Error("the controller stopped here"); told.push(`${x.attemptId}|${x.intentId}`); } });
+    // The first five cannot be recorded this tick (a store that failed for them): they use up the tick.
+    for (const t of tasks.slice(0, OWNCODE_STOP.perTick)) f.failFor.add(t);
+    let r = await look();
+    assert.deepEqual(r.failed.map((x) => x.attemptId), ["att-0", "att-1", "att-2", "att-3", "att-4"]);
+    assert.deepEqual(r.stopped, []);
+    // They go on failing, but the next look begins at the first one not judged, so the rest are stopped.
+    r = await look();
+    assert.deepEqual(froms, [0, OWNCODE_STOP.perTick]);
+    assert.deepEqual(r.stopped, ["att-5", "att-6"], JSON.stringify(r));
+    assert.deepEqual(told, ["att-6|" + f.known.get("owncode-stop:att-6")], "the notice of att-5 was lost");
+    // The failed ones are judged again (wrapping round), and the notice lost for att-5 is sent now, for its own Stop; the Stops already asked for are not asked again.
+    lose = false;
+    f.failFor.clear();
+    const n0 = f.asked.length;
+    r = await look();
+    assert.deepEqual([...r.stopped].sort(), ["att-0", "att-1", "att-2", "att-3", "att-4"]);
+    assert.equal(froms.at(-1), 3, "the second look was cut short at att-3 (two Stops, three failures)");
+    assert.equal(f.asked.length, n0 + 5);
+    assert.ok(told.includes("att-5|" + f.known.get("owncode-stop:att-5")), told.join(" "));
+    assert.equal(new Set(f.asked.map((x) => x.commandId)).size, f.asked.length);
+
+    // The notice: the gate's own words when they fit whole; otherwise a fixed sentence naming the Stop, whose reason keeps them whole. Never over the 200 limit, never cut.
+    const att = "att-abcdefghijklmnopqrst"; const stp = "stp-abcdefghijklmnopqrst";
+    const withdrawn = ownCodeStopReason(`task tsk-abcdefghijklmnopqrst: its request ocr-abcdefghijklmnopqrst is withdrawn (the owner withdrew the approval), so no work starts`);
+    assert.equal(ownCodeStopNotice({ attemptId: att, intentId: stp, reason: withdrawn }), `Attempt ${att} was stopped: task tsk-abcdefghijklmnopqrst: its request ocr-abcdefghijklmnopqrst is withdrawn (the owner withdrew the approval), so no work starts`);
+    const off = ownCodeStopNotice({ attemptId: att, intentId: stp, reason: ownCodeStopReason(`task tsk-abcdefghijklmnopqrst is in the NimbleNewt development project. ${OWNCODE_OFF}`) });
+    assert.ok(off.length <= 200, off);
+    assert.match(off, new RegExp(`^Attempt ${att} was stopped: .*Stop ${stp}\\. The task stays paused until the owner resumes it\\.$`));
+    for (const why of ["x".repeat(400), `task tsk-abcdefghijklmnopqrst was changed after the owner approved request ocr-abcdefghijklmnopqrst (its title or description is not the approved one), so no work starts; changed work needs a new request`]) {
+      const text = ownCodeStopNotice({ attemptId: att, intentId: stp, reason: ownCodeStopReason(why) });
+      assert.ok(text.length <= 200 && text.endsWith("."), text);
+    }
   });
 }

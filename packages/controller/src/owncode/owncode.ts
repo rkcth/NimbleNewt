@@ -30,15 +30,31 @@ export const OWNCODE_LIMITS = { text: 600, note: 400, title: 200, pendingPerAgen
 /** How much one tick's stop look does (card B06, second slice): at most `look` live attempts are looked at (the rest on the next ticks, from where this one stopped), and at most `perTick` Stops are asked for. */
 export const OWNCODE_STOP = { look: 100, perTick: 5 } as const;
 /** What the stop look is given: an attempt that is running, with its task and project (the dispatcher's record). */
-export interface OwnCodeRunning { readonly attemptId: string; readonly taskId: string; readonly projectId: string }
+export interface OwnCodeRunning { readonly attemptId: string; readonly taskId: string; readonly projectId: string; /** Its position in the live list, so a look cut short goes on from it next time. */ readonly at?: number }
 /** The part of L02's Stop (`StopService`) the stop look uses. */
 export interface OwnCodeStops {
   holding(taskId: string): Promise<{ intentId: string; mode: string } | undefined>;
   request(by: Principal, command: { commandId: string; scope: { kind: "task"; id: string }; mode: "stop"; reason: string }): Promise<{ intentId: string; replayed: boolean }>;
   advance(by: Principal, command: { intentId: string }): Promise<unknown>;
+  get(by: Principal, intentId: string): Promise<{ readonly phase: string; readonly reason: string } | undefined>;
 }
+const STOP_REASON_PREFIX = "Stopped NimbleNewt development work: ";
 /** The reason a Stop of running development work records (the pause and the Stop show it): the gate's own refusal. */
-export const ownCodeStopReason = (why: string): string => `Stopped NimbleNewt development work: ${why}`.slice(0, 500);
+export const ownCodeStopReason = (why: string): string => `${STOP_REASON_PREFIX}${why}`.slice(0, 500);
+/**
+ * The owner's notice for one stopped attempt (at most 200 characters, the notice limit): the gate's own words when they fit whole, otherwise a fixed sentence that points at the Stop, whose reason holds them
+ * whole. Never cut in the middle.
+ */
+export const ownCodeStopNotice = (stop: { readonly attemptId: string; readonly intentId: string; readonly reason: string }): string => {
+  const why = stop.reason.startsWith(STOP_REASON_PREFIX) ? stop.reason.slice(STOP_REASON_PREFIX.length) : stop.reason;
+  const whole = `Attempt ${stop.attemptId} was stopped: ${why}`;
+  if (whole.length <= 200) return whole;
+  const short = `Attempt ${stop.attemptId} was stopped: work on NimbleNewt's own code may not run now. The full reason is on Stop ${stop.intentId}. The task stays paused until the owner resumes it.`;
+  return short.length <= 200 ? short : `Attempt ${stop.attemptId} was stopped. The full reason is on its Stop.`;
+};
+/** The ID L02's Stop gives the request this look makes for an attempt (`StopService.request`: derived from the asker and the command ID). */
+const ownStopIntentId = (by: Principal, attemptId: string): string => derivedId("stp", scopedCommandId(by.id, `owncode-stop:${attemptId}`));
+const STOP_OVER = ["done", "recovery-required", "cancelled"];
 const REQUEST_ID = /^ocr-[a-z2-7]{20}$/;
 const SETTINGS: AggregateRef = { kind: "owncode-settings", id: "installation" };
 const INDEX: AggregateRef = { kind: "owncode-index", id: "installation" };
@@ -332,19 +348,27 @@ export class OwnCodeService {
     const look = await deps.running(this.#stopFrom, OWNCODE_STOP.look);
     this.#stopFrom = look.next;
     for (const a of look.items) {
-      if (stopped.length + failed.length >= OWNCODE_STOP.perTick) break;
+      // Cut short by the per-tick limit: the next look begins at the first attempt not judged, so the ones after a failure (or after five Stops) are reached next tick, also when the whole list fits in one look.
+      if (stopped.length + failed.length >= OWNCODE_STOP.perTick) { if (a.at !== undefined && Number.isSafeInteger(a.at) && a.at >= 0) this.#stopFrom = a.at; break; }
       if (a.projectId !== s.projectId || seen.has(a.taskId)) continue;
       seen.add(a.taskId);
       try {
         const why = await this.checkAttempt(a.taskId);
         if (why === undefined) continue;
-        // A Stop (or Force Stop) of the task already in force (the owner's own, or this look's from an earlier tick) is carried on by the Stop's sweep; a Suspend is taken over by the Stop.
+        // A Stop this look already asked for this attempt on an earlier tick is not asked for again (asking again would touch the task's pause, which may be the owner's own by now). In progress, it is the
+        // Stop's sweep's to carry on, and the owner's notice is sent again under the same command ID (so a notice lost to a restart between the Stop and the notice is sent, and never twice). Over or
+        // cancelled (the owner resumed the task while it was being stopped), the owner's later choice stands for this attempt; its next start is still refused by the gate. Not counted toward this tick's Stops.
+        const mine = await deps.stops.get(by, ownStopIntentId(by, a.attemptId));
+        if (mine !== undefined) {
+          if (!STOP_OVER.includes(mine.phase)) await deps.told?.({ attemptId: a.attemptId, taskId: a.taskId, projectId: a.projectId, reason: mine.reason, intentId: ownStopIntentId(by, a.attemptId) }).catch(() => undefined);
+          continue;
+        }
+        // A Stop (or Force Stop) of the task already in force (the owner's own, or another attempt's) is carried on by the Stop's sweep; a Suspend is taken over by the Stop.
         const held = await deps.stops.holding(a.taskId);
         if (held !== undefined && held.mode !== "suspend") continue;
         const reason = ownCodeStopReason(why);
         const asked = await deps.stops.request(by, { commandId: `owncode-stop:${a.attemptId}`, scope: { kind: "task", id: a.taskId }, mode: "stop", reason });
-        // A replay is a Stop this look already asked for this attempt: in progress, it is the Stop's sweep's to carry on; cancelled, the owner resumed the task while it was being stopped, and that
-        // later choice of the owner's stands for this attempt (its next start is still refused by the gate). Either way nothing more is done, and it does not count toward this tick's Stops.
+        // A replay here is a Stop that took over a Suspend on an earlier tick (it has no record of its own): it is the Stop's sweep's to carry on, and it does not count toward this tick's Stops.
         if (asked.replayed) continue;
         // The Stop's first steps run now (as the owner's own Stop does); whatever is left, the Stop's sweep carries on.
         await deps.stops.advance(by, { intentId: asked.intentId }).catch(() => undefined);
