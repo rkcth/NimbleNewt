@@ -4091,12 +4091,27 @@
       ],
       "deliverable": "Split from L03i (2026-10-31): the integrator lease (P10) and workspace holds (H12m) listed as lock sources of the hand-off package, limited to what the recipient may see, replacing the 'not tracked yet' gap line the package carries today",
       "acceptance_and_verification": "The package lists every kind of lock and no longer tells the integrator lease and workspace holds as a gap",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "04ace96a",
+          "acb4c0af",
+          "013e127b",
+          "c47eb73a",
+          "5cf23129"
+        ],
+        "ci_runs": [
+          "46106161036"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "The hand-off package's locks section lists every kind of hold the controller keeps for the task: the sender's integrator leases for it (P10), a freeze left by an ended workspace request and the operation open on the checkout (H12m), and the claims of the sender's responsibilities; the 'not tracked by this installation yet' gap line is gone, a section with nothing held says so (LOCKS_NONE), and a source that fails to read is its own gap line that keeps the others. Details are limited to what the recipient may see through its own doors: lease branch, fence and expiry only with the exact integration.lease right on the project, the workspace request, starter and since-when only with the exact workspace.manage right on the task (wildcards, task credentials, other projects, expired or restricted grants, an inactive or unreadable recipient give the count and kind only); stored values are redacted, then cut to one bounded line. Audit judgement: P10's landing-queue places belong to the task and travel with it, and P04 maintenance leases are held per resource under a responsibility (no task), so neither is a hold of the sender for this task. Proof: lifecycle/handoff-holds, api/start-handoff-holds, api/start-handoff, lifecycle/handoff-leases, lifecycle/handoff-sources, workspace-ops-h12m and landing/integrator-lease, 75 of 75 on Node 22.23.0 through the test slot with the sandbox required and the offline guard. Exhaustive CI run 46106161036 (commit a0b6bb76, every platform) covers every L03j commit; later commits on main touch only B05, B06 and the meeting floor, not the hand-off code."
+      }
     },
     {
       "id": "L04",

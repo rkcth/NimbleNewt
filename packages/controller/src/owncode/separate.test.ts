@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { after, test } from "node:test";
@@ -12,6 +12,8 @@ const root = realpathSync(mkdtempSync(join(tmpdir(), "nn-b06c-sep-")));
 after(() => rmSync(root, { recursive: true, force: true }));
 const dir = (...parts: string[]): string => { const p = join(root, ...parts); mkdirSync(p, { recursive: true }); return p; };
 const repo = (locator: string, label = "source", write = true): OwnPlace => ({ label, kind: "repository", locator, write });
+/** A folder git takes as a git folder (a HEAD naming a branch, `objects` and `refs`), made at `path`; returns `path`. */
+const gitFolder = (path: string): string => { mkdirSync(join(path, "objects"), { recursive: true }); mkdirSync(join(path, "refs"), { recursive: true }); writeFileSync(join(path, "HEAD"), "ref: refs/heads/main\n"); return path; };
 const install = dir("srv", "nimblenewt");
 const data = dir("var", "nimblenewt-data");
 const guarded: GuardedPlace[] = [{ what: "the running installation's program files", path: install }, { what: "the controller's data directory", path: data }];
@@ -122,10 +124,15 @@ test("the guarded folders come from what builds the controller; the program root
   const here = programRoot();
   // This test runs from the built package, which lives in the source tree: the root is the folder whose package.json declares the workspaces, above packages/controller.
   assert.ok(resolve(here, "packages", "controller") === resolve(new URL("../../", import.meta.url).pathname), `${here} holds this package`);
-  assert.deepEqual(installationGuards({ programRoot: "/opt/nn/", dataDirectory: "/var/lib/nn" }), [{ what: "the running installation's program files", path: "/opt/nn" }, { what: "the controller's data directory", path: "/var/lib/nn" }]);
-  const all = installationGuards({ programRoot: "/opt/nn", runtime: "/usr/bin", dataDirectory: "/d", databaseFile: "/e/c.sqlite", stateDirectory: "/s", releaseRoot: "/r", releaseIncoming: "/i", artifactDirectory: "/a", backupDirectory: "/b" });
-  assert.deepEqual(all.map((g) => g.path), ["/opt/nn", "/usr/bin", "/d", "/e/c.sqlite", "/e/c.sqlite-wal", "/e/c.sqlite-shm", "/e/c.sqlite-journal", "/s", "/r", "/i", "/a", "/b"]);
-  assert.ok(all.length <= SEPARATE_LIMITS.guarded, "every guard a controller can be given fits the limit");
+  assert.deepEqual(installationGuards({ programRoot: "/opt/nn/", dataDirectory: "/var/lib/nn" }), [{ what: "the running installation's program files", path: "/opt/nn", git: true }, { what: "the controller's data directory", path: "/var/lib/nn" }]);
+  const all = installationGuards({ programRoot: "/opt/nn", runtime: "/usr/bin", dataDirectory: "/d", databaseFile: "/e/c.sqlite", stateDirectory: "/s", releaseRoot: "/r", releaseIncoming: "/i", artifactDirectory: "/a", backupDirectory: "/b",
+    backupKeyring: "/k/keyring.json", backupPasscode: "/k/passcode", backupRecovery: "/k/recovery", recoveryManifests: "/m", watchdogFile: "/w/watchdog.json", heartbeatFile: "/h/beat" });
+  assert.deepEqual(all.map((g) => g.path), ["/opt/nn", "/usr/bin", "/d", "/e/c.sqlite", "/e/c.sqlite-wal", "/e/c.sqlite-shm", "/e/c.sqlite-journal", "/s", "/r", "/i", "/a", "/b", "/k/keyring.json", "/k/passcode", "/k/recovery", "/m", "/w/watchdog.json", "/h/beat"]);
+  assert.deepEqual(all.filter((g) => g.git === true).map((g) => g.path), ["/opt/nn"], "only the program root's git folders are followed");
+  // B06 fourth slice: the program root's git folders (at most its git folder and the common one) are added when judged, and still fit the limit.
+  assert.ok(all.length + 2 <= SEPARATE_LIMITS.guarded, "every guard a controller can be given, with the program root's git folders, fits the limit");
+  // First review of the fourth slice: with room to spare (a limit exactly full would refuse every judgement once one more guard is added), as the ASSUMPTION for 32 says.
+  assert.ok(all.length + 2 + 8 <= SEPARATE_LIMITS.guarded, "the limit leaves room for more guards");
   // A package with no workspace root above it is its own root.
   const lone = dir("lone", "pkg", "dist", "owncode");
   assert.equal(programRoot(`file://${join(lone, "separate.js")}`), join(root, "lone", "pkg"));
@@ -326,4 +333,204 @@ test("the limit on mounts compared is for the whole judgement", async () => {
   for (let i = 0; i < 999; i++) lines.push(`${10 + i} 1 8:4 /a${i} /srv/nn/m${i}`, `${5000 + i} 1 8:5 /b${i} /work/dev/m${i}`, `${9000 + i} 1 8:6 /c${i} /srv/other/m${i}`);
   const two = [...g1, { what: "the controller's data directory", path: "/srv/other" }];
   await refusedWith([repo("/work/dev")], two, /hold too many mounts to compare/, { fs: fakeFs({ ...bindTree, "/srv/other": "9:9" }, { mounts: mi(...lines) }), platform: "linux" });
+});
+
+// B06 fourth slice: when the installation itself runs from a checkout or a `git worktree`, its git folders are guarded too, followed as a place's are. Another worktree of the same repository writes the
+// same refs, hooks and configuration (the common git folder), so it is not separate.
+test("the installation's own git folders are guarded: another worktree of its repository is refused, an unrelated repository and a release without .git are not", async () => {
+  const base = dir("b06d");
+  const mk = (...p: string[]): string => { const f = join(base, ...p); mkdirSync(f, { recursive: true }); return f; };
+  // The main checkout (with its .git folder) and two worktrees: the installation and another.
+  const main = mk("repos", "nimblenewt");
+  const instGit = mk("repos", "nimblenewt", ".git", "worktrees", "inst");
+  writeFileSync(join(instGit, "commondir"), "../..\n");
+  const otherGit = mk("repos", "nimblenewt", ".git", "worktrees", "other");
+  writeFileSync(join(otherGit, "commondir"), "../..\n");
+  const inst = mk("ai", "worktrees", "inst");
+  writeFileSync(join(inst, ".git"), `gitdir: ${instGit}\n`);
+  const other = mk("work", "other");
+  writeFileSync(join(other, ".git"), `gitdir: ${otherGit}\n`);
+  const g = installationGuards({ programRoot: inst });
+  await refusedWith([repo(other)], g, /the git folder of the development project's repository "source" .* is inside the git folder of the running installation's program files/);
+  // Without following the installation's .git this was judged separate (the gap the fourth slice closes).
+  assert.deepEqual(await judgeSeparate([repo(other)], g.map((x) => ({ what: x.what, path: x.path }))), { separate: true });
+  // The main checkout holds the common git folder.
+  await refusedWith([repo(main)], g, /holds the git folder of the running installation's program files/);
+  // A checkout inside the common git folder (or the installation's own worktree folder there) is inside it.
+  await refusedWith([repo(mk("repos", "nimblenewt", ".git", "hooks"))], g, /inside the git folder of the running installation's program files/);
+  // An unrelated repository, and a plain folder: separate.
+  const unrelated = mk("work", "unrelated");
+  mk("work", "unrelated", ".git", "refs");
+  assert.deepEqual(await judgeSeparate([repo(unrelated), repo(mk("work", "plain"))], g), { separate: true });
+  // A worktree of an unrelated repository, its common folder elsewhere: separate.
+  const elseGit = mk("repos", "else", ".git", "worktrees", "w");
+  writeFileSync(join(elseGit, "commondir"), "../..\n");
+  const elseWt = mk("work", "else-wt");
+  writeFileSync(join(elseWt, ".git"), `gitdir: ${elseGit}\n`);
+  assert.deepEqual(await judgeSeparate([repo(elseWt)], g), { separate: true });
+  // A release install with no .git: nothing more is guarded, and the same worktree is separate from it.
+  const release = mk("opt", "nimblenewt", "releases", "1.2.3");
+  assert.deepEqual(await judgeSeparate([repo(other), repo(main)], installationGuards({ programRoot: release })), { separate: true });
+  // An installation that is the main checkout (a .git folder): its common folder is inside it already, and a worktree of it is refused through its commondir.
+  await refusedWith([repo(other)], installationGuards({ programRoot: main }), /git folder .* inside the running installation's program files/);
+});
+
+test("the installation's git folders are followed as written and fail closed when they cannot be read", async () => {
+  const base = dir("b06d-fc");
+  const mk = (...p: string[]): string => { const f = join(base, ...p); mkdirSync(f, { recursive: true }); return f; };
+  const commonGit = mk("repos", "nn", ".git");
+  const instGit = mk("repos", "nn", ".git", "worktrees", "inst");
+  writeFileSync(join(instGit, "commondir"), "../..\n");
+  const otherGit = mk("repos", "nn", ".git", "worktrees", "other");
+  writeFileSync(join(otherGit, "commondir"), "../..\n");
+  const other = mk("work", "other");
+  writeFileSync(join(other, ".git"), `gitdir: ${otherGit}\n`);
+  const install = (body: string | undefined): string => {
+    const at = mk("inst", String(Math.random()).slice(2));
+    if (body !== undefined) writeFileSync(join(at, ".git"), body);
+    return at;
+  };
+  // A .git file that names nothing, a git folder that is not there: cannot tell, even for a checkout far away.
+  const far = mk("far", "away");
+  await refusedWith([repo(far)], installationGuards({ programRoot: install("not a pointer\n") }), /program files \(.*\) cannot be checked: its \.git file does not name a git folder/);
+  await refusedWith([repo(far)], installationGuards({ programRoot: install(`gitdir: ${join(base, "nowhere")}\n`) }), /git folder of the running installation's program files \(.*nowhere\) cannot be checked: it could not be read/);
+  // A .git longer than the limit, a FIFO, and (not as root) a .git or commondir that cannot be read: cannot tell.
+  await refusedWith([repo(far)], installationGuards({ programRoot: install(`gitdir: ${instGit}\n${"#".repeat(SEPARATE_LIMITS.gitFileBytes)}`) }), /longer than/);
+  const fifo = install(undefined);
+  const { execFileSync } = await import("node:child_process");
+  execFileSync("mkfifo", [join(fifo, ".git")]);
+  await refusedWith([repo(far)], installationGuards({ programRoot: fifo }), /its \.git could not be read \(ENOTFILE\)/);
+  if (process.getuid?.() !== 0) {
+    const shut = install(`gitdir: ${instGit}\n`);
+    chmodSync(join(shut, ".git"), 0);
+    try { await refusedWith([repo(far)], installationGuards({ programRoot: shut }), /its \.git could not be read \(EACCES\)/); } finally { chmodSync(join(shut, ".git"), 0o644); }
+    const shutGit = mk("repos", "shut", ".git", "worktrees", "i");
+    writeFileSync(join(shutGit, "commondir"), "../..\n");
+    chmodSync(join(shutGit, "commondir"), 0);
+    try { await refusedWith([repo(far)], installationGuards({ programRoot: install(`gitdir: ${shutGit}\n`) }), /commondir could not be read \(EACCES\)/); } finally { chmodSync(join(shutGit, "commondir"), 0o644); }
+  }
+  // A relative gitdir through a link: `l/../inst` leads where the link leads (the common folder's worktrees), not to a folder of the installation's named `inst`.
+  const viaLink = install("gitdir: l/../inst\n");
+  symlinkSync(join(commonGit, "worktrees", "other"), join(viaLink, "l"));
+  mkdirSync(join(viaLink, "inst"));
+  await refusedWith([repo(other)], installationGuards({ programRoot: viaLink }), /inside the git folder of the running installation's program files/);
+  // A .git link to the common folder: followed.
+  const linked = install(undefined);
+  symlinkSync(commonGit, join(linked, ".git"));
+  await refusedWith([repo(other)], installationGuards({ programRoot: linked }), /inside the git folder of the running installation's program files/);
+  // A port without `readText` (tests showing identities only) follows nothing, as for places.
+  assert.deepEqual(await judgeSeparate([repo(other)], installationGuards({ programRoot: install(`gitdir: ${instGit}\n`) }), { fs: { realpath: nodeSeparationFs.realpath, stat: nodeSeparationFs.stat } }), { separate: true });
+});
+
+// First review of the fourth slice: like git, the nearest `.git` at a folder or above it is the one git uses there, for the installation and for a place.
+test("the nearest .git above a folder is followed, as git finds it, for the installation and for a place", async () => {
+  const base = dir("b06d-up");
+  const mk = (...p: string[]): string => { const f = join(base, ...p); mkdirSync(f, { recursive: true }); return f; };
+  const esc = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // The installation a worktree of `nn`; a folder with no .git of its own inside nn's main checkout: git there writes to the common folder and works on the main checkout.
+  const main = mk("repos", "nn");
+  gitFolder(join(main, ".git"));
+  const instGit = mk("repos", "nn", ".git", "worktrees", "inst");
+  writeFileSync(join(instGit, "commondir"), "../..\n");
+  const inst = mk("ai", "inst");
+  writeFileSync(join(inst, ".git"), `gitdir: ${instGit}\n`);
+  const sub = mk("repos", "nn", "docs");
+  await refusedWith([repo(sub)], installationGuards({ programRoot: inst }), new RegExp(`the work tree git uses for the development project's repository "source" \\(${esc(main)}\\) holds the git folder of the running installation's program files`));
+  // A folder with no .git inside an unrelated checkout: still separate.
+  gitFolder(mk("work", "else", ".git"));
+  assert.deepEqual(await judgeSeparate([repo(mk("work", "else", "part"))], installationGuards({ programRoot: inst })), { separate: true });
+  // An installation whose .git is above its program root (a workspace inside a larger repository): that repository's git folder is guarded, so a worktree of it is refused.
+  const outerGit = mk("outer", ".git", "worktrees", "w");
+  writeFileSync(join(outerGit, "commondir"), "../..\n");
+  const nested = mk("outer", "tools", "nn");
+  const wt = mk("work", "outer-wt");
+  writeFileSync(join(wt, ".git"), `gitdir: ${outerGit}\n`);
+  await refusedWith([repo(wt)], installationGuards({ programRoot: nested }), /the git folder of the development project's repository "source" .* is inside the git folder of the running installation's program files/);
+  // A release with no .git inside a checkout (a home folder kept in git): a plain folder elsewhere in that checkout is worked on through it, and that checkout holds the installation.
+  gitFolder(mk("home", ".git"));
+  const rel = mk("home", "opt", "nn", "releases", "1");
+  await refusedWith([repo(mk("home", "dev", "plain"))], installationGuards({ programRoot: rel }), new RegExp(`the work tree git uses for .* \\(${esc(join(base, "home"))}\\) holds the running installation's program files`));
+  // A checkout with a .git of its own there is worked on through its own git folder: separate.
+  gitFolder(mk("home", "dev", "own", ".git"));
+  assert.deepEqual(await judgeSeparate([repo(join(base, "home", "dev", "own"))], installationGuards({ programRoot: rel })), { separate: true });
+  // Second review: git passes over a `.git` folder it does not take as a git folder (here an empty one, one whose HEAD names no ref, one without `refs`, and one whose HEAD is a link) and goes on
+  // up to the home folder's repository, whose work tree holds the installation; so the check goes on up too. A real git folder there still stops the walk (above).
+  for (const [name, make] of [["empty", () => {}], ["bad-head", (g: string) => { gitFolder(g); writeFileSync(join(g, "HEAD"), "not a ref\n"); }], ["head-outside-refs", (g: string) => { gitFolder(g); writeFileSync(join(g, "HEAD"), "ref: heads/main\n"); }], ["no-refs", (g: string) => { gitFolder(g); rmSync(join(g, "refs"), { recursive: true }); }], ["no-objects", (g: string) => { gitFolder(g); rmSync(join(g, "objects"), { recursive: true }); }], ["objects-file", (g: string) => { gitFolder(g); rmSync(join(g, "objects"), { recursive: true }); writeFileSync(join(g, "objects"), ""); }], ["link-head", (g: string) => { gitFolder(g); rmSync(join(g, "HEAD")); writeFileSync(join(g, "head-file"), "ref: refs/heads/main\n"); symlinkSync(join(g, "head-file"), join(g, "HEAD")); }]] as const) {
+    const g = mk("home", "dev", name, ".git");
+    make(g);
+    await refusedWith([repo(join(base, "home", "dev", name))], installationGuards({ programRoot: rel }), new RegExp(`the work tree git uses for .* \\(${esc(join(base, "home"))}\\) holds the running installation's program files`));
+  }
+  // An object ID as HEAD (a detached checkout) is a git folder too: separate.
+  const detached = gitFolder(mk("home", "dev", "detached", ".git"));
+  writeFileSync(join(detached, "HEAD"), `${"a".repeat(40)}\n`);
+  assert.deepEqual(await judgeSeparate([repo(join(base, "home", "dev", "detached"))], installationGuards({ programRoot: rel })), { separate: true });
+  // A `.git` file (a worktree of an unrelated repository) is where git stops, as is a `.git` link to such a worktree's git folder, whose objects and refs are in its common folder: separate.
+  const elseGit = mk("repos", "else2", ".git", "worktrees", "w");
+  gitFolder(join(base, "repos", "else2", ".git"));
+  writeFileSync(join(elseGit, "commondir"), "../..\n");
+  writeFileSync(join(elseGit, "HEAD"), "ref: refs/heads/w\n");
+  const homeWt = mk("home", "dev", "wt");
+  writeFileSync(join(homeWt, ".git"), `gitdir: ${elseGit}\n`);
+  const homeLinked = mk("home", "dev", "linked");
+  symlinkSync(elseGit, join(homeLinked, ".git"));
+  assert.deepEqual(await judgeSeparate([repo(homeWt), repo(homeLinked)], installationGuards({ programRoot: rel })), { separate: true });
+  // A `.git` passed over is still one of the place's folders: a link into the installation that git does not take as a git folder is refused, with no repository above it.
+  const into = mk("work", "into");
+  symlinkSync(mk("home", "opt", "nn", "releases", "1", "sub"), join(into, ".git"));
+  await refusedWith([repo(into)], installationGuards({ programRoot: rel }), /the git folder of the development project's repository "source" .* is inside the running installation's program files/);
+  // The same inside an unrelated repository: the work tree found above is apart, but the `.git` passed over leads into the installation.
+  gitFolder(mk("work", "outer2", ".git"));
+  const inner = mk("work", "outer2", "inner");
+  symlinkSync(mk("home", "opt", "nn", "releases", "1", "sub2"), join(inner, ".git"));
+  await refusedWith([repo(inner)], installationGuards({ programRoot: rel }), /the git folder of the development project's repository "source" .* is inside the running installation's program files/);
+  // A `.git` file whose git folder git does not take (no HEAD): git stops there with an error, so it works on no folder above; the walk stops too.
+  const badWtGit = mk("repos", "else3", "worktrees", "w");
+  const homeBadWt = mk("home", "dev", "bad-wt");
+  writeFileSync(join(homeBadWt, ".git"), `gitdir: ${badWtGit}\n`);
+  assert.deepEqual(await judgeSeparate([repo(homeBadWt)], installationGuards({ programRoot: rel })), { separate: true });
+  // An `objects` that is not a folder (a FIFO) is not a git folder either.
+  const fifoObjects = mk("home", "dev", "objects-fifo", ".git");
+  gitFolder(fifoObjects);
+  rmSync(join(fifoObjects, "objects"), { recursive: true });
+  (await import("node:child_process")).execFileSync("mkfifo", [join(fifoObjects, "objects")]);
+  await refusedWith([repo(join(base, "home", "dev", "objects-fifo"))], installationGuards({ programRoot: rel }), new RegExp(`the work tree git uses for .* \\(${esc(join(base, "home"))}\\) holds the running installation's program files`));
+  // For the installation too: an empty `.git` at its program root is passed over, and the repository above it is guarded (a worktree of that repository is refused).
+  const upGit = mk("up", ".git", "worktrees", "w");
+  gitFolder(join(base, "up", ".git"));
+  writeFileSync(join(upGit, "commondir"), "../..\n");
+  const upInst = mk("up", "tools", "nn");
+  mk("up", "tools", "nn", ".git");
+  const upWt = mk("work", "up-wt");
+  writeFileSync(join(upWt, ".git"), `gitdir: ${upGit}\n`);
+  await refusedWith([repo(upWt)], installationGuards({ programRoot: upInst }), /the git folder of the development project's repository "source" .* is inside the git folder of the running installation's program files/);
+  // A broken installation git tells the owner that it is the installation's git that blocks every checkout.
+  const broken = mk("broken");
+  writeFileSync(join(broken, ".git"), `gitdir: ${join(base, "nowhere")}\n`);
+  await refusedWith([repo(mk("far"))], installationGuards({ programRoot: broken }), /cannot be checked: it could not be read \(ENOENT\); no checkout can be confirmed separate until the installation's git can be read/);
+  const named = mk("named");
+  writeFileSync(join(named, ".git"), "nothing\n");
+  await refusedWith([repo(mk("far"))], installationGuards({ programRoot: named }), /does not name a git folder; no checkout can be confirmed separate until the installation's git can be read/);
+});
+
+test("the guard limit counts the installation's git folders, and every guard a controller can be given fits it", async () => {
+  const base = dir("b06d-lim");
+  const commonGit = join(base, "repo", ".git"); mkdirSync(join(commonGit, "worktrees", "i"), { recursive: true });
+  writeFileSync(join(commonGit, "worktrees", "i", "commondir"), "../..\n");
+  const inst = join(base, "inst"); mkdirSync(inst);
+  writeFileSync(join(inst, ".git"), `gitdir: ${join(commonGit, "worktrees", "i")}\n`);
+  const own = join(base, "own"); mkdirSync(own);
+  const filler = (n: number): GuardedPlace[] => Array.from({ length: n }, (_, i) => ({ what: `g${i}`, path: join(base, "g", String(i)) }));
+  const ig = installationGuards({ programRoot: inst });
+  // The program root and its two git folders: exactly the limit is judged, one past it is not.
+  assert.deepEqual(await judgeSeparate([repo(own)], [...ig, ...filler(SEPARATE_LIMITS.guarded - 3)]), { separate: true });
+  await refusedWith([repo(own)], [...ig, ...filler(SEPARATE_LIMITS.guarded - 2)], /more guarded folders than it checks/);
+  // Every option a controller can be given, with real folders and the installation a worktree: within the limit and separate from a checkout of its own.
+  const p = (n: string): string => join(base, "all", n);
+  for (const n of ["bin", "d", "e", "s", "r", "i", "a", "b", "k", "m", "w", "h"]) mkdirSync(p(n), { recursive: true });
+  const all = installationGuards({ programRoot: inst, runtime: p("bin"), dataDirectory: p("d"), databaseFile: p("e/c.sqlite"), stateDirectory: p("s"), releaseRoot: p("r"), releaseIncoming: p("i"), artifactDirectory: p("a"), backupDirectory: p("b"),
+    backupKeyring: p("k/keyring"), backupPasscode: p("k/pass"), backupRecovery: p("k/rec"), recoveryManifests: p("m"), watchdogFile: p("w/wd.json"), heartbeatFile: p("h/beat") });
+  assert.deepEqual(await judgeSeparate([repo(own)], all), { separate: true });
+  await refusedWith([repo(join(base, "all"))], all, /holds the Node\.js runtime/);
+  await refusedWith([repo(join(base, "all", "k"))], all, /holds the backup encryption's keyring file/);
+  await refusedWith([repo(join(base, "all", "h"))], all, /holds the launcher's heartbeat file/);
 });

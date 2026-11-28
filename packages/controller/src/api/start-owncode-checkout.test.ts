@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { test } from "node:test";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { ManualTimer } from "../dispatch/testing/timer.js";
 import { PI } from "../dispatch/testing/world.js";
 import { programRoot } from "../owncode/index.js";
 import { startController } from "./index.js";
+import { ownCodeExtraGuards } from "./start.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
 const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
@@ -130,4 +131,52 @@ test("a checkout inside the artifact store, or one that holds the backup folder,
     await c.close();
     for (const p of [d, store, outer]) rmSync(p, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
+});
+
+// B06 fourth slice: the outside watchdog's record file, the launcher's heartbeat file (here from the environment, as the launcher gives it) and the recovery manifest folder are the installation's files too.
+// A checkout holding one of them is refused; a checkout of its own is still enabled, whether the program files the tests run from are a plain checkout or a `git worktree` (their git folders are judged too).
+test("a checkout holding the watchdog record, the heartbeat file or the recovery manifests is refused (card B06, fourth slice)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-b06d-"));
+  const side = mkdtempSync(join(tmpdir(), "nn-b06d-side-"));
+  const co = mkdtempSync(join(tmpdir(), "nn-b06d-co-"));
+  for (const f of ["wd", "hb", "rec"]) mkdirSync(join(side, f));
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: { NIMBLENEWT_HEARTBEAT_FILE: join(side, "hb", "beat"), NIMBLENEWT_HEARTBEAT_TOKEN: "t".repeat(32) }, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+    watchdog: { file: join(side, "wd", "watchdog.json") }, recovery: { manifestDirectory: join(side, "rec") } });
+  let n = 0;
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    const devProject = (await c.services.projects.createProject({ commandId: "p-dev", actor: rob.id, name: "NimbleNewt development" })).id;
+    const call = async (op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    const bind = async (label: string, locator: string) => c.services.resources.bindResource(rob, { commandId: `b${++n}`, projectId: devProject, kind: "repository", label, locator, access: "write" } as never);
+    const unbind = async (r: { id: string; revision: number }) => { await c.services.resources.unbindResource(rob, { commandId: `u${++n}`, resourceId: r.id, expectedRevision: r.revision }); };
+    for (const [folder, what] of [["wd", "the outside watchdog's record file"], ["hb", "the launcher's heartbeat file"], ["rec", "the recovery manifest folder"]] as const) {
+      const r = await bind(`around ${folder}`, join(side, folder));
+      const got = await call("owncode.enable", { projectId: devProject }, `en-${++n}`);
+      assert.equal(got.error?.code, "unavailable", JSON.stringify(got));
+      assert.match(got.error.message, new RegExp(`repository "around ${folder}" at .* (holds|is the same folder as) ${what.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+      await unbind(r);
+    }
+    await bind("own", co);
+    const enabled = await call("owncode.enable", { projectId: devProject }, `en-${++n}`);
+    assert.ok(enabled.ok, JSON.stringify(enabled));
+  } finally {
+    await c.close();
+    for (const p of [d, side, co]) rmSync(p, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
+
+// First review of the fourth slice: each of the six extra files is the path the controller opens, resolved against the working directory as it opens it (the keyring, passcode and recovery files were
+// wired with no test). The heartbeat comes from the options, else from the launcher's environment; none when it is off or named empty (an empty name resolved would be the working directory itself).
+test("the installation's extra guarded files are the paths the controller opens, resolved against the working directory (card B06, fourth slice, first review)", () => {
+  const env = { NIMBLENEWT_HEARTBEAT_FILE: "env/beat" };
+  assert.deepEqual(ownCodeExtraGuards({ env: {} }), {});
+  assert.deepEqual(ownCodeExtraGuards({ env, backup: { directory: "b", encryption: { keyringFile: "k/ring", passcodeFile: "k/pass", recoveryFile: "/abs/rec" } }, recovery: { manifestDirectory: "m" }, watchdog: { file: "w/wd.json" } } as never), {
+    backupKeyring: resolve("k/ring"), backupPasscode: resolve("k/pass"), backupRecovery: "/abs/rec", recoveryManifests: resolve("m"), watchdogFile: resolve("w/wd.json"), heartbeatFile: resolve("env/beat"),
+  });
+  assert.deepEqual(ownCodeExtraGuards({ env, backup: { directory: "b", encryption: { keyringFile: "k/ring" } } } as never), { backupKeyring: resolve("k/ring"), heartbeatFile: resolve("env/beat") });
+  assert.deepEqual(ownCodeExtraGuards({ env, heartbeat: { file: "opt/beat" } } as never), { heartbeatFile: resolve("opt/beat") });
+  assert.deepEqual(ownCodeExtraGuards({ env, heartbeat: false }), {});
+  assert.deepEqual(ownCodeExtraGuards({ env: { NIMBLENEWT_HEARTBEAT_FILE: "" } }), {});
+  assert.deepEqual(ownCodeExtraGuards({ env, heartbeat: { file: "" } } as never), {});
 });
