@@ -363,12 +363,18 @@ export class OwnCodeService {
           if (!STOP_OVER.includes(mine.phase)) await deps.told?.({ attemptId: a.attemptId, taskId: a.taskId, projectId: a.projectId, reason: mine.reason, intentId: ownStopIntentId(by, a.attemptId) }).catch(() => undefined);
           continue;
         }
-        // A Stop (or Force Stop) of the task already in force (the owner's own, or another attempt's) is carried on by the Stop's sweep; a Suspend is taken over by the Stop.
+        // A Stop (or Force Stop) of the task already in force (the owner's own, or another attempt's) is carried on by the Stop's sweep. A Suspend still in progress is waited for, never upgraded: an upgraded
+        // Suspend leaves no record under this look's own ID, so once the owner resumed the task a later tick would ask again, and L02's request would pause the task anew over the owner's resume (second
+        // review of the second slice). A finished Suspend that still holds the task is followed by this look's own Stop, which goes on from its checkpoint.
         const held = await deps.stops.holding(a.taskId);
-        if (held !== undefined && held.mode !== "suspend") continue;
+        if (held !== undefined) {
+          if (held.mode !== "suspend") continue;
+          const suspend = await deps.stops.get(by, held.intentId);
+          if (suspend === undefined || !STOP_OVER.includes(suspend.phase)) continue;
+        }
         const reason = ownCodeStopReason(why);
         const asked = await deps.stops.request(by, { commandId: `owncode-stop:${a.attemptId}`, scope: { kind: "task", id: a.taskId }, mode: "stop", reason });
-        // A replay here is a Stop that took over a Suspend on an earlier tick (it has no record of its own): it is the Stop's sweep's to carry on, and it does not count toward this tick's Stops.
+        // A replay (the request was recorded but its record could not be read back above) is the Stop's sweep's to carry on, and it does not count toward this tick's Stops.
         if (asked.replayed) continue;
         // The Stop's first steps run now (as the owner's own Stop does); whatever is left, the Stop's sweep carries on.
         await deps.stops.advance(by, { intentId: asked.intentId }).catch(() => undefined);

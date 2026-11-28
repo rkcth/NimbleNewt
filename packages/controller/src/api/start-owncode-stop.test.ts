@@ -105,6 +105,11 @@ test("work already running on NimbleNewt's own code is stopped through L02's Sto
     assert.deepEqual([p0.items.map((x) => x.at), p1.items.map((x) => x.at)], [[0], [1, 0]], "each item carries its position in the live list");
     const annP = await c.services.principals.authenticate(annToken);
     await assert.rejects(() => c.dispatch!.dispatcher.runningAttempts(annP, { from: 0, limit: 5 }), /may not list live attempts/);
+    // Staff acting for one task (a task-scoped credential) may not either.
+    await assert.rejects(() => c.dispatch!.dispatcher.runningAttempts({ ...c.dispatch!.principal, taskScope: { taskId: t1, projectId: devProject } } as never, { from: 0, limit: 5 }), /may not list live attempts/);
+    // A start past the end of the list wraps round (the list shrank since the last look): position 3 of two is position 1.
+    const p3 = await c.dispatch!.dispatcher.runningAttempts(c.dispatch!.principal, { from: 3, limit: 1 });
+    assert.deepEqual([p3.items.map((x) => x.at), p3.next], [[1], 0]);
     assert.deepEqual(await intentsFor(c, t1), [], "approved work that runs is not stopped");
 
     // The owner withdraws the approval of the first request while its attempt runs: the next tick stops it through L02's Stop of its task.

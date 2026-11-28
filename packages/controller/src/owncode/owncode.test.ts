@@ -7,6 +7,7 @@ import { CommandRunner } from "../domain/runner.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { scopedCommandId } from "../security/credentials.js";
+import { PauseService, StopService, type InventoryItem, type StopPorts } from "../lifecycle/index.js";
 import { PrincipalService, type Principal } from "../security/index.js";
 import type { ControllerStorage } from "../storage/types.js";
 import { OWNCODE_OFF, OWNCODE_STOP, OwnCodeService, ownCodeStopNotice, ownCodeStopReason, taskIdOf, type OwnCodeOptions, type OwnCodeRunning, type OwnCodeStops } from "./index.js";
@@ -37,6 +38,8 @@ function fakeStops() {
   const failFor = new Set<string>();
   /** Every call of `request`, replays included (a replay of L02's request still touches the task's pause). */
   const calls = { request: 0 };
+  /** The phase of a request that holds a task (by task; "preparing" when not set; "unreadable": `get` finds nothing for it). */
+  const heldPhase = new Map<string, string>();
   const stops: OwnCodeStops = {
     holding: async (taskId) => (held.has(taskId) ? { intentId: `stp-held-${taskId}`, mode: held.get(taskId)! } : undefined),
     request: async (by, command) => {
@@ -51,9 +54,9 @@ function fakeStops() {
       return { intentId, replayed: false };
     },
     advance: async (_by, command) => { advanced.push(command.intentId); },
-    get: async (_by, intentId) => intents.get(intentId),
+    get: async (_by, intentId) => intents.get(intentId) ?? (intentId.startsWith("stp-held-") && held.has(intentId.slice(9)) && heldPhase.get(intentId.slice(9)) !== "unreadable" ? { phase: heldPhase.get(intentId.slice(9)) ?? "preparing", reason: "held" } : undefined),
   };
-  return { stops, held, asked, advanced, failFor, intents, known, calls };
+  return { stops, held, heldPhase, asked, advanced, failFor, intents, known, calls };
 }
 
 interface Ctx {
@@ -401,6 +404,11 @@ for (const backend of backends) {
     assert.deepEqual(await look(), { stopped: [], failed: [] });
     assert.deepEqual([f.asked.length, f.advanced.length, told.length], [2, 2, told0 + 1]);
     assert.equal(told.at(-1), told.at(-2), "the same notice, for the same Stop");
+    // The owner resumed A and paused it again before L02 marked the Stop cancelled (it no longer holds, and is still recorded as preparing): it is not asked for again either.
+    f.held.delete(a);
+    const callsMid = f.calls.request;
+    assert.deepEqual(await look(), { stopped: [], failed: [] });
+    assert.equal(f.calls.request, callsMid, "no request while the look's own Stop is recorded, held or not");
     // The owner resumed A while its Stop was being prepared (L02 cancelled it): the Stop is not asked for again (that would touch the task's pause), nothing is advanced or told again.
     f.held.delete(a);
     f.intents.get(stopA)!.phase = "cancelled";
@@ -421,7 +429,7 @@ for (const backend of backends) {
     assert.ok(f.asked.every((x) => x.taskId !== garden), "the garden is never stopped");
   });
 
-  suite("the stop look is bounded per tick, takes over a Suspend, leaves a Stop or Force Stop in force alone, stops a task whose text changed, and one failure does not keep the others running", async (c) => {
+  suite("the stop look is bounded per tick, waits for a Suspend in progress and follows a finished one, leaves a Stop or Force Stop in force alone, stops a task whose text changed, and one failure does not keep the others running", async (c) => {
     const f = fakeStops();
     await c.enable();
     const tasks: string[] = [];
@@ -438,23 +446,89 @@ for (const backend of backends) {
     assert.deepEqual(r.stopped, ["att-1"]);
     assert.match(f.asked[0]!.reason, /was changed after the owner approved request/);
     f.held.set(tasks[1]!, "stop");
-    // Off: a Suspend in force on task 2 is taken over by the Stop; a Force Stop on task 3 is left alone; task 4's Stop cannot be recorded this tick.
+    // Off: a Suspend still in progress on task 2 is waited for (never upgraded); a Force Stop on task 3 is left alone; task 4's Stop cannot be recorded this tick.
     f.held.set(tasks[2]!, "suspend");
     f.held.set(tasks[3]!, "force-stop");
     f.failFor.add(tasks[4]!);
     await c.svc.disable(c.owner, { commandId: cid("dis"), expectedRevision: (await c.svc.settings(c.owner))!.revision });
     r = await look();
     assert.equal(r.stopped.length + r.failed.length, OWNCODE_STOP.perTick, "at most this many Stops are asked for in one tick");
-    assert.deepEqual(r.stopped, ["att-0", "att-2", "att-5", "att-6"]);
+    assert.deepEqual(r.stopped, ["att-0", "att-5", "att-6", "att-7"]);
     assert.deepEqual(r.failed.map((x) => x.attemptId), ["att-4"]);
     assert.match(r.failed[0]!.error, /could not be recorded/);
     assert.ok(!f.asked.some((x) => x.taskId === tasks[3]), "a Force Stop in force is left to itself");
-    for (const t of [tasks[0]!, tasks[2]!, tasks[5]!, tasks[6]!]) f.held.set(t, "stop");
-    // The next tick: the failed one is asked again (and now succeeds), and the rest are reached.
+    assert.ok(!f.asked.some((x) => x.taskId === tasks[2]), "a Suspend in progress is not upgraded");
+    for (const t of [tasks[0]!, tasks[5]!, tasks[6]!, tasks[7]!]) f.held.set(t, "stop");
+    // The next tick: the failed one is asked again (and now succeeds); the Suspend on task 2 is still preparing (blocked, say) and is still waited for.
     f.failFor.clear();
+    f.heldPhase.set(tasks[2]!, "blocked");
+    // A Force Stop that finished and still holds its task is left to it as well (only a Suspend is followed).
+    f.heldPhase.set(tasks[3]!, "done");
     r = await look();
-    assert.deepEqual(r, { stopped: ["att-4", "att-7"], failed: [] });
+    assert.deepEqual(r, { stopped: ["att-4"], failed: [] });
+    f.held.set(tasks[4]!, "stop");
+    // A Suspend whose record cannot be read is not followed either (nothing is known of where it stands).
+    f.heldPhase.set(tasks[2]!, "unreadable");
+    assert.deepEqual(await look(), { stopped: [], failed: [] });
+    // The Suspend finished and still holds the task: this look's own Stop follows it (L02 goes on from its checkpoint). Its first steps failing now is the Stop's sweep's to carry on: it still counts as stopped.
+    f.heldPhase.set(tasks[2]!, "done");
+    const advance = f.stops.advance;
+    f.stops.advance = async () => { throw new DomainError("unavailable", "the runtime did not answer"); };
+    r = await look();
+    f.stops.advance = advance;
+    assert.deepEqual(r, { stopped: ["att-2"], failed: [] });
+    assert.equal(f.asked.at(-1)!.commandId, "owncode-stop:att-2");
+    assert.ok(!f.asked.some((x) => x.taskId === tasks[3]), "a finished Force Stop that holds is left to itself");
     assert.equal(new Set(f.asked.map((x) => x.commandId)).size, f.asked.length, "each attempt's Stop is asked for once");
+  });
+
+  suite("with L02's own Stop: a Suspend in progress is waited for and never upgraded, so resuming it stands; a finished one is followed by the look's own Stop; the owner's resume of that Stop stands too", async (c) => {
+    await c.enable();
+    const t1 = await c.approve(await c.ask());
+    const t2 = await c.approve(await c.ask(c.dev2));
+    await c.svc.disable(c.owner, { commandId: cid("dis"), expectedRevision: (await c.svc.settings(c.owner))!.revision });
+    // A runtime whose work settles only when the test says so (until then a Suspend stays in its preparation).
+    let settles = false;
+    const busy: InventoryItem[] = [{ kind: "process", ref: "proc-1", state: "running" } as InventoryItem];
+    const rt: StopPorts = {
+      inventory: async () => (settles ? [] : busy), cleanup: async () => ({ remaining: settles ? [] : busy }),
+      checkpoint: async () => ({ checkpointId: "cp-1", durable: true, artifactsDurable: true }), terminate: async () => ({ ended: true, unresolved: [] }),
+    };
+    const pauses = PauseService.withEpoch(c.storage, c.epoch, {}, options);
+    const stops = StopService.withEpoch(c.storage, c.epoch, PauseService.withEpoch(c.storage, c.epoch, {}, options), rt, options);
+    const live: OwnCodeRunning[] = [{ attemptId: "att-s1", taskId: t1, projectId: c.devProject }, { attemptId: "att-s2", taskId: t2, projectId: c.devProject }];
+    const look = () => c.svc.stopRefused(c.owner, { stops, running: async () => ({ items: live, next: 0 }) });
+    const gate = async (t: string) => (await pauses.gate(c.owner, { kind: "task", id: t }))?.intent;
+    const T1 = { kind: "task", id: t1 } as const;
+    const T2 = { kind: "task", id: t2 } as const;
+    const sus1 = await stops.request(c.owner, { commandId: cid("sus"), scope: T1, mode: "suspend", reason: "maintenance" });
+    await stops.advance(c.owner, { intentId: sus1.intentId });
+    const sus2 = await stops.request(c.owner, { commandId: cid("sus"), scope: T2, mode: "suspend", reason: "maintenance" });
+    await stops.advance(c.owner, { intentId: sus2.intentId });
+    // Both Suspends are in their preparation: neither is upgraded to a Stop.
+    assert.deepEqual(await look(), { stopped: [], failed: [] });
+    assert.deepEqual([(await stops.get(c.owner, sus1.intentId))!.mode, (await stops.get(c.owner, sus2.intentId))!.mode], ["suspend", "suspend"]);
+    // The owner resumes task 1 while its Suspend prepares: that request is over, and the look's own Stop (never asked before) is asked now, with the gate's reason.
+    await pauses.resume(c.owner, { commandId: cid("rs"), scope: T1, reason: "keep it" });
+    await stops.advance(c.owner, { intentId: sus1.intentId });
+    assert.equal((await stops.get(c.owner, sus1.intentId))!.phase, "cancelled");
+    // Task 2's Suspend finishes and still holds the task: the look's own Stop follows it.
+    settles = true;
+    assert.equal((await stops.advance(c.owner, { intentId: sus2.intentId })).outcome?.state, "suspended");
+    const r = await look();
+    assert.deepEqual(r, { stopped: ["att-s1", "att-s2"], failed: [] });
+    const own1 = derivedId("stp", scopedCommandId(c.owner.id, "owncode-stop:att-s1"));
+    const own2 = derivedId("stp", scopedCommandId(c.owner.id, "owncode-stop:att-s2"));
+    for (const id of [own1, own2]) {
+      const b = (await stops.get(c.owner, id))!;
+      assert.deepEqual([b.mode, b.phase, b.outcome?.state], ["stop", "done", "stopped"], JSON.stringify(b));
+      assert.ok(b.reason.endsWith(OWNCODE_OFF), b.reason);
+    }
+    assert.equal((await stops.get(c.owner, own2))!.reusedFrom, sus2.intentId, "it went on from the Suspend's checkpoint");
+    // The owner resumes both: the looks that follow (the attempts still listed) ask for nothing and pause nothing again.
+    for (const T of [T1, T2]) await pauses.resume(c.owner, { commandId: cid("rs"), scope: T, reason: "looked at it" });
+    for (let i = 0; i < 3; i++) assert.deepEqual(await look(), { stopped: [], failed: [] });
+    assert.deepEqual([await gate(t1), await gate(t2)], ["active", "active"], "the owner's resume stands");
   });
 
   suite("the stop look reads a bounded part of the live list per tick and goes on from where it stopped, so work beyond the first part is reached on a later tick", async (c) => {
@@ -520,5 +594,24 @@ for (const backend of backends) {
       const text = ownCodeStopNotice({ attemptId: att, intentId: stp, reason: ownCodeStopReason(why) });
       assert.ok(text.length <= 200 && text.endsWith("."), text);
     }
+    // At the edge: whole at 199 and 200 characters, the fixed sentence at 201.
+    for (const [len, whole] of [[199, true], [200, true], [201, false]] as const) {
+      const why = "y".repeat(len - `Attempt ${att} was stopped: `.length);
+      const text = ownCodeStopNotice({ attemptId: att, intentId: stp, reason: ownCodeStopReason(why) });
+      assert.equal(text === `Attempt ${att} was stopped: ${why}`, whole, `${len}: ${text}`);
+      assert.ok(text.length <= 200);
+    }
+
+    // A look cut short at position 0 of the live list (after wrapping round) goes on from position 0, not from where it began.
+    const f2 = fakeStops();
+    const svc2 = c.make();
+    const six = tasks.slice(0, 6).map((t, i) => ({ attemptId: `att-w${i}`, taskId: t, projectId: c.devProject }));
+    const froms2: number[] = [];
+    const running2 = async (from: number, limit: number) => { froms2.push(from); if (froms2.length === 1) return { items: [], next: 1 }; const n = Math.min(limit, six.length); return { items: Array.from({ length: n }, (_, i) => ({ ...six[(from + i) % six.length]!, at: (from + i) % six.length })), next: (from + n) % six.length }; };
+    const look2 = () => svc2.stopRefused(c.owner, { stops: f2.stops, running: running2 });
+    await look2();
+    assert.deepEqual((await look2()).stopped, ["att-w1", "att-w2", "att-w3", "att-w4", "att-w5"]);
+    assert.deepEqual((await look2()).stopped, ["att-w0"]);
+    assert.deepEqual(froms2, [0, 1, 0]);
   });
 }
