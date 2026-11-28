@@ -28,14 +28,14 @@ const start: ChannelStart = {
  * How the test's controller answers a turn continuation (card W04). Default: refused as a controller from before W04 refuses an operation it does not know, so the turn ends as it did before; `go` answers yes. A function decides per request.
  */
 type Continue = "refuse" | "go" | "hold" | ((m: Extract<FromChild, { t: "bridge" }>) => "refuse" | "go" | "hold");
-function host(hooks: WorkerHooks, continueTurn: Continue = "refuse") {
+function host(hooks: WorkerHooks, continueTurn: Continue = "refuse", failWrite?: (text: string) => boolean) {
   const toChild = new PassThrough();
   const continues: Extract<FromChild, { t: "bridge" }>[] = [];
   const seen: FromChild[] = [];
   const discovers: string[] = [];
   const waiters: (() => void)[] = [];
   const decoder = new LineDecoder();
-  const done = runWorker({ input: toChild, write: (text) => { for (const raw of decoder.push(text)) {
+  const done = runWorker({ input: toChild, write: (text) => { if (failWrite?.(text) === true) throw new Error("the channel's file is at its size limit"); for (const raw of decoder.push(text)) {
     const m = parseFromChild(raw);
     // The declarations at the start of a request are answered here and kept apart from what the tests look at.
     if (m.t === "bridge" && m.request.op === "turn.continue") {
@@ -375,6 +375,47 @@ test("a lease that ends while a turn waits stops the turn, answers its pending c
   await h.done;
 });
 
+test("G08: a lease lost while a turn is open is told to the host as lease.lost as well (so the host ends the process when the grace is over), the model call in flight is aborted at the host, and the process still winds down on its own", async () => {
+  const { offline, hooks } = scripted();
+  offline.faux.setResponses([fauxAssistantMessage(fauxToolCall("nimblenewt__desk-read", { recordId: "dsk-aaaaaaaaaaaaaaaaaaaa" }, { id: "c1" }), { stopReason: "toolUse" }), fauxAssistantMessage("never reached")]);
+  const k = fakeClock(); let dog: LeaseWatchdog | undefined; const ended: string[] = [];
+  const h = host({ ...hooks, lease: { clock: k, tickMs: 0, onWatchdog: (d) => { dog = d; }, terminate: (r) => { ended.push(r); } } });
+  h.send({ t: "start", v: 1, start: leased });
+  await h.next("ready");
+  h.send({ t: "run", requestId: "req-1", content: "work" });
+  await h.next("bridge");
+  k.advance(21_000); await dog!.tick();
+  const told = await h.next("lease.lost");
+  assert.equal(told.reason, "silent");
+  const result = await h.next("result");
+  assert.match(result.error ?? "", /^lease lost \(silent\)/);
+  assert.ok(h.seen.indexOf(told) < h.seen.indexOf(result), "the host is told before the turn's result");
+  k.advance(60_000); await dog!.tick();
+  assert.equal(h.seen.filter((m) => m.t === "lease.lost").length, 1, "the loss is told once (G08 second review)");
+  assert.deepEqual(ended, [], "it wound down on its own: the process does not end itself (the host's own end after the grace is the worker package's)");
+  h.send({ t: "close" });
+  await h.done;
+});
+
+test("G08 second review: a channel that cannot take the lease.lost message (a write that throws) does not keep the turn from being stopped: the look completes and the turn ends with the loss", async () => {
+  const { offline, hooks } = scripted();
+  offline.faux.setResponses([fauxAssistantMessage(fauxToolCall("nimblenewt__desk-read", { recordId: "dsk-aaaaaaaaaaaaaaaaaaaa" }, { id: "c1" }), { stopReason: "toolUse" }), fauxAssistantMessage("never reached")]);
+  const k = fakeClock(); let dog: LeaseWatchdog | undefined;
+  const h = host({ ...hooks, lease: { clock: k, tickMs: 0, onWatchdog: (d) => { dog = d; }, terminate: () => undefined } }, "refuse", (text) => text.includes('"lease.lost"'));
+  h.send({ t: "start", v: 1, start: leased });
+  await h.next("ready");
+  h.send({ t: "run", requestId: "req-1", content: "work" });
+  await h.next("bridge");
+  k.advance(21_000);
+  await dog!.tick(); // rejected before the fix: the send threw and the abort was never reached
+  assert.equal(dog!.reason, "silent");
+  const result = await h.next("result");
+  assert.match(result.error ?? "", /^lease lost \(silent\)/);
+  assert.equal(h.seen.some((m) => m.t === "lease.lost"), false);
+  h.send({ t: "close" });
+  await h.done;
+});
+
 test("a machine that slept loses the lease as 'wake' before any turn runs; the loss is told to the host and a later run is refused with that reason (card H08b)", async () => {
   const { hooks } = scripted();
   const k = fakeClock(); let dog: LeaseWatchdog | undefined;
@@ -533,6 +574,8 @@ test("H08b: a turn that ignores the abort is ended inside the grace: closing the
   await new Promise((r) => setTimeout(r, 20));
   k.advance(21_000); void got.dog!.tick(); // the stop waits for an abort the turn never honours
   assert.equal(got.dog!.reason, "silent");
+  // The host is told before the abort is waited for (card G08 review), so its own end after the grace counts from the loss even when the abort never returns.
+  assert.equal((await h.next("lease.lost")).reason, "silent");
   k.advance(3900); await got.dog!.tick();
   assert.deepEqual(exits, [], "still inside the grace");
   k.advance(200); await got.dog!.tick();

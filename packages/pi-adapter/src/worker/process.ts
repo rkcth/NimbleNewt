@@ -255,15 +255,19 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
   /** Authority is gone (card H08b): the turn is aborted, no further call leaves the process, and the reason is the turn's recorded result. */
   const authorityLost = async (reason: LossReason): Promise<void> => {
     relay?.refuse(`the lease ended (${reason})`);
-    relay?.closeAll(`the lease ended (${reason})`);
+    relay?.closeAll(`the lease ended (${reason})`, { abortAtHost: true });
     proxy?.close(`the lease ended (${reason})`);
     for (const resolve of bridgeWaiting.values()) resolve({ ok: false, code: "unavailable", message: `the lease ended (${reason})` });
     bridgeWaiting.clear();
     endCheck();
-    try { await adapter?.root().abort(); } catch { /* the turn's result below is what is reported */ }
-    // A turn that is running reports in its own `finally`-path; with none running the loss is told here. Either way the process is quiet once it has told the host.
-    // With none running the loss is told as its own message: an unsolicited `result` has no waiter on the host and would be dropped.
-    if (!turnOpen) { send({ t: "lease.lost", reason }); dog?.quiet(); }
+    // The loss is told to the host at once, with a turn open as well (card G08), so the host ends the process when the grace is over whatever else it waits for: without this a remote host that could not reach its controller
+    // kept the sandbox for minutes, while its reports of the turn timed out. It is told before the abort below, which can take long on a loaded machine (the grace counts from the loss, not from the end of the abort).
+    // With no turn running this message is how the loss is told: an unsolicited `result` has no waiter on the host and would be dropped.
+    // A channel that cannot be written (the file channel at its limit throws) must not keep the turn from being aborted (card G08 second review): the abort below runs whatever the send does.
+    try { send({ t: "lease.lost", reason }); } catch { /* the host ends the process when the channel fails; the abort still runs */ }
+    try { await adapter?.root().abort(); } catch { /* the turn's result is what is reported */ }
+    // A turn that is running reports in its own `finally`-path, and is quiet once it has told the host.
+    if (!turnOpen) dog?.quiet();
   };
 
   /** Asks the controller, through the host, to extend the lease (card H08b). The send time is kept, so the answer counts from it. Nothing is asked once the lease is gone. */
