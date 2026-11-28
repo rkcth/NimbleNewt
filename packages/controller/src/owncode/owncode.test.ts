@@ -8,7 +8,7 @@ import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
 import type { ControllerStorage } from "../storage/types.js";
-import { OWNCODE_OFF, OwnCodeService, taskIdOf, type OwnCodeOptions } from "./index.js";
+import { OWNCODE_OFF, OWNCODE_STOP, OwnCodeService, taskIdOf, type OwnCodeOptions, type OwnCodeRunning, type OwnCodeStops } from "./index.js";
 
 // Card B06, first slice: optional agent work on NimbleNewt's own code. Off by default (a request is refused with a message saying the owner can enable it); on, an agent asks first and only the owner approves;
 // no attempt starts in the development project without an approved request, and a withdrawn approval stops further starts. Real storage on each backend, real admissions through the attempt gate; the only
@@ -24,6 +24,29 @@ const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>, match
   await assert.rejects(run, (error: unknown) => { assert.ok(error instanceof DomainError, String(error)); assert.equal(error.code, code, error.message); if (match !== undefined) assert.match(error.message, match); return true; });
 };
 const ASK = { what: "make the stand-up brief list blocked tasks first", why: "owners miss blocked work at the bottom", effort: "about two hours", cost: "a few cents of local model time" };
+
+/** L02's Stop as the stop look sees it: records what was asked, replays a repeated command ID, and holds what the test says is held. */
+function fakeStops() {
+  const held = new Map<string, string>();
+  const asked: { by: string; commandId: string; taskId: string; mode: string; reason: string }[] = [];
+  const advanced: string[] = [];
+  const known = new Map<string, string>();
+  const failFor = new Set<string>();
+  const stops: OwnCodeStops = {
+    holding: async (taskId) => (held.has(taskId) ? { intentId: `stp-held-${taskId}`, mode: held.get(taskId)! } : undefined),
+    request: async (by, command) => {
+      if (failFor.has(command.scope.id)) throw new DomainError("unavailable", "the stop could not be recorded");
+      const old = known.get(command.commandId);
+      if (old !== undefined) return { intentId: old, replayed: true };
+      const intentId = `stp-${known.size}`;
+      known.set(command.commandId, intentId);
+      asked.push({ by: by.id, commandId: command.commandId, taskId: command.scope.id, mode: command.mode, reason: command.reason });
+      return { intentId, replayed: false };
+    },
+    advance: async (_by, command) => { advanced.push(command.intentId); },
+  };
+  return { stops, held, asked, advanced, failFor };
+}
 
 interface Ctx {
   owner: Principal; dev: Principal; dev2: Principal; host: Principal; confined: Principal;
@@ -322,5 +345,113 @@ for (const backend of backends) {
     assert.equal(made.title, "NimbleNewt: list blocked tasks first in the brief");
     assert.match(made.description, /\nWhat: {3}list blocked tasks\nfirst {3}in\n\nthe brief \nWhy: /, "the description keeps the request's own words");
     assert.ok(await c.start(linesTask), "not refused as changed");
+  });
+
+  // Card B06, second slice: work already running in the development project is stopped through L02's Stop when the gate would no longer let it start.
+  suite("running work in the development project is stopped through L02's Stop of its task once the approval is withdrawn or the feature is switched off; other work is not touched", async (c) => {
+    const f = fakeStops();
+    let looks = 0;
+    let running: OwnCodeRunning[] = [];
+    const told: string[] = [];
+    const look = () => c.svc.stopRefused(c.owner, { stops: f.stops, running: async () => { looks++; return { items: running, next: 0 }; }, told: async (x) => { told.push(`${x.attemptId}|${x.intentId}|${x.reason}`); } });
+    // Never enabled: nothing is looked at.
+    assert.deepEqual(await look(), { stopped: [], failed: [] });
+    assert.equal(looks, 0, "an installation that never named a development project does not look at the dispatcher");
+    await c.enable();
+    const reqA = await c.ask();
+    const a = await c.approve(reqA);
+    const b = await c.approve(await c.ask(c.dev2));
+    const byHand = (await c.projects.createTask({ commandId: cid("t"), actor: c.owner.id, projectId: c.devProject, title: "by hand" })).id;
+    const garden = (await c.projects.createTask({ commandId: cid("t"), actor: c.owner.id, projectId: c.other, title: "weed" })).id;
+    const attA = await c.start(a);
+    const attB = await c.start(b);
+    running = [{ attemptId: attA, taskId: a, projectId: c.devProject }, { attemptId: attB, taskId: b, projectId: c.devProject }, { attemptId: "att-garden", taskId: garden, projectId: c.other },
+      // An entry that says it is in the development project but whose task is not: the gate judges the task, so nothing of another project is stopped.
+      { attemptId: "att-mislabelled", taskId: garden, projectId: c.devProject },
+      // Work in the development project that no approved request made (running from before the project was named, for example) is not work the owner approved: it is stopped.
+      { attemptId: "att-hand", taskId: byHand, projectId: c.devProject }];
+    let r = await look();
+    assert.deepEqual(r, { stopped: ["att-hand"], failed: [] });
+    assert.deepEqual(f.asked.map((x) => [x.commandId, x.taskId, x.mode, x.by]), [["owncode-stop:att-hand", byHand, "stop", c.owner.id]]);
+    assert.match(f.asked[0]!.reason, /^Stopped NimbleNewt development work: task .* came from no approved request/);
+    assert.deepEqual(f.advanced, ["stp-0"], "the Stop's first steps run at once");
+    f.held.set(byHand, "stop");
+
+    // The owner withdraws the approval of A: A is stopped, with the gate's reason; B (still approved) and the garden are not.
+    await c.svc.withdraw(c.owner, { commandId: cid("w"), requestId: reqA, expectedRevision: await c.rev(reqA), reason: "not wanted now" });
+    r = await look();
+    assert.deepEqual(r, { stopped: [attA], failed: [] });
+    assert.equal(f.asked.at(-1)!.taskId, a);
+    assert.match(f.asked.at(-1)!.reason, /the owner withdrew the approval\), so no work starts$/);
+    assert.ok(told.at(-1)!.startsWith(`${attA}|stp-1|Stopped NimbleNewt development work: task ${a}`), told.at(-1));
+    // The next tick: A's Stop is in force (the Stop's sweep carries it on), so nothing is asked again.
+    f.held.set(a, "stop");
+    assert.deepEqual(await look(), { stopped: [], failed: [] });
+    assert.equal(f.asked.length, 2);
+    // If the Stop is not seen as in force (its pause was lifted), the same command ID is replayed: nothing more is done, nothing is advanced or told again.
+    f.held.delete(a);
+    const told0 = told.length;
+    assert.deepEqual(await look(), { stopped: [], failed: [] });
+    assert.deepEqual([f.asked.length, f.advanced.length, told.length], [2, 2, told0]);
+
+    // The feature is switched off: B is stopped too, saying the owner can enable it.
+    await c.svc.disable(c.owner, { commandId: cid("dis"), expectedRevision: (await c.svc.settings(c.owner))!.revision });
+    r = await look();
+    assert.deepEqual(r, { stopped: [attB], failed: [] });
+    assert.ok(f.asked.at(-1)!.reason.endsWith(OWNCODE_OFF), f.asked.at(-1)!.reason);
+    assert.ok(f.asked.every((x) => x.taskId !== garden), "the garden is never stopped");
+  });
+
+  suite("the stop look is bounded per tick, takes over a Suspend, leaves a Stop or Force Stop in force alone, stops a task whose text changed, and one failure does not keep the others running", async (c) => {
+    const f = fakeStops();
+    await c.enable();
+    const tasks: string[] = [];
+    for (let i = 0; i < OWNCODE_STOP.perTick + 3; i++) tasks.push(await c.approve(await c.ask(i % 2 === 0 ? c.dev : c.dev2, { what: `change number ${i}` })));
+    const running: OwnCodeRunning[] = tasks.map((t, i) => ({ attemptId: `att-${i}`, taskId: t, projectId: c.devProject }));
+    // The same task twice in the look (two entries, side by side) is judged once.
+    running.splice(1, 0, { attemptId: "att-0b", taskId: tasks[0]!, projectId: c.devProject });
+    const look = () => c.svc.stopRefused(c.owner, { stops: f.stops, running: async () => ({ items: running, next: 0 }) });
+    assert.deepEqual(await look(), { stopped: [], failed: [] }, "all approved and unchanged: nothing is stopped");
+    // One task's text changed after its approval: its running work is not the approved work.
+    const edited = (await c.projects.getTask(tasks[1]!))!;
+    await c.projects.updateTask({ commandId: cid("ed"), actor: c.owner.id, taskId: tasks[1]!, expectedRevision: edited.revision, title: "NimbleNewt: something else" });
+    let r = await look();
+    assert.deepEqual(r.stopped, ["att-1"]);
+    assert.match(f.asked[0]!.reason, /was changed after the owner approved request/);
+    f.held.set(tasks[1]!, "stop");
+    // Off: a Suspend in force on task 2 is taken over by the Stop; a Force Stop on task 3 is left alone; task 4's Stop cannot be recorded this tick.
+    f.held.set(tasks[2]!, "suspend");
+    f.held.set(tasks[3]!, "force-stop");
+    f.failFor.add(tasks[4]!);
+    await c.svc.disable(c.owner, { commandId: cid("dis"), expectedRevision: (await c.svc.settings(c.owner))!.revision });
+    r = await look();
+    assert.equal(r.stopped.length + r.failed.length, OWNCODE_STOP.perTick, "at most this many Stops are asked for in one tick");
+    assert.deepEqual(r.stopped, ["att-0", "att-2", "att-5", "att-6"]);
+    assert.deepEqual(r.failed.map((x) => x.attemptId), ["att-4"]);
+    assert.match(r.failed[0]!.error, /could not be recorded/);
+    assert.ok(!f.asked.some((x) => x.taskId === tasks[3]), "a Force Stop in force is left to itself");
+    for (const t of [tasks[0]!, tasks[2]!, tasks[5]!, tasks[6]!]) f.held.set(t, "stop");
+    // The next tick: the failed one is asked again (and now succeeds), and the rest are reached.
+    f.failFor.clear();
+    r = await look();
+    assert.deepEqual(r, { stopped: ["att-4", "att-7"], failed: [] });
+    assert.equal(new Set(f.asked.map((x) => x.commandId)).size, f.asked.length, "each attempt's Stop is asked for once");
+  });
+
+  suite("the stop look reads a bounded part of the live list per tick and goes on from where it stopped, so work beyond the first part is reached on a later tick", async (c) => {
+    const f = fakeStops();
+    await c.enable();
+    const byHand = (await c.projects.createTask({ commandId: cid("t"), actor: c.owner.id, projectId: c.devProject, title: "by hand" })).id;
+    const garden = (await c.projects.createTask({ commandId: cid("t"), actor: c.owner.id, projectId: c.other, title: "weed" })).id;
+    // 150 live attempts; only the 121st is work of the development project.
+    const live: OwnCodeRunning[] = Array.from({ length: 150 }, (_, i) => (i === 120 ? { attemptId: "att-hand", taskId: byHand, projectId: c.devProject } : { attemptId: `att-g${i}`, taskId: garden, projectId: c.other }));
+    const asked: [number, number][] = [];
+    const running = async (from: number, limit: number) => { asked.push([from, limit]); const n = Math.min(limit, live.length); return { items: Array.from({ length: n }, (_, i) => live[(from + i) % live.length]!), next: (from + n) % live.length }; };
+    const look = () => c.svc.stopRefused(c.owner, { stops: f.stops, running });
+    assert.deepEqual(await look(), { stopped: [], failed: [] }, "the first look reads the first 100 only");
+    assert.deepEqual(await look(), { stopped: ["att-hand"], failed: [] }, "the next look goes on from there");
+    assert.deepEqual(asked, [[0, OWNCODE_STOP.look], [100, OWNCODE_STOP.look]]);
+    await look();
+    assert.deepEqual(asked.at(-1), [50, OWNCODE_STOP.look], "and wraps round");
   });
 }

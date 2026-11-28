@@ -1694,6 +1694,26 @@ export class DispatcherService {
     return out;
   }
 
+  /**
+   * The running attempts with their task and project, from a bounded look (card B06, second slice: the development project's running work is checked every tick): at most `limit` live attempts are looked
+   * at, from position `from` of the live list (wrapping round), and `next` is where the following look begins, so every live attempt is looked at within a few ticks however many there are. Only staff may ask.
+   */
+  async runningAttempts(by: Principal, options: { readonly from: number; readonly limit: number }): Promise<{ items: { attemptId: string; taskId: string; projectId: string }[]; next: number }> {
+    const staff = (by.kind === "owner" || by.kind === "host" || by.kind === "service") && by.taskScope === undefined;
+    if (!staff) throw new DomainError("forbidden", `${by.id} may not list live attempts`);
+    const ids = await this.#liveIds();
+    if (ids.length === 0) return { items: [], next: 0 };
+    const limit = Number.isSafeInteger(options.limit) ? Math.min(Math.max(options.limit, 1), LIVE_MAX) : 1;
+    const start = (Number.isSafeInteger(options.from) && options.from > 0 ? options.from : 0) % ids.length;
+    const n = Math.min(limit, ids.length);
+    const items: { attemptId: string; taskId: string; projectId: string }[] = [];
+    for (let i = 0; i < n; i++) {
+      const d = await this.#load(ids[(start + i) % ids.length]!);
+      if (d !== undefined && d.body.state === "running") items.push({ attemptId: d.body.attemptId, taskId: d.body.taskId, projectId: d.body.projectId });
+    }
+    return { items, next: (start + n) % ids.length };
+  }
+
   async get(by: Principal, attemptId: string): Promise<View<DispatchBody> | undefined> {
     const d = typeof attemptId === "string" && ATTEMPT.test(attemptId) ? await this.#load(attemptId) : undefined;
     if (d === undefined) return undefined;
