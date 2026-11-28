@@ -143,7 +143,7 @@ const posixUnder = (inner: string, outer: string): boolean => staysBelow(posix.r
 
 /** Where a canonical path is in its file system: the mount it is seen through and the path inside that file system. */
 interface FsLocation { readonly dev: string; readonly path: string }
-const treeOf = new WeakMap<readonly MountEntry[], Map<string, MountEntry[]>>();
+const treeOf = new WeakMap<readonly MountEntry[], { readonly kids: Map<string, MountEntry[]>; readonly unreached: readonly MountEntry[] }>();
 /**
  * The mount a canonical path is seen through. With the table's mount IDs (as the kernel gives them): from the mounts mounted on nothing in the table, down through the mounts mounted on the one reached; of
  * those on the way, the one nearest the root is on top (a mount made later at a folder above an earlier one hides it, and one made at the same folder is mounted on the one below). Without IDs (made-up
@@ -158,25 +158,34 @@ function seenThrough(mounts: readonly MountEntry[], canon: string): MountEntry |
   let tree = treeOf.get(mounts);
   if (tree === undefined) {
     const ids = new Set(mounts.map((m) => m.id!));
-    tree = new Map();
+    const kids = new Map<string, MountEntry[]>();
     // "" holds the mounts whose parent is not in the table: the roots of what this process sees.
-    for (const m of mounts) { const k = m.parent !== m.id && ids.has(m.parent!) ? m.parent! : ""; const kids = tree.get(k); if (kids === undefined) tree.set(k, [m]); else kids.push(m); }
+    for (const m of mounts) { const k = m.parent !== m.id && ids.has(m.parent!) ? m.parent! : ""; const at = kids.get(k); if (at === undefined) kids.set(k, [m]); else at.push(m); }
+    // Mounts not reached from those roots (parent IDs that go round in a circle): which way they are seen is not known.
+    const reached = new Set<string>();
+    for (const todo = [...(kids.get("") ?? [])]; todo.length > 0;) { const m = todo.pop()!; if (reached.has(m.id!)) continue; reached.add(m.id!); for (const k of kids.get(m.id!) ?? []) todo.push(k); }
+    tree = { kids, unreached: mounts.filter((m) => !reached.has(m.id!)) };
     treeOf.set(mounts, tree);
   }
+  // Third review: a mount on the way that the walk would not reach (a circle of parents), or two roots on the way (a mount whose parent is hidden, beside another root), cannot tell.
+  if (tree.unreached.some((m) => posixUnder(canon, m.point))) throw new CannotTell("the mount table has mounts whose parents go round in a circle");
   let best: MountEntry | undefined;
   const seen = new Set<string>();
-  for (let level = tree.get("") ?? []; ;) {
+  for (let level = tree.kids.get("") ?? []; ;) {
     let next: MountEntry | undefined;
     let tie = false;
+    let count = 0;
     for (const m of level) {
       if (seen.has(m.id!) || !posixUnder(canon, m.point)) continue;
+      count++;
       if (next === undefined || m.point.length < next.point.length) { next = m; tie = false; } else if (m.point.length === next.point.length) tie = true;
     }
     if (next === undefined) return best;
     if (tie) throw new CannotTell("the mount table does not say which of two mounts at one folder is on top");
+    if (best === undefined && count > 1) throw new CannotTell("the mount table does not say which of two mounts whose parents it does not list is on top");
     seen.add(next.id!);
     best = next;
-    level = tree.get(next.id!) ?? [];
+    level = tree.kids.get(next.id!) ?? [];
   }
 }
 function locate(mounts: readonly MountEntry[], canon: string): FsLocation {
@@ -253,6 +262,7 @@ export async function judgeSeparate(places: readonly OwnPlace[] | "too-many", gu
   }
   type Guard = { what: string; path: string; canon: string; exists: boolean; ids: ReadonlySet<string>; self?: string; at?: FsLocation; holds: readonly { point: string; at: FsLocation }[] };
   const guards: Guard[] = [];
+  let pairs = 0;
   for (const g of guarded) {
     if (typeof g.path !== "string" || !isAbsolute(g.path)) return no(`${g.what} is not given as a full path, so the development project's checkout cannot be checked against it`);
     try {
@@ -300,7 +310,9 @@ export async function judgeSeparate(places: readonly OwnPlace[] | "too-many", gu
         const shows = at === undefined ? undefined : g.holds.find((m) => related(m.at, at!));
         if (shows !== undefined) return no(`${look.what} is mounted inside ${g.what} (${shown(g.path)}, at ${shown(shows.point)}); bind a separate checkout`);
         // Second review: a mount inside the place and a mount inside the guarded folder that show one folder (or one inside the other), such as one volume given to both.
-        if (holds.length * g.holds.length > SEPARATE_LIMITS.mountPairs) return no(`${look.what} and ${g.what} (${shown(g.path)}) hold too many mounts to compare, so the checkout cannot be checked`);
+        // The limit is for the whole judgement (third review), not for each place and guarded folder.
+        pairs += holds.length * g.holds.length;
+        if (pairs > SEPARATE_LIMITS.mountPairs) return no(`${look.what} and ${g.what} (${shown(g.path)}) hold too many mounts to compare, so the checkout cannot be checked`);
         for (const m of holds) {
           const both = g.holds.find((n) => related(m.at, n.at));
           if (both !== undefined) return no(`${look.what} holds a mount (${shown(m.point)}) that shows what ${g.what} (${shown(g.path)}) holds at ${shown(both.point)}; bind a separate checkout`);

@@ -170,6 +170,7 @@ test("a mount table that cannot be read is refused; the table's own spelling is 
   assert.throws(() => parseMountInfo("22 1 x / / rw\n"), /could not be read/);
   assert.throws(() => parseMountInfo("22 1 8:1 / / rw\n22 1 8:1 / /x rw\n"), /could not be read/, "a mount ID given twice");
   assert.throws(() => parseMountInfo("a 1 8:1 / / rw\n"), /could not be read/);
+  assert.throws(() => parseMountInfo("22 x 8:1 / / rw\n"), /could not be read/, "a parent ID that is not a number");
   assert.throws(() => parseMountInfo(""), /empty/);
   if (process.platform === "linux") {
     const real = await nodeSeparationFs.mounts!();
@@ -263,6 +264,12 @@ test("git's paths are taken as the disk takes them, a long .git file or a .git t
   writeFileSync(join(long, ".git"), `gitdir: ${join(long, "own")}\n${"#".repeat(SEPARATE_LIMITS.gitFileBytes)}`);
   dir("work", "long", "own");
   await refusedWith([repo(long)], guarded, /its \.git file is longer than 4096 bytes/);
+  // So is a commondir longer than the limit (third review).
+  const longCommon = dir("work", "long-common");
+  dir("work", "long-common", "g");
+  writeFileSync(join(longCommon, ".git"), "gitdir: g\n");
+  writeFileSync(join(longCommon, "g", "commondir"), `${join(longCommon, "g")}\n${"#".repeat(SEPARATE_LIMITS.gitFileBytes)}`);
+  await refusedWith([repo(longCommon)], guarded, /its git folder's commondir is longer than 4096 bytes/);
   // A .git folder of its own that names the installation's as its common folder.
   const half = dir("work", "half-dir");
   dir("work", "half-dir", ".git");
@@ -299,4 +306,24 @@ test("more mounts held on both sides than it compares is refused", async () => {
   for (let i = 0; i < n; i++) lines.push(`${10 + i} 1 8:4 /a${i} /srv/nn/m${i}`, `${5000 + i} 1 8:5 /b${i} /work/dev/m${i}`);
   await refusedWith([repo("/work/dev")], g1, /hold too many mounts to compare/, { fs: fakeFs(bindTree, { mounts: mi(...lines) }), platform: "linux" });
   assert.deepEqual(await judgeSeparate([repo("/work/dev")], g1, { fs: fakeFs(bindTree, { mounts: mi(...lines.slice(0, 1 + 2 * 999)) }), platform: "linux" }), { separate: true });
+});
+
+// Third review: mounts the walk from the roots does not reach, two roots on one way, and the pair limit for the whole judgement.
+test("a mount whose parents go round in a circle, or a second root on the way, cannot tell", async () => {
+  // A bind mount of /srv/nn at /work/dev whose parent IDs form a circle with /work's: not ignored.
+  await refusedWith([repo("/work/dev")], g1, /cannot be checked: the mount table has mounts whose parents go round in a circle/, { fs: fakeFs(bindTree, { mounts: mi("1 0 8:1 / /", "5 6 8:1 /srv/nn /work/dev", "6 5 8:2 / /work") }), platform: "linux" });
+  // A circle elsewhere (not on the way) does not matter.
+  assert.deepEqual(await judgeSeparate([repo("/work/dev")], g1, { fs: fakeFs(bindTree, { mounts: mi("1 0 8:1 / /", "5 6 8:2 / /elsewhere", "6 5 8:3 / /elsewhere/x") }), platform: "linux" }), { separate: true });
+  // A bind mount of /srv/nn at /work/dev whose parent is not listed, beside the root /: which is on top is not known.
+  await refusedWith([repo("/work/dev")], g1, /cannot be checked: the mount table does not say which of two mounts whose parents it does not list/, { fs: fakeFs(bindTree, { mounts: mi("1 0 8:1 / /", "2 99 8:1 /srv/nn /work/dev") }), platform: "linux" });
+  // A mount whose parent is not listed and whose folder is not on the way does not matter; a root that is its own parent is a root.
+  assert.deepEqual(await judgeSeparate([repo("/work/dev")], g1, { fs: fakeFs(bindTree, { mounts: mi("1 1 8:1 / /", "2 99 8:2 / /elsewhere") }), platform: "linux" }), { separate: true });
+});
+
+test("the limit on mounts compared is for the whole judgement", async () => {
+  // 999 mounts in the checkout, 999 in each of two guarded folders: each pair alone is under the limit, both together are over it.
+  const lines = ["1 0 8:1 / /"];
+  for (let i = 0; i < 999; i++) lines.push(`${10 + i} 1 8:4 /a${i} /srv/nn/m${i}`, `${5000 + i} 1 8:5 /b${i} /work/dev/m${i}`, `${9000 + i} 1 8:6 /c${i} /srv/other/m${i}`);
+  const two = [...g1, { what: "the controller's data directory", path: "/srv/other" }];
+  await refusedWith([repo("/work/dev")], two, /hold too many mounts to compare/, { fs: fakeFs({ ...bindTree, "/srv/other": "9:9" }, { mounts: mi(...lines) }), platform: "linux" });
 });
