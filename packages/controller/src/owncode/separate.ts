@@ -37,6 +37,12 @@ export interface GuardedPlace {
   /** What it is, in plain words ("the running installation's program files"). */
   readonly what: string;
   readonly path: string;
+  /**
+   * The folder is a repository whose git folders are guarded too (the program root, when the installation runs from a checkout or a `git worktree`): its `.git` is followed as a place's is (`gitdir:`,
+   * `commondir`), so another worktree of the same repository, which git lets write the same refs, hooks and configuration, is not separate. No `.git`: nothing more. A `.git` that cannot be read, or a git
+   * folder it names that is not there: cannot tell.
+   */
+  readonly git?: boolean;
 }
 /**
  * One mount of the mount table: its file system (`major:minor`), the folder of that file system it shows (`root`; not a path for a few kernel file systems, such as `mnt:[...]`) and where it is mounted (`point`).
@@ -53,7 +59,7 @@ export interface SeparationFs {
   mounts?(): Promise<readonly MountEntry[] | undefined>;
   readText?(path: string, maxBytes: number): Promise<string>;
 }
-export const SEPARATE_LIMITS = { places: 50, guarded: 20, depth: 128, mounts: 50_000, mountTableBytes: 16 * 1024 * 1024, gitFileBytes: 4096, mountPairs: 1_000_000 } as const;
+export const SEPARATE_LIMITS = { places: 50, guarded: 32, depth: 128, mounts: 50_000, mountTableBytes: 16 * 1024 * 1024, gitFileBytes: 4096, mountPairs: 1_000_000 } as const;
 export type Separation = { readonly separate: true } | { readonly separate: false; readonly detail: string };
 
 const unescapeMount = (s: string): string => s.replace(/\\([0-7]{3})/g, (_, o: string) => String.fromCharCode(parseInt(o, 8)));
@@ -263,10 +269,18 @@ export async function judgeSeparate(places: readonly OwnPlace[] | "too-many", gu
   type Guard = { what: string; path: string; canon: string; exists: boolean; ids: ReadonlySet<string>; self?: string; at?: FsLocation; holds: readonly { point: string; at: FsLocation }[] };
   const guards: Guard[] = [];
   let pairs = 0;
-  for (const g of guarded) {
+  // The given guarded places, then the git folders of those that are repositories (B06 fourth slice); all of them count against the limit.
+  const todo: { what: string; path: string; git: boolean; derived: boolean }[] = guarded.map((g) => ({ what: g.what, path: g.path, git: g.git === true, derived: false }));
+  for (let i = 0; i < todo.length; i++) {
+    const g = todo[i]!;
     if (typeof g.path !== "string" || !isAbsolute(g.path)) return no(`${g.what} is not given as a full path, so the development project's checkout cannot be checked against it`);
     try {
-      const got = await guardOf(fs, g.path);
+      // A git folder the installation's `.git` names must be there (a place's must be too), and its path is taken as written (`..` after a link leads where the link leads), so `realpath` alone places it.
+      const got = g.derived ? await (async () => { const real = await fs.realpath(g.path); return { canon: real, exists: true, chain: await chainOf(fs, real) }; })() : await guardOf(fs, g.path);
+      if (g.git && got.exists) {
+        for (const extra of await gitPlaces(fs, got.canon)) todo.push({ what: `the git folder of ${g.what}`, path: extra, git: false, derived: true });
+        if (todo.length > SEPARATE_LIMITS.guarded) return no("this controller has more guarded folders than it checks, so it cannot tell whether the development project's checkout is apart from them");
+      }
       const at = mounts === undefined ? undefined : locate(mounts, got.canon);
       guards.push({ what: g.what, path: g.path, canon: got.canon, exists: got.exists, ids: new Set(got.chain.map((c) => c.id)), ...(got.exists ? { self: got.chain[0]!.id } : {}), ...(at === undefined ? {} : { at }), holds: mounts === undefined || !got.exists ? [] : mountsBelow(mounts, got.canon) });
     } catch (error) {
@@ -348,8 +362,8 @@ export function programRoot(moduleUrl: string = import.meta.url): string {
  * `-journal`), which may lie outside a data directory given apart from it. The artifact store and the backup folder are the controller's own records too: a checkout there could change or remove what a
  * check or a restore later reads back into the installation.
  */
-export function installationGuards(o: { readonly programRoot: string; readonly runtime?: string; readonly dataDirectory?: string; readonly databaseFile?: string; readonly stateDirectory?: string; readonly releaseRoot?: string; readonly releaseIncoming?: string; readonly artifactDirectory?: string; readonly backupDirectory?: string }): GuardedPlace[] {
-  const out: GuardedPlace[] = [{ what: "the running installation's program files", path: o.programRoot }];
+export function installationGuards(o: { readonly programRoot: string; readonly runtime?: string; readonly dataDirectory?: string; readonly databaseFile?: string; readonly stateDirectory?: string; readonly releaseRoot?: string; readonly releaseIncoming?: string; readonly artifactDirectory?: string; readonly backupDirectory?: string; readonly backupKeyring?: string; readonly backupPasscode?: string; readonly backupRecovery?: string; readonly recoveryManifests?: string; readonly watchdogFile?: string; readonly heartbeatFile?: string }): GuardedPlace[] {
+  const out: GuardedPlace[] = [{ what: "the running installation's program files", path: o.programRoot, git: true }];
   if (o.runtime !== undefined) out.push({ what: "the Node.js runtime the controller runs on", path: o.runtime });
   if (o.dataDirectory !== undefined) out.push({ what: "the controller's data directory", path: o.dataDirectory });
   if (o.databaseFile !== undefined) {
@@ -361,5 +375,13 @@ export function installationGuards(o: { readonly programRoot: string; readonly r
   if (o.releaseIncoming !== undefined) out.push({ what: "the folder builds leave releases in", path: o.releaseIncoming });
   if (o.artifactDirectory !== undefined) out.push({ what: "the controller's artifact store", path: o.artifactDirectory });
   if (o.backupDirectory !== undefined) out.push({ what: "the controller's backup folder", path: o.backupDirectory });
-  return out.map((g) => ({ what: g.what, path: isAbsolute(g.path) ? resolve(g.path) : g.path }));
+  // B06 fourth slice: the backup encryption's keyring and the owner's passcode and recovery files (a checkout holding them would let work there read or replace them), the recovery manifests a standby
+  // or restored copy is checked against, the outside watchdog's record (read back as an Urgent item) and the launcher's heartbeat file (a beat from elsewhere would hide a hung controller).
+  if (o.backupKeyring !== undefined) out.push({ what: "the backup encryption's keyring file", path: o.backupKeyring });
+  if (o.backupPasscode !== undefined) out.push({ what: "the backup encryption's passcode file", path: o.backupPasscode });
+  if (o.backupRecovery !== undefined) out.push({ what: "the backup encryption's recovery file", path: o.backupRecovery });
+  if (o.recoveryManifests !== undefined) out.push({ what: "the recovery manifest folder", path: o.recoveryManifests });
+  if (o.watchdogFile !== undefined) out.push({ what: "the outside watchdog's record file", path: o.watchdogFile });
+  if (o.heartbeatFile !== undefined) out.push({ what: "the launcher's heartbeat file", path: o.heartbeatFile });
+  return out.map((g) => ({ ...g, path: isAbsolute(g.path) ? resolve(g.path) : g.path }));
 }

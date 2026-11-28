@@ -494,6 +494,20 @@ export async function startController(options: StartOptions): Promise<Controller
  * The owner's inbox text for a maintenance request that waits on the owner: IDs and the kind only (the request's own text stays in the request, which only its readers see). For a protected request it names the
  * administrators who may decide it too, as many as fit in the inbox's detail limit, and how many more there are (card A09 follow-up T6, review).
  */
+/**
+ * Card B06 (fourth slice): the installation's other files a development checkout must be apart from, besides the folders given to `installationGuards` inline. Resolved against the working directory,
+ * as the controller opens them. The heartbeat file is the one the start below beats into (an empty name is none).
+ */
+function ownCodeExtraGuards(options: StartOptions): { backupKeyring?: string; backupPasscode?: string; backupRecovery?: string; recoveryManifests?: string; watchdogFile?: string; heartbeatFile?: string } {
+  const e = options.backup?.encryption;
+  const heartbeatFile = options.heartbeat === false ? undefined : options.heartbeat?.file ?? options.env[HEARTBEAT_ENV.file];
+  return {
+    ...(e === undefined ? {} : { backupKeyring: resolve(e.keyringFile), ...(e.passcodeFile === undefined ? {} : { backupPasscode: resolve(e.passcodeFile) }), ...(e.recoveryFile === undefined ? {} : { backupRecovery: resolve(e.recoveryFile) }) }),
+    ...(options.recovery === undefined ? {} : { recoveryManifests: resolve(options.recovery.manifestDirectory) }),
+    ...(options.watchdog === undefined ? {} : { watchdogFile: resolve(options.watchdog.file) }),
+    ...(heartbeatFile === undefined || heartbeatFile === "" ? {} : { heartbeatFile: resolve(heartbeatFile) }),
+  };
+}
 /** The record kind of an administrator's notice, and the short code of the administrator that makes its record ID its own. */
 export const ADMIN_NOTICE_REF = "maintenance-admin";
 const adminCode = (administratorId: string): string => createHash("sha256").update(administratorId).digest("hex").slice(0, 8);
@@ -796,7 +810,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const contracts = ContractService.withEpoch(storage, epoch);
     // Card B06: optional agent work on NimbleNewt's own code (off by default). Its start gate is part of the attempt gate: no attempt starts in the NimbleNewt development project without an approved request.
     // Its third slice: the development project works only in a checkout of its own, apart from the folders this controller runs from (judged from the project's records against these, at every start).
-    const ownCode = OwnCodeService.withEpoch(storage, epoch, { projects, checkout: { places: (projectId, limit) => resources.localPlaces(projectId, limit), guarded: installationGuards({ programRoot: programRoot(), runtime: dirname(process.execPath), ...(dataDirectory === undefined ? {} : { dataDirectory }), ...(options.storage.kind === "sqlite" ? { databaseFile: resolve(options.storage.path) } : {}), ...(stateDirectory === undefined ? {} : { stateDirectory }), ...(options.releases === undefined ? {} : { releaseRoot: options.releases.root, ...(options.releases.incoming === undefined ? {} : { releaseIncoming: options.releases.incoming }) }), ...(options.artifacts === undefined ? {} : { artifactDirectory: resolve(options.artifacts.directory) }), ...(options.backup === undefined ? {} : { backupDirectory: resolve(options.backup.directory) }) }) } });
+    const ownCode = OwnCodeService.withEpoch(storage, epoch, { projects, checkout: { places: (projectId, limit) => resources.localPlaces(projectId, limit), guarded: installationGuards({ programRoot: programRoot(), runtime: dirname(process.execPath), ...(dataDirectory === undefined ? {} : { dataDirectory }), ...(options.storage.kind === "sqlite" ? { databaseFile: resolve(options.storage.path) } : {}), ...(stateDirectory === undefined ? {} : { stateDirectory }), ...(options.releases === undefined ? {} : { releaseRoot: options.releases.root, ...(options.releases.incoming === undefined ? {} : { releaseIncoming: options.releases.incoming }) }), ...(options.artifacts === undefined ? {} : { artifactDirectory: resolve(options.artifacts.directory) }), ...(options.backup === undefined ? {} : { backupDirectory: resolve(options.backup.directory) }), ...ownCodeExtraGuards(options) }) } });
     const assignments = AssignmentService.withEpoch(storage, epoch, projects, { attemptGate: async (taskId, harness) => catalog.checkAttempt(await contracts.recoveryOf(taskId), harness) ?? (await ownCode.checkAttempt(taskId)) });
     const waits = WaitService.withEpoch(storage, epoch, assignments);
     const desks = DeskService.withEpoch(storage, epoch);
