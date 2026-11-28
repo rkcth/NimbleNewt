@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
 import type { CommandRunner } from "../domain/runner.js";
 import type { UsageBody } from "../catalog/catalog.js";
@@ -20,10 +21,13 @@ import { clean } from "../standups/shared.js";
  * - **Nothing else is written.** The look writes only its own record, the pending list, one activity step per unfinished task and one owner notice. No task state, pause, effect, timer, outbox entry or
  *   catalog record is touched.
  */
-export const LOOK_LIMITS = { page: 50, pagesPerCall: 4, perTick: 2, pages: 100, tasks: 200, pending: 300, sample: 3 } as const;
+export const LOOK_LIMITS = { page: 50, pagesPerCall: 4, perTick: 2, pages: 100, tasks: 200, pending: 300, sample: 3, stopDays: 14 } as const;
+const DAY = 86_400_000;
 export const LOOK_KIND = "adoption-look";
 export const LOOKS_KIND = "adoption-looks";
 const LOOKS_ID = "installation";
+/** The form of an adoption ID: a pending entry of any other form (a damaged list) names no look and leaves the list. */
+const LOOK_ID = /^adp-[a-z2-7]{20}$/;
 
 /** What a task that ran the withdrawn version was when the look first saw it. `missing`: its record is gone or names another project. */
 export type AffectedState = "paused" | "open" | "finished" | "missing";
@@ -57,6 +61,12 @@ export interface LookBody {
   readonly doneAt?: string;
   /** The owner was told (the look is then out of the pending list). */
   readonly notified?: true;
+  /**
+   * The look was stopped before it finished (card K06, retention of the B05 records): it was still failing `LOOK_LIMITS.stopDays` after it began, so it left the pending list instead of holding a place there
+   * for good. What it found and told stays in the record, and `partial` is set. `told`: whether the owner's notice of the stop went out (a look whose notice is what kept failing may not reach the owner;
+   * the count stays in `retention.status` and the line in the experiments view either way).
+   */
+  readonly stopped?: { readonly at: string; readonly told: boolean };
 }
 
 /** What the look needs from the rest of the controller. Every call acts as the controller, never as whoever withdrew the adoption. */
@@ -104,9 +114,9 @@ export class AffectedWorkLook {
 
   get ready(): boolean { return this.#ports !== undefined; }
 
-  async read(adoptionId: string): Promise<{ revision: number; body: LookBody } | undefined> {
+  async read(adoptionId: string): Promise<{ revision: number; body: LookBody; createdAt: string } | undefined> {
     const found = await this.#runner.get(LOOK_KIND, adoptionId);
-    return found === undefined ? undefined : { revision: found.revision, body: found.body as unknown as LookBody };
+    return found === undefined ? undefined : { revision: found.revision, body: found.body as unknown as LookBody, createdAt: found.createdAt };
   }
 
   /**
@@ -120,6 +130,8 @@ export class AffectedWorkLook {
       const got = await this.read(adoptionId);
       if (got === undefined) return undefined;
       const look = got.body;
+      // A stopped look is over: it is not carried on and the owner's finish notice is not sent for it.
+      if (look.stopped !== undefined) return look;
       if (look.state === "done") {
         if (look.notified !== true) await this.#finish(ports, adoptionId, look, got.revision);
         return (await this.read(adoptionId))?.body;
@@ -130,23 +142,62 @@ export class AffectedWorkLook {
     return (await this.read(adoptionId))?.body;
   }
 
-  /** The dispatcher's tick: carries on at most `LOOK_LIMITS.perTick` looks of the pending list, from where the last sweep stopped. A look whose record is gone leaves the list. Writes nothing when none is pending. */
-  async sweep(): Promise<{ looked: number; failed: number }> {
+  /**
+   * The dispatcher's tick: carries on at most `LOOK_LIMITS.perTick` looks of the pending list, from where the last sweep stopped. A look whose record is gone leaves the list. Writes nothing when none is pending.
+   * A look whose attempt fails, and that began `LOOK_LIMITS.stopDays` or more ago, has failed for good: it is stopped (`stop`), so it gives up its place in the pending list, and the owner is told and can
+   * count it. A look that is old but whose attempt does not fail (a controller that was down a long time) is carried on as usual, never stopped.
+   */
+  async sweep(): Promise<{ looked: number; failed: number; stopped?: number }> {
     if (this.#ports === undefined) return { looked: 0, failed: 0 };
     const pending = pendingOf((await this.#runner.get(LOOKS_KIND, LOOKS_ID))?.body);
     if (pending.length === 0) return { looked: 0, failed: 0 };
     const from = this.#sweepFrom % pending.length;
     const take = [...pending.slice(from), ...pending.slice(0, from)].slice(0, LOOK_LIMITS.perTick);
     this.#sweepFrom = from + take.length;
-    let looked = 0; let failed = 0;
+    let looked = 0; let failed = 0; let stopped = 0;
     for (const id of take) {
       try {
-        if ((await this.read(id)) === undefined) await this.#unlist(id);
+        if (!LOOK_ID.test(id) || (await this.read(id)) === undefined) await this.#unlist(id);
         else await this.run(id);
         looked++;
-      } catch { failed++; }
+      } catch {
+        failed++;
+        try { if (await this.#stopIfOverdue(this.#ports, id)) stopped++; } catch { /* tried again at its next turn */ }
+      }
     }
-    return { looked, failed };
+    return { looked, failed, ...(stopped > 0 ? { stopped } : {}) };
+  }
+
+  /** Whether a look that began at `createdAt` (the stored record's own time, so a damaged body cannot hide its age) is past the limit at `now`. */
+  static overdue(createdAt: string, now: string): boolean {
+    const began = Date.parse(createdAt); const at = Date.parse(now);
+    return Number.isFinite(began) && Number.isFinite(at) && at - began >= LOOK_LIMITS.stopDays * DAY;
+  }
+
+  /**
+   * Stops a look that failed for good: one revision-guarded write marks it `stopped` and `partial` (what it found and told stays) and takes it out of the pending list. The owner is told first, once (the
+   * command ID is the adoption's); a notice that cannot be sent does not keep the look pending (that may be what kept failing), and the record says it was not sent. True when this call stopped it.
+   */
+  async #stopIfOverdue(ports: AdoptionLookPorts, id: string): Promise<boolean> {
+    const got = await this.read(id);
+    if (got === undefined || got.body.stopped !== undefined || !AffectedWorkLook.overdue(got.createdAt, this.#runner.now())) return false;
+    const look = got.body;
+    let told = true;
+    try { await ports.notify({ commandId: `adoption-look-stopped-${id}`, adoptionId: id, projectId: typeof look.projectId === "string" ? look.projectId : "", detail: stoppedText(look, id) }); } catch (error) { if (!(error instanceof DomainError && error.code === "command_conflict")) told = false; }
+    const at = this.#runner.now();
+    const next = { ...look, state: "done" as const, partial: true as const, doneAt: typeof look.doneAt === "string" ? look.doneAt : at, stopped: { at, told } };
+    await this.#runner.command("adoption.look.stop", { commandId: `adp-stop-${id}-${got.revision}`, actor: "controller" }, async () => ({
+      payload: { adoptionId: id, revision: got.revision },
+      build: async () => {
+        const now = await this.#runner.get(LOOK_KIND, id);
+        if (now === undefined || now.revision !== got.revision) throw new DomainError("stale_revision", `the look of ${id} moved on meanwhile`);
+        const changes: Change[] = [{ type: "update", ref: { kind: LOOK_KIND, id }, expectedRevision: got.revision, body: clean(next as unknown as LookBody) }];
+        const list = await this.#unlistChange(id);
+        if (list !== undefined) changes.push(list);
+        return { ref: { kind: LOOK_KIND, id }, creates: false, changes, detail: { adoptionId: id, told } };
+      },
+    }));
+    return true;
   }
 
   async #step(ports: AdoptionLookPorts, id: string, look: LookBody, revision: number): Promise<void> {
@@ -212,7 +263,9 @@ export class AffectedWorkLook {
 
   async #unlist(id: string): Promise<void> {
     if ((await this.#unlistChange(id)) === undefined) return;
-    await this.#runner.command("adoption.look.unlist", { commandId: `adp-unlist-${id}`, actor: "controller" }, async () => ({
+    // A pending entry that is not an adoption ID (a damaged list) is named by its hash: its own text may not make a command ID.
+    const key = LOOK_ID.test(id) ? id : `x${createHash("sha256").update(id).digest("hex").slice(0, 40)}`;
+    await this.#runner.command("adoption.look.unlist", { commandId: `adp-unlist-${key}`, actor: "controller" }, async () => ({
       payload: { adoptionId: id },
       build: async () => {
         const change = await this.#unlistChange(id);
@@ -270,12 +323,19 @@ export function noticeText(look: LookBody): string {
   return (base.length + ids.length <= 200 ? `${base}${ids}` : base).slice(0, 200);
 }
 
+/** The owner's notice that a look was stopped (at most the notification detail limit of 200 characters). Counts only, from a record that may be damaged. */
+export function stoppedText(look: Partial<LookBody>, adoptionId: string): string {
+  const told = typeof look.told === "number" && Number.isSafeInteger(look.told) && look.told >= 0 ? look.told : 0;
+  return `The look at the work that used withdrawn adoption ${adoptionId} kept failing for ${LOOK_LIMITS.stopDays} days and was stopped. ${told} task(s) were told before it stopped; others may not have been.`.slice(0, 200);
+}
+
 /** The status view's words for a withdrawn adoption's look (read-only, no prompt text). */
-export function affectedLine(look: Pick<LookBody, "state" | "scope" | "runs" | "tasks" | "untracked" | "partial" | "notified" | "told"> & { readonly counts?: Readonly<Record<AffectedState, number>> }): string {
-  if (look.scope === "not-recorded") return "Which tasks applied the practice is not recorded, so no task was found or told.";
+export function affectedLine(look: Pick<LookBody, "state" | "scope" | "runs" | "tasks" | "untracked" | "partial" | "notified" | "told" | "stopped"> & { readonly counts?: Readonly<Record<AffectedState, number>> }): string {
   // A viewer who may not read the project's run records gets the counts without the task IDs (`AdoptionService.affected`).
-  const counts = look.counts ?? affectedCounts(look.tasks);
+  const counts = look.counts ?? affectedCounts(look.tasks ?? {});
   const total = counts.paused + counts.open + counts.finished + counts.missing;
+  if (look.stopped !== undefined) return `The look at the work that ran this version kept failing for ${LOOK_LIMITS.stopDays} days and was stopped: ${total} task(s) found and ${typeof look.told === "number" ? look.told : 0} told before then; others may not have been.${look.stopped.told ? "" : " The owner's notice of this could not be sent."}`;
+  if (look.scope === "not-recorded") return "Which tasks applied the practice is not recorded, so no task was found or told.";
   if (look.state === "looking") return `The look at the work that ran this version is not finished yet (${look.runs} run(s) and ${total} task(s) found so far; it goes on at the next tick).`;
   const limit = look.partial === true || look.untracked > 0 ? " Not every run record was read or recorded (the look's limit), so there may be more." : "";
   return `Affected work, from the tool's run records: ${total} task(s) ran this version; ${counts.paused} paused and ${counts.open} open were told in their activity and keep the version, ${counts.finished + counts.missing} finished or gone were left as they are.${limit}${look.notified === true ? "" : " The owner has not been told yet."}`;

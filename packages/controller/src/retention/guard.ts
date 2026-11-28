@@ -93,7 +93,14 @@ export const isCriticalOperation = (input: Pick<OperationInput, "audit">): boole
 };
 
 /** What is metered: the kinds that hold written content, with where their project and writer are. Bytes are the canonical size of the body, plus an artifact's blob bytes. */
-interface Metered { readonly project: (b: Record<string, unknown>, scopes: ReadonlyMap<string, string>) => string | undefined; readonly agent: (b: Record<string, unknown>) => string | undefined; readonly bytes: (b: Record<string, unknown>) => number }
+interface Metered {
+  readonly project: (b: Record<string, unknown>, scopes: ReadonlyMap<string, string>) => string | undefined; readonly agent: (b: Record<string, unknown>) => string | undefined; readonly bytes: (b: Record<string, unknown>) => number;
+  /**
+   * Only a new record of this kind is held against a quota; a change to one that exists never is (card K06, kinds of cards B05 and B06). An adoption, experiment or request is asked for by an agent and is
+   * then decided, withdrawn or concluded by someone else, often to stop something (a regression's withdrawal): that must never be refused for room. Its bytes still count in the usage the status shows.
+   */
+  readonly createsOnly?: true;
+}
 const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
 const bodySize = (b: Record<string, unknown>): number => Buffer.byteLength(canonicalJson(b as never));
 export const METERED: Readonly<Record<string, Metered>> = {
@@ -104,6 +111,10 @@ export const METERED: Readonly<Record<string, Metered>> = {
   "history-entry": { project: (b, scopes) => (typeof b["scope"] === "string" ? scopes.get(b["scope"]) : undefined), agent: (b) => str(b["author"]), bytes: bodySize },
   "ctx-spill": { project: (b) => str(b["projectId"]), agent: () => undefined, bytes: bodySize },
   artifact: { project: (b) => str(b["projectId"]), agent: (b) => str(b["createdBy"]), bytes: (b) => bodySize(b) + (typeof b["totalBytes"] === "number" ? b["totalBytes"] : 0) },
+  // Card K06 for the records of cards B04, B05 and B06: each new one is written at an agent's request (a reader asking to adopt, a proposer, an agent asking to work on NimbleNewt's own code), so a quota bounds how many one asker or one project can make.
+  adoption: { project: (b) => str(b["projectId"]), agent: (b) => str(b["requestedBy"]), bytes: bodySize, createsOnly: true },
+  experiment: { project: (b) => str(b["projectId"]), agent: (b) => str(b["proposedBy"]), bytes: bodySize, createsOnly: true },
+  "owncode-request": { project: (b) => str(b["projectId"]), agent: (b) => str(b["requestedBy"]), bytes: bodySize, createsOnly: true },
 };
 
 export interface Usage { readonly byProject: ReadonlyMap<string, number>; readonly byAgent: ReadonlyMap<string, number>; readonly partial: boolean; readonly at: number }
@@ -180,8 +191,8 @@ export function addedBy(input: Pick<OperationInput, "changes">): { project: Map<
   for (const c of input.changes) if ((c.type === "create" || c.type === "update") && c.ref.kind === "history-scope") { const p = (c.body as { projectId?: unknown }).projectId; if (typeof p === "string") scopes.set(c.ref.id, p); }
   for (const c of input.changes) {
     if (c.type !== "create" && c.type !== "update") continue;
-    const meter = METERED[c.ref.kind];
-    if (meter === undefined) continue;
+    const meter = Object.hasOwn(METERED, c.ref.kind) ? METERED[c.ref.kind] : undefined;
+    if (meter === undefined || (meter.createsOnly === true && c.type !== "create")) continue;
     const b = c.body as Record<string, unknown>; const n = meter.bytes(b);
     const p = meter.project(b, scopes); const w = meter.agent(b);
     if (p !== undefined) project.set(p, (project.get(p) ?? 0) + n);
@@ -196,8 +207,8 @@ export async function netAdded(storage: Pick<ControllerStorage, "getAggregate">,
   const bump = (m: Map<string, number>, k: string | undefined, n: number): void => { if (k !== undefined) m.set(k, (m.get(k) ?? 0) + n); };
   for (const c of input.changes) {
     if (c.type !== "update" && c.type !== "delete") continue;
-    const meter = METERED[c.ref.kind];
-    if (meter === undefined) continue;
+    const meter = Object.hasOwn(METERED, c.ref.kind) ? METERED[c.ref.kind] : undefined;
+    if (meter === undefined || meter.createsOnly === true) continue;
     const old = await storage.getAggregate(c.ref);
     if (old === undefined) continue;
     const b = old.body as Record<string, unknown>; const n = meter.bytes(b);

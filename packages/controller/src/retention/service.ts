@@ -56,6 +56,13 @@ const BULK_LOGS = [
   { kind: "agent-message", label: "messages between agents", setting: "agentMessageDays" },
   { kind: "generation-run", label: "recorded model replies", setting: "generationRunDays" },
 ] as const;
+/** The kinds the status counts (bounded), so the owner sees what the rules work on and what only grows. The first group is older (cards K06d, K06e, K06c). */
+const GROWTH_KINDS = ["responsibility-check", "stall-concern", "responsibility-incident", "stall-evidence", "stall-speed", "responsibility-event", "responsibility-incident-slot", "ctx-note-archive", "notification-delivery", "agent-message", "generation-run", "thinking-record", "thinking-purge"] as const;
+/**
+ * Kinds added since by cards B04, B05, B06 and M05, counted by card K06 (no rule removes them yet): adoptions and experiments (an ended one leaves its project's list of 300 but is kept), their per-project
+ * indexes, the looks at affected work and their pending list, the requests to work on NimbleNewt's own code and their task links, settings and index, and the list of open owner inquiries.
+ */
+const RECENT_KINDS = ["adoption", "adoption-index", "experiment", "experiment-index", "adoption-look", "adoption-looks", "owncode-request", "owncode-task", "owncode-index", "owncode-settings", "meeting-floor-inquiries"] as const;
 /** How many of the kept backups the status names, newest first (card K06d); the count covers the rest. */
 const BACKUPS_LISTED = 10;
 export interface IncidentPort {
@@ -112,6 +119,8 @@ export interface RetentionDeps {
   readonly thinkingStores?: ThinkingStorePort;
   /** Tests only: a smaller bound for the read of the catalog versions that name source records. */
   readonly catalogScanLimit?: number;
+  /** Tests only: a smaller bound for the status's count of each kind (default SCAN_LIMIT); past it the count says `n+`. */
+  readonly growthScanLimit?: number;
   /** A test seam: called before each batch of removals. */
   readonly beforeBatch?: (batch: number) => Promise<void>;
   /** A test seam: runs inside the guarded archive of one desk record, before its last read of the catalog's source records (a tool registered in that gap keeps the record). */
@@ -331,19 +340,34 @@ export class RetentionService {
     let thinkingComplete = true;
     // The bulk logs (card K06e): how many records each holds and how much room they take (the size of each record's stored text), counted in the same pass.
     const bulk: Record<string, { records: number; bytes: number; partial: boolean }> = {};
-    for (const kind of ["responsibility-check", "stall-concern", "responsibility-incident", "stall-evidence", "stall-speed", "responsibility-event", "responsibility-incident-slot", "ctx-note-archive", "notification-delivery", "agent-message", "generation-run", "thinking-record", "thinking-purge"]) {
+    // The looks at affected work after a withdrawal (card B05, counted here by card K06): how many are stopped (failed for good, `LOOK_LIMITS.stopDays`), still looking, or done and not yet told to the owner.
+    const looks = { looking: 0, notTold: 0, stopped: 0 };
+    const lookTally = (a: Aggregate): void => {
+      const b = a.body as { state?: unknown; notified?: unknown; stopped?: unknown };
+      if (typeof b.stopped === "object" && b.stopped !== null) looks.stopped += 1;
+      else if (b.state === "looking") looks.looking += 1;
+      else if (b.notified !== true) looks.notTold += 1;
+    };
+    let looksComplete = true;
+    for (const kind of [...GROWTH_KINDS, ...RECENT_KINDS]) {
       let n = 0; let bytes = 0; const extra = tally[kind]; const isBulk = BULK_LOGS.some((l) => l.kind === kind);
-      const complete = await scan(this.#runner, kind, (a) => { n += 1; extra?.(a); if (isBulk) bytes += Buffer.byteLength(JSON.stringify(a.body), "utf8"); });
+      const complete = await scan(this.#runner, kind, (a) => { n += 1; extra?.(a); if (kind === "adoption-look") lookTally(a); if (isBulk) bytes += Buffer.byteLength(JSON.stringify(a.body), "utf8"); }, this.#deps.growthScanLimit);
       growth[kind] = complete ? n : `${n}+`;
       if (isBulk) bulk[kind] = { records: n, bytes, partial: !complete };
       if (extra !== undefined && !complete) thinkingComplete = false;
+      if (kind === "adoption-look" && !complete) looksComplete = false;
     }
+    // The pending list holds at most LOOK_LIMITS.pending IDs; a damaged list (not an array) counts as empty here, as the sweep reads it.
+    const pendingBody = (await this.#runner.get("adoption-looks", "installation"))?.body as { pending?: unknown } | undefined;
+    const pendingLooks = Array.isArray(pendingBody?.pending) ? pendingBody.pending.filter((x) => typeof x === "string").length : 0;
+    const adoptionLooks = { pending: pendingLooks, ...looks, ...(looksComplete ? {} : { partial: true }) };
     const bulkLogs = BULK_LOGS.map((l) => ({ kind: l.kind, label: l.label, setting: l.setting, days: values[l.setting as keyof RetentionValues] as number | null, ...bulk[l.kind]! }));
     const thinking = { days: values.thinkingDays, auto: values.thinkingAuto, storesReached: this.#deps.thinkingStores !== undefined, copiesKept: kept, copiesRemoved: removed, tasksCleaned, storesCleaned, storesWithout, blocksRemoved, ...(thinkingComplete ? {} : { partial: true }) };
     return {
       values: values as unknown as JsonObject,
       thinking: thinking as unknown as JsonObject,
       growth: growth as unknown as JsonObject,
+      adoptionLooks: adoptionLooks as unknown as JsonObject,
       bulkLogs: bulkLogs as unknown as JsonObject[],
       disk: { ...(space === undefined ? {} : { freeBytes: space.freeBytes, totalBytes: space.totalBytes }), reserve: { wantedBytes: reserve?.wanted ?? 0, inUse: reserve?.released ?? false, short: reserve?.short ?? false, ...(reserve?.releasedAt === undefined ? {} : { usedAt: reserve.releasedAt }) } },
       quotas: quotas as unknown as JsonObject[], quotaUsagePartial: partial, warnings,
@@ -1440,5 +1464,5 @@ export class RetentionService {
 }
 
 /** The kinds in an export, in order. Secret-bearing kinds are absent by design. */
-export const EXPORT_KINDS = ["project", "task", "desk-record", "summary-record", "artifact", "retention-archive", "responsibility-check", "stall-concern", "responsibility-incident"] as const;
+export const EXPORT_KINDS = ["project", "task", "desk-record", "summary-record", "artifact", "retention-archive", "responsibility-check", "stall-concern", "responsibility-incident", "adoption", "experiment", "adoption-look", "owncode-request"] as const;
 const archiveIdOf = (recordId: string): string => `arc-${recordId}`;

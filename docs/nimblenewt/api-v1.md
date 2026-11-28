@@ -1682,7 +1682,7 @@ Result: `{ item }`.
 
 #### `adoption.affected`
 
-The look at the work that used a withdrawn adoption (card B05): for a tool, the tasks that ran exactly the withdrawn version (from the catalog's run records), each as paused, open, finished or missing when first seen; unfinished ones were told in their activity and keep the version, finished ones are left as they are. A practice's use by tasks is not recorded, so its look finds none. `state` is looking or done; `partial` when the page limit was reached; `counts` per state. The same readers as adoption.get; the task IDs only for the owner or history.read in the project (the right that reads the run records), anyone else gets the counts with `tasksHidden`.
+The look at the work that used a withdrawn adoption (card B05): for a tool, the tasks that ran exactly the withdrawn version (from the catalog's run records), each as paused, open, finished or missing when first seen; unfinished ones were told in their activity and keep the version, finished ones are left as they are. A practice's use by tasks is not recorded, so its look finds none. `state` is looking or done; `partial` when the page limit was reached; `stopped` (`at`, `told`: whether the owner's notice went out) when the look kept failing for 14 days after it began and was stopped (also `partial`; what it found and told stays); `counts` per state. The same readers as adoption.get; the task IDs only for the owner or history.read in the project (the right that reads the run records), anyone else gets the counts with `tasksHidden`.
 
 Arguments:
 
@@ -2729,7 +2729,7 @@ Result: `{ item: { revision, settings, defaults, effective } }`.
 
 #### `retention.status`
 
-Owner only: the retention state: values in force, the data disk and the reserve for shutdown and recovery records, quota use with warnings, the backup counts and the newest ten backups kept (`backups.recent`: name, time, trusted), the stored model thinking rule with counts of kept and removed copies and cleaned conversation stores (`thinking`, counts only; `partial` when counting was cut short) and the latest deletions.
+Owner only: the retention state: values in force, the data disk and the reserve for shutdown and recovery records, quota use with warnings, the backup counts and the newest ten backups kept (`backups.recent`: name, time, trusted), the stored model thinking rule with counts of kept and removed copies and cleaned conversation stores (`thinking`, counts only; `partial` when counting was cut short), bounded counts of the records that only grow (`growth`, `n+` when cut short; it includes adoptions, experiments, their indexes, the looks at affected work, the own-code requests and the list of open owner inquiries), the looks at affected work (`adoptionLooks`: pending, looking, done but not yet told, stopped after failing for 14 days) and the latest deletions.
 
 Arguments:
 
@@ -2750,7 +2750,7 @@ Result: `{ kind, id, retained, reasons }`.
 
 #### `retention.export`
 
-Owner only: an export of a project's records (project, tasks, desk records, summaries, artifact metadata, archived originals, responsibility checks, stall concerns and responsibility incidents) in pages. Secrets are excluded: secret-named fields are replaced, key-shaped text is masked, and credential records are not exported.
+Owner only: an export of a project's records (project, tasks, desk records, summaries, artifact metadata, archived originals, responsibility checks, stall concerns, responsibility incidents, adoptions, experiments, the looks at affected work and the own-code requests approved into it) in pages. Secrets are excluded: secret-named fields are replaced, key-shaped text is masked, and credential records are not exported.
 
 Arguments:
 
