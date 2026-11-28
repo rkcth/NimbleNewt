@@ -122,6 +122,11 @@ test("the woken integrator's attempt reaches its own project's lease and landing
     await call(O, "integrator.lease.release", { projectId: garden, branch: "main" }, "rel-lease");
     const now = (await s.assignments.getAssignment(landingTask))!;
     await s.assignments.releaseTask({ commandId: "rel-1", actor: rob.id, taskId: landingTask, expectedRevision: now.revision, reason: "the owner's choice" } as never);
+    // Card P10b, fifth slice: each charge's task was fixed at its first try (one pin per charge: the review's and the stop's), so the review charge made again under its command ID after the release still names
+    // the queued work's task and settles as the same charge (no second entry, nothing kept to retry), though the landing task is no longer the integrator's.
+    assert.equal((await c.storage.listAggregates("landing-charge-pin", { limit: 10 })).length, 2);
+    await c.dispatch.chargeUse({ commandId: "rv-1", activity: "review", taskId: landingTask, agentId: `agent:${ivy}`, computeMs: 25 });
+    assert.deepEqual([(await call(O, "budget.usage", { taskId: beans })).result.item.byActivity["review"]?.computeMs, (await c.storage.listAggregates("charge-retry", { limit: 10 })).length], [25, 0]);
     const view = await call(O, "status.ask", { request: { kind: "landing_queue", projectId: garden } });
     const text = (view.result.item.lines as { text: string }[]).map((l) => l.text).join("\n");
     assert.match(text, new RegExp(`landing task ${landingTask}, but that task was released and is assigned to nobody now`), text);

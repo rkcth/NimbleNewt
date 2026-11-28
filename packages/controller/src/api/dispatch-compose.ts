@@ -266,6 +266,8 @@ export interface ComposeInput {
   readonly landingOf?: DispatcherDeps["landingOf"];
   /** Card P10b: the task a cost of a task is charged to after the fact (a landing task's: the queued work's own task, `IntegratorWake.chargeTaskOf`), for review and background-job compute and the continuation's budget line. Absent: the task itself. */
   readonly chargeTaskOf?: (taskId: string) => Promise<string>;
+  /** Card P10b: `chargeTaskOf` fixed per charge command at its first try (`IntegratorWake.chargeTaskFor`), so a charge made again names the same task. Absent: `chargeTaskOf`. */
+  readonly chargeTaskFor?: (commandId: string, taskId: string) => Promise<string>;
   /** Called once everything is built and nothing is running yet, right before the driver starts (card F04e notes the first-start counters here). */
   readonly beforeLoops?: () => Promise<void>;
   /** Told once per window when the owner's aggregate spending cap refuses a reservation or stops paid calls (the same function the API's own budget service uses). */
@@ -991,7 +993,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       attemptControl: { live: (taskId) => dispatcher.liveAttemptsOf(principal, { taskId }), frozenReason: async (id) => (await dispatcher.get(principal, id))?.frozen?.reason, release: (id) => dispatcher.release(principal, id), tell: (id, text) => dispatcher.tell(principal, id, text), stop: (id, reason) => dispatcher.stop(principal, id, { reason }) },
       attendance, standups, watches,
       unsettledCharges: (by) => chargeRetry.unsettled(by),
-      chargeUse: async (u) => chargeRetry.submit(principal, { commandId: u.commandId, activity: u.activity, taskId: (await i.chargeTaskOf?.(u.taskId)) ?? u.taskId, computeMs: u.computeMs, ...(u.agentId === undefined ? {} : { agentId: u.agentId }) }).then(() => undefined),
+      chargeUse: async (u) => chargeRetry.submit(principal, { commandId: u.commandId, activity: u.activity, taskId: (await (i.chargeTaskFor !== undefined ? i.chargeTaskFor(u.commandId, u.taskId) : i.chargeTaskOf?.(u.taskId))) ?? u.taskId, computeMs: u.computeMs, ...(u.agentId === undefined ? {} : { agentId: u.agentId }) }).then(() => undefined),
       // An outside server's text is framed as data on every page, with the injection check over the page itself (the visible head was checked when it was cut).
       readSpill: async (by, spillId, index, size) => {
         const found = await context.readSpill(by, spillId, index, size);

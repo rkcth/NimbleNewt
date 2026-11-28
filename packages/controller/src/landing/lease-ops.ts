@@ -88,7 +88,8 @@ export class IntegratorLeaseOps {
         if (ended !== undefined) await this.#told(by, current, "retired");
       }
     }
-    return this.#leases.acquire({ commandId: acquireId, projectId, branch: command.branch, holder, taskId, ttlMs: command.ttlMs });
+    // A landing task's own credential (the only task credential that gets this far) marks its take, so the wake can tell that hold from one the integrator took or renewed on its own credential (card P10b).
+    return this.#leases.acquire({ commandId: acquireId, projectId, branch: command.branch, holder, taskId, ttlMs: command.ttlMs, ...(by.taskScope === undefined ? {} : { landingTask: by.taskScope.taskId }) });
   }
 
   /** Extends the hold. Only the holder, with its current fence. */
@@ -97,7 +98,7 @@ export class IntegratorLeaseOps {
     const found = await this.#named(by, command);
     const holder = holderOf(by);
     if (holder === undefined || holder !== found.holder) throw new DomainError("fenced", `lease ${found.leaseId} is not held by ${by.id}`);
-    return this.#leases.renew({ commandId: scopedCommandId(takeKeyOf(by), command.commandId), leaseId: found.leaseId, fence: command.fence, holder });
+    return this.#leases.renew({ commandId: scopedCommandId(takeKeyOf(by), command.commandId), leaseId: found.leaseId, fence: command.fence, holder, ...(by.taskScope === undefined ? {} : { landingTask: by.taskScope.taskId }) });
   }
 
   /** Lets the lease go. The holder names its fence; the owner may name the lease by project and branch and omit the fence (it ends whoever holds it now). */
