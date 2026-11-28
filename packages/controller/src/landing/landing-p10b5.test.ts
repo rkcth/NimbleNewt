@@ -331,4 +331,97 @@ for (const backend of backends) {
       assert.deepEqual([z, await r.wake.chargeTaskOf(tA), await r.wake.chargeTaskFor("stopcl-6", tA)], [frontA, tA, frontA]);
     } finally { await r.close(); }
   });
+
+  test(`${backend.name}: first review: a hold whose mark was dropped by an own-credential renew in the same millisecond (the expiry unchanged) is not given back; a release names the mark it expects (card P10b)`, async () => {
+    const r = await rig();
+    try {
+      const [a, b] = [await r.project("Apple"), await r.project("Birch")];
+      const [frontA, frontB] = [await r.queued(a), await r.queued(b)];
+      const ivy = await r.person("ivy", integrates([a]));
+      const max = await r.person("max", integrates([b]));
+      const one = await r.wake.round();
+      const [tA, tB] = [one.woken.find((x) => x.projectId === a)!.taskId, one.woken.find((x) => x.projectId === b)!.taskId];
+      const cA = (await r.credential(tA, "ivy")).as, cB = (await r.credential(tB, "max")).as;
+      const lA = await r.leaseOps.acquire(cA, { commandId: "take", taskId: frontA, branch: "main", ttlMs: 30 * MIN });
+      const lB = await r.leaseOps.acquire(cB, { commandId: "take", taskId: frontB, branch: "main", ttlMs: 30 * MIN });
+      // Apple, the done give-back; Birch, the landed end. Each integrator renews on its own credential right after the round read the leases, with the clock not moved: the expiry stays exactly as read, the mark goes.
+      await r.finish(tA);
+      await r.queue.remove({ commandId: "landed-b", actor: "controller", projectId: b, branch: "main", taskId: frontB, reason: "landed" });
+      let renewed = false;
+      const racing = r.wakeWith({
+        liveLeases: async () => {
+          const seen = await r.leases.liveLeases();
+          if (!renewed) {
+            renewed = true;
+            const ra = await r.leaseOps.renew(ivy, { commandId: "own-a", leaseId: lA.leaseId, fence: lA.fence });
+            const rb = await r.leaseOps.renew(max, { commandId: "own-b", leaseId: lB.leaseId, fence: lB.fence });
+            assert.deepEqual([ra.expiresAt, ra.landingTask, rb.expiresAt, rb.landingTask], [lA.expiresAt, undefined, lB.expiresAt, undefined], "same expiry, mark dropped");
+          }
+          return seen;
+        },
+      });
+      const two = await racing.round();
+      assert.deepEqual([two.freed, two.ended?.map((x) => [x.taskId, x.lease])], [undefined, [[tB, undefined]]], JSON.stringify(two));
+      const [nowA, nowB] = [(await r.leaseOf(a))!, (await r.leaseOf(b))!];
+      assert.deepEqual([nowA.live, nowA.holder, nowB.live, nowB.holder], [true, "ivy", true, "max"], "both own holds are left to their holders");
+      // And later rounds leave them too (unmarked now).
+      assert.equal((await r.wake.round()).freed, undefined);
+      // The lease service's own rule: a release naming a mark the hold does not carry is refused `fenced`; a bad mark is refused as a bad command.
+      await refuses("fenced", () => r.leases.release({ commandId: "rel-m", leaseId: lA.leaseId, fence: lA.fence, expiresAt: nowA.expiresAt, landingTask: tA }), /no longer the take of landing task/);
+      await refuses("invalid_command", () => r.leases.release({ commandId: "rel-bad", leaseId: lA.leaseId, fence: lA.fence, landingTask: "../x" }));
+      assert.equal((await r.leaseOf(a))!.live, true);
+    } finally { await r.close(); }
+  });
+
+  test(`${backend.name}: first review: a done landing task's hold is left alone when its landing record names another branch or project, or the task is of another project (card P10b)`, async () => {
+    const r = await rig();
+    try {
+      const ps = [await r.project("Gum"), await r.project("Hazel"), await r.project("Iris")];
+      const fronts: string[] = [];
+      for (const p of ps) fronts.push(await r.queued(p));
+      const agents = ["gil", "hal", "ida"];
+      for (let i = 0; i < 3; i++) await r.person(agents[i]!, integrates([ps[i]!]));
+      const woken = (await r.wake.round()).woken;
+      const task = (i: number): string => woken.find((x) => x.projectId === ps[i])!.taskId;
+      for (let i = 0; i < 3; i++) {
+        const c = (await r.credential(task(i), agents[i]!)).as;
+        await r.leaseOps.acquire(c, { commandId: "take", taskId: fronts[i]!, branch: "main", ttlMs: 30 * MIN });
+        await r.finish(task(i));
+      }
+      // Gum: the record is sound but of another branch; Hazel: of another project (Iris); Iris: the task's own record names Gum's project. Each read is sound, and none is this hold's.
+      const link = async (i: number) => (await r.w.storage.getAggregate({ kind: LANDING_TASK_KIND, id: task(i) }))!.body as Record<string, unknown>;
+      await r.raw(LANDING_TASK_KIND, task(0), { ...(await link(0)), branch: "other", wakeId: IntegratorWake.wakeIdOf(ps[0]!, "other") });
+      await r.raw(LANDING_TASK_KIND, task(1), { ...(await link(1)), projectId: ps[2], wakeId: IntegratorWake.wakeIdOf(ps[2]!, "main") });
+      const t2 = (await r.w.storage.getAggregate({ kind: "task", id: task(2) }))!;
+      await r.raw("task", task(2), { ...(t2.body as object), projectId: ps[0] });
+      r.w.clock.advance(MIN);
+      const round = await r.wake.round();
+      assert.equal(round.freed, undefined, JSON.stringify(round));
+      for (const p of ps) assert.equal((await r.leaseOf(p))!.live, true, p);
+    } finally { await r.close(); }
+  });
+
+  test(`${backend.name}: first review: a wake half made with the task text of before this slice is finished as the same task, not refused at every round (card P10b)`, async () => {
+    const r = await rig();
+    try {
+      const a = await r.project("Apple");
+      await r.queued(a);
+      await r.person("ivy", integrates([a]));
+      // The round that stopped between the task and its records under the earlier code: its task, made under the wake's derived command ID with the earlier text.
+      const wakeId = IntegratorWake.wakeIdOf(a, "main");
+      const oldText = "The controller woke an integrator to land the approved work in the landing queue of branch main. Take the branch's integrator lease, land the queue's first place, and finish this task when the queue is landed or nothing more can land now.";
+      const half = (await r.w.projects.createTask({ commandId: `iwk:${wakeId.slice(4)}:1:task`, actor: "service:integrator-wake", projectId: a, title: "Land the approved work queued on main", description: oldText })).id;
+      const round = await r.wake.round();
+      assert.deepEqual([round.woken.map((x) => x.taskId), round.unreadable], [[half], 0], JSON.stringify(round));
+      assert.equal((await r.w.projects.getTask(half))!.description, oldText);
+      assert.equal((await r.w.assignments.getAssignment(half))?.owner?.id, "ivy");
+      // Any other conflict under that command ID is still refused (counted unreadable), never taken as the wake's task.
+      const b = await r.project("Birch");
+      await r.queued(b);
+      await r.person("max", integrates([b]));
+      await r.w.projects.createTask({ commandId: `iwk:${IntegratorWake.wakeIdOf(b, "main").slice(4)}:1:task`, actor: "service:integrator-wake", projectId: b, title: "something else" });
+      const other = await r.wake.round();
+      assert.deepEqual([other.woken.filter((x) => x.projectId === b), other.unreadable], [[], 1], JSON.stringify(other));
+    } finally { await r.close(); }
+  });
 }

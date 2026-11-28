@@ -127,12 +127,16 @@ export class IntegratorLeaseService {
    * `expiresAt` (card P10b, the wake's release of an idle hold): when given, only a hold that still runs to exactly that time is released. A renew keeps the fence, so the fence alone does not tell a hold renewed
    * after the caller read it; this does, and such a hold is refused `fenced` and left as it is.
    */
-  async release(command: { commandId: string; leaseId: string; fence: number; note?: string; expiresAt?: string }): Promise<IntegratorLease> {
+  async release(command: { commandId: string; leaseId: string; fence: number; note?: string; expiresAt?: string; landingTask?: string }): Promise<IntegratorLease> {
     const note = command.note === undefined ? undefined : text(command.note, "note", { min: 1, max: LEASE_LIMITS.note });
     const until = command.expiresAt === undefined ? undefined : text(command.expiresAt, "expiresAt", { min: 1, max: 40 });
-    await this.#change("lease.release", command.commandId, command.leaseId, { fence: command.fence, ...(note === undefined ? {} : { note }), ...(until === undefined ? {} : { expiresAt: until }) }, (b) => {
+    // `landingTask` (card P10b, first review): when given, only a hold that still carries exactly that mark is released. A renew on the holder's own credential in the same millisecond as the hold's last
+    // expiry was computed (or after the clock stepped back) leaves `expiresAt` equal but drops the mark; such a hold is the holder's own and is refused `fenced`.
+    const mark = command.landingTask === undefined ? undefined : checkTaskId(command.landingTask);
+    await this.#change("lease.release", command.commandId, command.leaseId, { fence: command.fence, ...(note === undefined ? {} : { note }), ...(until === undefined ? {} : { expiresAt: until }), ...(mark === undefined ? {} : { landingTask: mark }) }, (b) => {
       if (b.fence !== command.fence || b.state !== "held") throw fenced(`lease ${command.leaseId} is not held with fence ${command.fence}`);
       if (until !== undefined && b.expiresAt !== until) throw fenced(`lease ${command.leaseId} was renewed after it was read (it now runs to ${b.expiresAt}); it is left as it is`);
+      if (mark !== undefined && b.landingTask !== mark) throw fenced(`lease ${command.leaseId} is no longer the take of landing task ${mark}; it is left as it is`);
       return { ...b, state: "released", releasedAt: this.#runner.now(), ...(note === undefined ? {} : { note }) };
     });
     return (await this.get(command.leaseId))!;

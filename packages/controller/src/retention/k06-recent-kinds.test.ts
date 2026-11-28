@@ -178,6 +178,8 @@ for (const backend of backends) {
     assert.deepEqual(st.adoptionLooks, { pending: 0, looking: 0, notTold: 0, stopped: 2 });
     assert.deepEqual([st.growth["adoption"], st.growth["adoption-look"], st.growth["adoption-looks"], st.growth["experiment"], st.growth["adoption-index"], st.growth["experiment-index"]], [3, 3, 1, 3, 1, 1]);
     for (const k of ["owncode-request", "owncode-task", "owncode-index", "owncode-settings", "meeting-floor-inquiries"]) assert.equal(st.growth[k], 0, k);
+    // Card P10b's kinds (first review of its fifth slice): counted too, none here.
+    for (const k of ["integrator-wake", "landing-task", "landing-charge-pin"]) assert.equal(st.growth[k], 0, k);
   });
 
   suite("the stop notice cannot be sent: the look is stopped anyway (it never holds its place for good) and says so; a notice given before counts as told; the status counts each state", async (c) => {

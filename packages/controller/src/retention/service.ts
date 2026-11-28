@@ -63,6 +63,11 @@ const GROWTH_KINDS = ["responsibility-check", "stall-concern", "responsibility-i
  * indexes, the looks at affected work and their pending list, the requests to work on NimbleNewt's own code and their task links, settings and index, and the list of open owner inquiries.
  */
 const RECENT_KINDS = ["adoption", "adoption-index", "experiment", "experiment-index", "adoption-look", "adoption-looks", "owncode-request", "owncode-task", "owncode-index", "owncode-settings", "meeting-floor-inquiries"] as const;
+/**
+ * Kinds card P10b added (no rule removes them): a landing branch's wake record (one per project and branch), a woken landing task's record (one per wake made) and a landing charge's pin of its budget task (one per
+ * charge of a landing task, kept for good). Named here as text (`landing/integrator-wake.ts` owns them), so retention takes no import from the landing package.
+ */
+const LANDING_KINDS = ["integrator-wake", "landing-task", "landing-charge-pin"] as const;
 /** How many of the kept backups the status names, newest first (card K06d); the count covers the rest. */
 const BACKUPS_LISTED = 10;
 export interface IncidentPort {
@@ -349,7 +354,7 @@ export class RetentionService {
       else if (b.notified !== true) looks.notTold += 1;
     };
     let looksComplete = true;
-    for (const kind of [...GROWTH_KINDS, ...RECENT_KINDS]) {
+    for (const kind of [...GROWTH_KINDS, ...RECENT_KINDS, ...LANDING_KINDS]) {
       let n = 0; let bytes = 0; const extra = tally[kind]; const isBulk = BULK_LOGS.some((l) => l.kind === kind);
       const complete = await scan(this.#runner, kind, (a) => { n += 1; extra?.(a); if (kind === "adoption-look") lookTally(a); if (isBulk) bytes += Buffer.byteLength(JSON.stringify(a.body), "utf8"); }, this.#deps.growthScanLimit);
       growth[kind] = complete ? n : `${n}+`;

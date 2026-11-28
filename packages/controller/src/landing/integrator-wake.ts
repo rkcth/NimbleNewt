@@ -280,7 +280,7 @@ export class IntegratorWake {
           // read (a hold that changed since is left alone), and the branch's next work is not kept waiting until the hold runs out (up to a day). Best effort: a refusal leaves the hold to run out as before.
           // Only a hold this landing task's own credential took and that was not renewed on another credential since (its mark, see `IntegratorLeaseBody.landingTask`): a hold the integrator took or renewed on its own
           // credential is its own business and is left to it.
-          const freed = why === "landed" && lease !== undefined && lease.holder === w.agentId && lease.landingTask === w.taskId && (await this.#free(`iwk-free:${w.taskId}:${lease.fence}:${hash(lease.expiresAt).slice(0, 8)}`, lease, "the landing task it was woken for ended: its work is no longer queued"));
+          const freed = why === "landed" && lease !== undefined && lease.holder === w.agentId && lease.landingTask === w.taskId && (await this.#free(`iwk-free:${w.taskId}:${lease.fence}:${hash(lease.expiresAt).slice(0, 8)}`, lease, "the landing task it was woken for ended: its work is no longer queued", w.taskId));
           ended.push({ projectId: w.projectId, branch: w.branch, taskId: w.taskId, why, ...(freed ? { lease: "released" as const } : {}) });
           openOn.delete(`${w.projectId}\0${w.branch}`);
         }
@@ -300,7 +300,7 @@ export class IntegratorWake {
       if (looks >= INTEGRATOR_WAKE_LIMITS.policyReads) { stopped = true; break; }
       looks++;
       try {
-        if (await this.#doneIdle(l.landingTask, l) && (await this.#free(`iwk-done:${l.landingTask}:${l.fence}:${hash(l.expiresAt).slice(0, 8)}`, l, "the landing task it was taken for is done"))) freedOut.push({ projectId: l.projectId, branch: l.branch, taskId: l.landingTask, agentId: l.holder });
+        if (await this.#doneIdle(l.landingTask, l) && (await this.#free(`iwk-done:${l.landingTask}:${l.fence}:${hash(l.expiresAt).slice(0, 8)}`, l, "the landing task it was taken for is done", l.landingTask))) freedOut.push({ projectId: l.projectId, branch: l.branch, taskId: l.landingTask, agentId: l.holder });
       } catch (error) {
         if (!(error instanceof DomainError)) throw error;
         unreadable++;
@@ -359,7 +359,7 @@ export class IntegratorWake {
 
   /** Whether a live hold marked with `taskId` is that done landing task's idle hold (see `round`). Fail closed: anything not provably so is false; a damaged landing record is thrown (`integrity`). */
   async #doneIdle(taskId: string, lease: { readonly projectId: string; readonly branch: string; readonly holder: string }): Promise<boolean> {
-    if (!ID.test(taskId)) return false;
+    if (typeof taskId !== "string" || !ID.test(taskId)) return false;
     const found = await this.#runner.get(LANDING_TASK_KIND, taskId);
     if (found === undefined) return false;
     const b = found.body as Partial<LandingTaskBody> | null;
@@ -375,10 +375,11 @@ export class IntegratorWake {
    * Gives back an idle hold (see `round`): true when released. The command ID derives from the task, the fence and the expiry read, so a repeat of the same look is the same command and a look at a renewed hold is a new one. Released only while the hold is still the fence and the expiry the
    * round read (`expiresAt`: a hold renewed since is refused). A domain refusal (the hold changed hands or was renewed) is false.
    */
-  async #free(commandId: string, lease: { readonly leaseId: string; readonly fence: number; readonly expiresAt: string }, note: string): Promise<boolean> {
+  async #free(commandId: string, lease: { readonly leaseId: string; readonly fence: number; readonly expiresAt: string }, note: string, landingTask: string): Promise<boolean> {
     if (this.#deps.leases.release === undefined) return false;
     try {
-      await this.#deps.leases.release({ commandId, leaseId: lease.leaseId, fence: lease.fence, expiresAt: lease.expiresAt, note });
+      // The mark is checked again in the release's own write: a hold whose mark was dropped since (an own-credential renew that left the expiry equal) is refused.
+      await this.#deps.leases.release({ commandId, leaseId: lease.leaseId, fence: lease.fence, expiresAt: lease.expiresAt, landingTask, note });
       return true;
     } catch (error) { if (error instanceof DomainError) return false; throw error; }
   }
@@ -421,10 +422,16 @@ export class IntegratorWake {
   async #wake(w: { wakeId: string; before: { revision: number } | undefined; prev: IntegratorWakeBody | undefined; projectId: string; branch: string; frontTaskId: string; frontWakes: number; agentId: string }): Promise<{ taskId: string; agentId: string }> {
     const wakes = (w.prev?.wakes ?? 0) + 1;
     const base = `iwk:${w.wakeId.slice(4)}:${wakes}`;
-    const taskId = (await this.#deps.projects.createTask({
-      commandId: `${base}:task`, actor: WAKE_ACTOR, projectId: w.projectId, title: `Land the approved work queued on ${w.branch}`.slice(0, 150),
-      description: `The controller woke an integrator to land the approved work in the landing queue of branch ${w.branch}. Take the branch's integrator lease and land the queue's first place. When the queue is landed or nothing more can land now, release the lease first and then finish this task.`.slice(0, 2000),
-    })).id;
+    const made = (description: string) => this.#deps.projects.createTask({ commandId: `${base}:task`, actor: WAKE_ACTOR, projectId: w.projectId, title: `Land the approved work queued on ${w.branch}`.slice(0, 150), description: description.slice(0, 2000) });
+    let taskId: string;
+    try {
+      taskId = (await made(`The controller woke an integrator to land the approved work in the landing queue of branch ${w.branch}. Take the branch's integrator lease and land the queue's first place. When the queue is landed or nothing more can land now, release the lease first and then finish this task.`)).id;
+    } catch (error) {
+      // A wake half made before the fifth slice (its task made with the earlier text, the round stopped before the records) is repeated with that text, so it is the same command and names the same task. The
+      // command ID stays the same until the records are written, so without this the branch would meet `command_conflict` at every round and never be woken for again.
+      if (!(error instanceof DomainError) || error.code !== "command_conflict") throw error;
+      taskId = (await made(`The controller woke an integrator to land the approved work in the landing queue of branch ${w.branch}. Take the branch's integrator lease, land the queue's first place, and finish this task when the queue is landed or nothing more can land now.`)).id;
+    }
     const task = await this.#deps.projects.getTask(taskId);
     if (task === undefined) throw new DomainError("not_found", `landing task ${taskId} is missing`);
     if (task.state === "proposed") await this.#deps.projects.transitionTask({ commandId: `${base}:ready`, actor: WAKE_ACTOR, taskId, expectedRevision: task.revision, to: "ready" });

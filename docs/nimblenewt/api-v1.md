@@ -2729,7 +2729,7 @@ Result: `{ item: { revision, settings, defaults, effective } }`.
 
 #### `retention.status`
 
-Owner only: the retention state: values in force, the data disk and the reserve for shutdown and recovery records, quota use with warnings, the backup counts and the newest ten backups kept (`backups.recent`: name, time, trusted), the stored model thinking rule with counts of kept and removed copies and cleaned conversation stores (`thinking`, counts only; `partial` when counting was cut short), bounded counts of the records that only grow (`growth`, `n+` when cut short; it includes adoptions, experiments, their indexes, the looks at affected work, the own-code requests and the list of open owner inquiries), the looks at affected work (`adoptionLooks`: pending, looking, done but not yet told, stopped after failing for 14 days) and the latest deletions.
+Owner only: the retention state: values in force, the data disk and the reserve for shutdown and recovery records, quota use with warnings, the backup counts and the newest ten backups kept (`backups.recent`: name, time, trusted), the stored model thinking rule with counts of kept and removed copies and cleaned conversation stores (`thinking`, counts only; `partial` when counting was cut short), bounded counts of the records that only grow (`growth`, `n+` when cut short; it includes adoptions, experiments, their indexes, the looks at affected work, the own-code requests, the list of open owner inquiries, and the landing wakes, landing tasks and landing charge pins), the looks at affected work (`adoptionLooks`: pending, looking, done but not yet told, stopped after failing for 14 days) and the latest deletions.
 
 Arguments:
 
