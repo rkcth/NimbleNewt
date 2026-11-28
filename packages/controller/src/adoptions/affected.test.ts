@@ -9,6 +9,7 @@ import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { EnvironmentService } from "../environments/index.js";
 import { ExperimentService } from "../experiments/index.js";
+import { NotificationService } from "../notifications/index.js";
 import { PrincipalService, type Grant, type Principal } from "../security/index.js";
 import { StatusService } from "../status/index.js";
 import type { ControllerStorage, OperationInput } from "../storage/types.js";
@@ -177,6 +178,9 @@ for (const backend of backends) {
     const [stepPaused] = await c.steps(tPaused);
     assert.match(stepPaused!, new RegExp(`Adoption ${t1} of tool toolbox\\.fetch 1\\.0\\.0 in this project was withdrawn \\(by a decision\\).*ran that version and is paused; it keeps it`));
     assert.equal((await c.steps(tOpen)).length, 1);
+    // The open task is not told it is paused (second review).
+    assert.equal((await c.steps(tOpen))[0], tellText(look, "open"));
+    assert.doesNotMatch((await c.steps(tOpen))[0]!, /is paused/);
     assert.deepEqual([(await c.steps(tDone)).length, (await c.steps(tGone)).length, (await c.steps(tOther)).length, (await c.steps(tElse)).length, (await c.steps(tForeign)).length], [0, 0, 0, 0, 0]);
     assert.equal(JSON.stringify(await c.projects.getTask(tDone)), doneBefore, "a finished task is left exactly as it was");
     assert.equal(JSON.stringify(await c.projects.getTask(tGone)), goneBefore);
@@ -222,6 +226,8 @@ for (const backend of backends) {
     assert.deepEqual(await c.make({ looks: noNotice }).sweepAffected(), { looked: 0, failed: 1 });
     const done = (await c.make().affected(c.owner, t1))!;
     assert.deepEqual([done.state, done.notified, done.runs, Object.keys(done.tasks).length, done.told], ["done", undefined, LOOK_LIMITS.page * LOOK_LIMITS.pagesPerCall + 5, 6, 6]);
+    // Done after several pages: the cursor is gone, the time it finished is kept, and the answer carries the look's own revision (second review).
+    assert.deepEqual([done.after, done.doneAt, done.revision], [undefined, new Date(now).toISOString(), (await c.storage.getAggregate({ kind: "adoption-look", id: t1 }))!.revision]);
     assert.match(await text(), /6 task\(s\) ran this version; 0 paused and 6 open were told in their activity and keep the version, 0 finished or gone were left as they are\. The owner has not been told yet\./);
     // The next tick tells the owner and takes it out of the pending list; each task was told exactly once in all.
     assert.deepEqual(await c.make().sweepAffected(), { looked: 1, failed: 0 });
@@ -264,6 +270,49 @@ for (const backend of backends) {
     await c.make({ looks: failing }).withdraw(c.owner, { commandId: cid("w"), adoptionId: a2, expectedRevision: await c.rev(a2), reason: "stop" });
     assert.equal((await c.make().affected(c.owner, a2))?.state, "looking");
     assert.equal((await c.make().affected(c.owner, a2))?.told, 0);
+  });
+
+  suite("the owner was told, the look's told write was lost and the notice was closed meanwhile: the retry does not tell the owner again, and the look finishes (second review)", async (c) => {
+    await c.register("toolbox.fetch", "1.0.0");
+    const t = await c.task();
+    await c.runs([{ taskId: t }]);
+    const exp = await c.experiment();
+    const t1 = await c.ask(exp, tool("toolbox.fetch"), c.reader);
+    await c.approve(t1);
+    const ntf = NotificationService.withEpoch(c.storage, c.epoch, options);
+    const looks = c.p.ports({ notify: async (x) => { await ntf.emitFromController({ commandId: x.commandId, kind: "maintenance", level: "notice", ref: { kind: "adoption", id: x.adoptionId }, projectId: x.projectId, detail: x.detail }); } });
+    await c.make({ looks: undefined }).withdraw(c.owner, { commandId: cid("w"), adoptionId: t1, expectedRevision: await c.rev(t1), reason: "stop" });
+    // An earlier finish gave the owner the notice under the look's command ID, then its told write was lost; the owner's notice was closed (it expired, or was settled) before the retry.
+    await looks.notify({ commandId: `adoption-look-${t1}`, adoptionId: t1, projectId: c.a, detail: "earlier words" });
+    assert.equal((await ntf.settleFromController({ commandId: cid("settle"), kind: "maintenance", ref: { kind: "adoption", id: t1 }, projectId: c.a })).closed, true);
+    const items = async () => (await c.storage.listAggregates("notification-item", { limit: 500 })).filter((a) => (a.body as { ref?: { id?: string } }).ref?.id === t1);
+    assert.equal((await items()).length, 1);
+    // The retry's notice lands on a new occurrence, so the same command ID is a conflict: that means the owner was told. The look is marked told and leaves the pending list; no second notice.
+    assert.deepEqual(await c.make({ looks }).sweepAffected(), { looked: 1, failed: 0 });
+    const look = (await c.make().affected(c.owner, t1))!;
+    assert.deepEqual([look.state, look.notified, look.told], ["done", true, 1]);
+    assert.equal((await items()).length, 1, "the owner is not told twice");
+    assert.deepEqual(((await c.storage.getAggregate({ kind: "adoption-looks", id: "installation" }))!.body as { pending: string[] }).pending, []);
+    // The look written again while the owner was being told (another process, a restore): the told write meets a newer revision; that is contained, and the next call tells the owner and finishes.
+    const expR = await c.experiment();
+    const aR = await c.ask(expR, tool("toolbox.fetch"), c.reader);
+    await c.approve(aR);
+    let bumped = 0;
+    const racing = c.p.ports({ notify: async () => {
+      if (bumped++ > 0) return;
+      const agg = (await c.storage.getAggregate({ kind: "adoption-look", id: aR }))!;
+      await c.storage.applyOperation(c.op(cid("bump"), { changes: [{ type: "update", ref: { kind: "adoption-look", id: aR }, expectedRevision: agg.revision, body: agg.body }] }));
+    } });
+    await c.make({ looks: undefined }).withdraw(c.owner, { commandId: cid("w"), adoptionId: aR, expectedRevision: await c.rev(aR), reason: "stop" });
+    const raced = await c.make({ looks: racing }).lookAtAffected(aR);
+    assert.deepEqual([raced?.state, raced?.notified, bumped], ["done", undefined, 1]);
+    assert.equal((await c.make({ looks: racing }).lookAtAffected(aR))?.notified, true);
+    // A notice that fails for another reason is still not taken as told.
+    const exp2 = await c.experiment();
+    const a2 = await c.ask(exp2, tool("toolbox.fetch"), c.reader);
+    await c.approve(a2);
+    await c.make({ looks: c.p.ports({ notify: async () => { throw new DomainError("unavailable", "the store is busy"); } }) }).withdraw(c.owner, { commandId: cid("w"), adoptionId: a2, expectedRevision: await c.rev(a2), reason: "stop" });
+    assert.deepEqual([(await c.make().affected(c.owner, a2))?.state, (await c.make().affected(c.owner, a2))?.notified], ["done", undefined]);
   });
 
   suite("the tick goes round the pending list: a look that keeps failing does not hold up the ones after it (first review)", async (c) => {

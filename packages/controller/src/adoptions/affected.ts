@@ -193,7 +193,9 @@ export class AffectedWorkLook {
 
   /** Tells the owner (once: the command ID is the adoption's), then marks the look told and takes it out of the pending list in one write. */
   async #finish(ports: AdoptionLookPorts, id: string, look: LookBody, revision: number): Promise<void> {
-    await ports.notify({ commandId: `adoption-look-${id}`, adoptionId: id, projectId: look.projectId, detail: noticeText(look) });
+    // A repeat is a replay while the owner's notice is still open (its command digest leaves out the words). Once that notice was closed (expired or settled) a repeat lands on a new occurrence, and the
+    // same command ID is then a conflict: the owner was told by an earlier finish whose told write was lost, so the look goes on (second review; without this it failed at every tick for good).
+    try { await ports.notify({ commandId: `adoption-look-${id}`, adoptionId: id, projectId: look.projectId, detail: noticeText(look) }); } catch (error) { if (!(error instanceof DomainError && error.code === "command_conflict")) throw error; }
     // The command ID carries the look's revision: a repeat at the same revision is the same command, and a look that was written again since (by a restore) is told on its own.
     await this.#runner.command("adoption.look.told", { commandId: `adp-told-${id}-${revision}`, actor: "controller" }, async () => ({
       payload: { adoptionId: id, revision },
