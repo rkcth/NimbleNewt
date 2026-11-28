@@ -134,7 +134,9 @@ export class IntegratorCapacity {
    * The integrators of a project now, by the pool's rule (card P10b, wake): the free ones' agent IDs (bare, in ID order) and how many are busy, a busy one holding a live lease of a project it serves or being woken
    * for a landing that has not ended. `alsoBusy` names agents the caller has just woken. Undefined when the leases or the wakes could not all be read (nobody is said to be free).
    */
-  async integrators(projectId: string, alsoBusy: ReadonlySet<string> = new Set()): Promise<{ readonly free: readonly string[]; readonly busy: number; readonly partial: boolean } | undefined> {
+  async integrators(projectId: string, alsoBusy: ReadonlySet<string> = new Set(), seen?: { readonly leases: readonly IntegratorLease[]; readonly wakes: WakesNow }): Promise<{ readonly free: readonly string[]; readonly busy: number; readonly partial: boolean } | undefined> {
+    // `seen`: the leases and wakes the caller read completely in this same round (the wake round judges every project against one picture, rather than reading every lease and wake again per project).
+    if (seen !== undefined) return seen.wakes.partial ? undefined : this.#judge(projectId, seen.leases, seen.wakes, alsoBusy);
     const { leases, partial } = await this.#leases.liveLeases();
     if (partial) return undefined;
     const wakes = await this.#wakes();

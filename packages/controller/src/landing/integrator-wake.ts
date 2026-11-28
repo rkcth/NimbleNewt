@@ -13,7 +13,7 @@ import { frontOf, type LandingQueueService } from "./landing-queue.js";
  *
  * On each of the controller's rounds, a landing branch whose first place holds approved work, whose lease no active agent holds live, and for which no integrator is woken already, gets one: the free integrator of
  * the project (the pool's rule, `IntegratorCapacity.integrators`: the exact right `integration.lease`, no live lease of a project it serves and no other wake that has not ended; the first by ID) is given a landing
- * task in that project ("Land the approved work queued on <branch>"), made ready and assigned to it. From there the attempt starts the way every attempt starts: the inbox admits it and the dispatcher claims it; the
+ * task in that project ("Land the approved work queued on <branch>"), made ready, recorded as a landing task and only then assigned to it. From there the attempt starts the way every attempt starts: the inbox admits it and the dispatcher claims it; the
  * dispatcher knows it as a landing task (`landingOf`), so its budget is checked and held (R05) on the task whose approved work it lands, and it asks admission (H03) for a `landing` place of the control lane, which
  * productive (author) attempts can never take and whose queue they cannot fill.
  *
@@ -22,7 +22,8 @@ import { frontOf, type LandingQueueService } from "./landing-queue.js";
  *
  * Bounded and fail closed: the queues by `queuesWithEntries` (50 pages of 200), the wake records in `INTEGRATOR_WAKE_LIMITS.pages` pages of 200, at most `INTEGRATOR_WAKE_LIMITS.policyReads` landing policies, `INTEGRATOR_WAKE_LIMITS.judged`
  * judgements of a project's integrators and `INTEGRATOR_WAKE_LIMITS.perRound` wakes per round. Leases or wake records that cannot all be read, or a damaged wake record, wake nobody in that round. Every write is a command with an ID derived from the branch and the wake's number, so a round repeated
- * after a crash makes the same task, the same assignment and the same record, never a second.
+ * after a crash makes the same task, the same assignment and the same record, never a second; a wake whose round stopped after its records is assigned by the next round. The dispatcher treats a task as a landing
+ * task only while it is assigned to the integrator its wake names (`landingOf`).
  */
 export const INTEGRATOR_WAKE_LIMITS = { pages: 10, policyReads: 100, judged: 10, perRound: 5, perFront: 3 } as const;
 /** The dispatcher's wake round (`round` with `throttled`) runs at most this often. */
@@ -103,11 +104,17 @@ export class IntegratorWake {
 
   static wakeIdOf(projectId: string, branch: string): string { return `iwk-${hash(projectId, branch)}`; }
 
-  /** What a landing task lands, for the dispatcher (budget on `budgetTaskId`, the work's own task; a `landing` admission place). Undefined for any other task, or a record that does not read as one. */
+  /**
+   * What a landing task lands, for the dispatcher (budget on `budgetTaskId`, the work's own task; a `landing` admission place). Undefined for any other task, for a record that does not read as one, and while the
+   * task is not assigned to the integrator the wake woke: a landing task given to anyone else (an assignment or a transfer after the wake) is ordinary work of its assignee, so it neither takes a reserved place nor
+   * spends the queued work's allowance.
+   */
   async landingOf(taskId: string): Promise<{ readonly budgetTaskId: string; readonly projectId: string; readonly branch: string; readonly agentId: string } | undefined> {
     const found = await this.#runner.get(LANDING_TASK_KIND, taskId);
     const b = found?.body as Partial<LandingTaskBody> | undefined;
     if (b === undefined || typeof b.frontTaskId !== "string" || !ID.test(b.frontTaskId) || typeof b.projectId !== "string" || typeof b.branch !== "string" || typeof b.agentId !== "string") return undefined;
+    const owner = (await this.#deps.assignments.getAssignment(taskId))?.owner;
+    if (owner === undefined || owner.kind !== "agent" || owner.id !== b.agentId) return undefined;
     return { budgetTaskId: b.frontTaskId, projectId: b.projectId, branch: b.branch, agentId: b.agentId };
   }
 
@@ -166,9 +173,25 @@ export class IntegratorWake {
     }).sort((a, b) => sinceMs(a.since) - sinceMs(b.since) || cmp(a.q.projectId, b.q.projectId) || cmp(a.q.branch, b.q.branch));
 
     let reads = 0, judgedCount = 0, stopped = false;
+    let finishes = 0;
     for (const c of candidates) {
       const { projectId, branch } = c.q;
-      if (openOn.has(`${projectId}\0${branch}`)) { open++; continue; }
+      if (openOn.has(`${projectId}\0${branch}`)) {
+        open++;
+        // A wake whose round stopped after its record and before the assignment (a crash, a refused assignment): it is finished here, assigned to the integrator its record names, so the open wake never sits
+        // with nobody to run it. At most `policyReads` such looks per round; one more read per open wake.
+        if (finishes < INTEGRATOR_WAKE_LIMITS.policyReads) {
+          finishes++;
+          const w = wakes.open.find((x) => x.projectId === projectId && x.branch === branch)!;
+          try {
+            if (await this.#assign(w.taskId, w.agentId, branch, IntegratorWake.wakeIdOf(projectId, branch))) woken.push({ projectId, branch, agentId: w.agentId, taskId: w.taskId });
+          } catch (error) {
+            if (!(error instanceof DomainError)) throw error;
+            unreadable++;
+          }
+        }
+        continue;
+      }
       const own = leases.find((l) => l.projectId === projectId && l.branch === branch);
       if (own !== undefined && (await this.#deps.activeAgent(own.holder))) { held++; continue; }
       if (reads >= INTEGRATOR_WAKE_LIMITS.policyReads || woken.length >= INTEGRATOR_WAKE_LIMITS.perRound) { stopped = true; break; }
@@ -186,7 +209,7 @@ export class IntegratorWake {
       if (frontWakes >= INTEGRATOR_WAKE_LIMITS.perFront) { spent++; continue; }
       if (judgedCount >= INTEGRATOR_WAKE_LIMITS.judged) { stopped = true; break; }
       judgedCount++;
-      const judged = await this.#deps.capacity.integrators(projectId, justWoken);
+      const judged = await this.#deps.capacity.integrators(projectId, justWoken, { leases, wakes });
       if (judged === undefined) return { ...nothing("the integrator leases or wakes could not all be read"), woken };
       const agentId = judged.free[0];
       if (agentId === undefined) { noneFree++; continue; }
@@ -202,25 +225,29 @@ export class IntegratorWake {
     return { woken, held, open, noneFree, spent, unreadable, partial: queuesPartial || stopped };
   }
 
-  /** Makes one wake: the landing task, ready and assigned, then the records. Each step has a derived command ID, so a repeat after a crash does each step once. */
+  /**
+   * Makes one wake: the landing task, made ready, then the records, then the assignment. Each step has a derived command ID, so a repeat after a crash does each step once.
+   *
+   * The order matters. Only an assigned task gets an attempt, and the dispatcher knows a landing task only by its `landing-task` record; so the records are written before the assignment, and a round that stops in
+   * between never leaves an attempt that would be admitted and paid as ordinary work. A round that stopped before the records makes them again under the same command IDs: the task's own command carries only the
+   * branch (constant for the wake's ID), so it repeats as the same command even when other work is first in the queue by then. A round that stopped after the records is finished by the next one (`#assign`).
+   */
   async #wake(w: { wakeId: string; before: { revision: number } | undefined; prev: IntegratorWakeBody | undefined; projectId: string; branch: string; frontTaskId: string; frontWakes: number; agentId: string }): Promise<{ taskId: string; agentId: string }> {
     const wakes = (w.prev?.wakes ?? 0) + 1;
     const base = `iwk:${w.wakeId.slice(4)}:${wakes}`;
     const taskId = (await this.#deps.projects.createTask({
       commandId: `${base}:task`, actor: WAKE_ACTOR, projectId: w.projectId, title: `Land the approved work queued on ${w.branch}`.slice(0, 150),
-      description: `The controller woke an integrator to land the approved work in the landing queue of branch ${w.branch}, first task ${w.frontTaskId}. Take the branch's integrator lease, land the queue's first place, and finish this task when the queue is landed or nothing more can land now.`.slice(0, 2000),
+      description: `The controller woke an integrator to land the approved work in the landing queue of branch ${w.branch}. Take the branch's integrator lease, land the queue's first place, and finish this task when the queue is landed or nothing more can land now.`.slice(0, 2000),
     })).id;
     const task = await this.#deps.projects.getTask(taskId);
     if (task === undefined) throw new DomainError("not_found", `landing task ${taskId} is missing`);
     if (task.state === "proposed") await this.#deps.projects.transitionTask({ commandId: `${base}:ready`, actor: WAKE_ACTOR, taskId, expectedRevision: task.revision, to: "ready" });
-    // Already assigned (a round that crashed after the assignment): the wake is that agent's, whoever this round would have chosen.
+    // Already assigned (by someone else before the records were written): the wake is that agent's, whoever this round would have chosen.
     const assigned = await this.#deps.assignments.getAssignment(taskId);
     let agentId = w.agentId;
     if (assigned?.owner !== undefined) {
       if (assigned.owner.kind !== "agent") throw new DomainError("invalid_command", `landing task ${taskId} is owned by someone other than an agent`);
       agentId = assigned.owner.id;
-    } else {
-      await this.#deps.assignments.assignTask({ commandId: `${base}:own:${hash(agentId).slice(0, 12)}`, actor: WAKE_ACTOR, taskId, owner: { kind: "agent", id: agentId }, reason: `woken to land the approved work queued on ${w.branch}`.slice(0, 300) });
     }
     const at = this.#runner.now();
     const body: IntegratorWakeBody = { projectId: w.projectId, branch: w.branch, frontTaskId: w.frontTaskId, taskId, agentId, state: "open", frontWakes: w.frontWakes, wakes, at };
@@ -239,6 +266,22 @@ export class IntegratorWake {
         return { ref, creates: now === undefined, changes, detail: { taskId, agentId, wakes } };
       },
     }));
+    if (assigned?.owner === undefined) await this.#assign(taskId, agentId, w.branch, w.wakeId);
     return { taskId, agentId };
+  }
+
+  /**
+   * Assigns a wake's landing task to the integrator its record names, unless the task has an assignment already (then nothing is done). True when this call assigned it. The command ID derives from the task and the agent,
+   * so the wake's own round and a later round finishing it make one assignment.
+   */
+  async #assign(taskId: string, agentId: string, branch: string, wakeId: string): Promise<boolean> {
+    const link = await this.#runner.get(LANDING_TASK_KIND, taskId);
+    const l = link?.body as Partial<LandingTaskBody> | undefined;
+    // Only the landing task of this very wake is assigned here (a record that does not name it is left alone; the owner's view shows the wake).
+    if (l === undefined || l.wakeId !== wakeId || l.agentId !== agentId) throw new DomainError("integrity", `landing task ${taskId} is not the task of wake ${wakeId}`);
+    // Assigned already, or assigned and then released (the owner's choice, which a later round does not undo): nothing to do.
+    if ((await this.#deps.assignments.getAssignment(taskId)) !== undefined) return false;
+    await this.#deps.assignments.assignTask({ commandId: `iwk-own:${taskId}:${hash(agentId).slice(0, 12)}`, actor: WAKE_ACTOR, taskId, owner: { kind: "agent", id: agentId }, reason: `woken to land the approved work queued on ${branch}`.slice(0, 300) });
+    return true;
   }
 }

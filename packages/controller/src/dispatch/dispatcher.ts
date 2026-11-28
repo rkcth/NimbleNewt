@@ -909,7 +909,7 @@ export class DispatcherService {
     let table: Awaited<ReturnType<NonNullable<DispatcherDeps["routing"]>["get"]>> | typeof UNREADABLE | undefined;
     let budget: Awaited<ReturnType<NonNullable<DispatcherDeps["budgets"]>["accounting"]>> | typeof UNREADABLE | undefined;
     try { table = await this.#deps.routing?.get(); } catch (error) { this.#options.onError?.(error); table = UNREADABLE; }
-    try { budget = await this.#deps.budgets?.accounting(this.#deps.principal, taskId); } catch (error) { this.#options.onError?.(error); budget = UNREADABLE; }
+    try { budget = await this.#deps.budgets?.accounting(this.#deps.principal, await this.#budgetTaskOf(taskId)); } catch (error) { this.#options.onError?.(error); budget = UNREADABLE; }
     const words = routeCostWords({ table, from, to, budget });
     await this.#stepOf(attemptId, `route-cost:${createHash("sha256").update(`${from}>${to}`).digest("hex").slice(0, 24)}`, "model-selected", `Attempt ${attemptId} moved from route ${from} to route ${to}. ${words}`, [{ kind: "dispatch", id: attemptId }]);
   }
@@ -3977,7 +3977,7 @@ export class DispatcherService {
       if (usage.cache === undefined) return;
     }
     await this.#deps.budgets.charge(this.#deps.principal, {
-      commandId: `dpa-use:${attemptId}:${key}`, activity: "model-call", taskId: d.body.taskId, agentId: d.body.agentId,
+      commandId: `dpa-use:${attemptId}:${key}`, activity: "model-call", taskId: await this.#budgetTaskOf(d.body.taskId), agentId: d.body.agentId,
       ...(reserved ? {} : { ...(usage.costMicros === undefined ? {} : { costMicros: usage.costMicros }), ...(usage.computeMs === undefined ? {} : { computeMs: usage.computeMs }) }), ...(usage.cache === undefined ? {} : { cache: usage.cache }),
     });
   }

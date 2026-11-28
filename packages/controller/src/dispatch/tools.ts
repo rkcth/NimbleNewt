@@ -208,7 +208,8 @@ export class ToolPath {
     // The budget, from accounting.
     let spent: number | undefined;
     if (this.#deps.budgets !== undefined) {
-      const report = await this.#deps.budgets.accounting(this.#deps.principal, d.taskId);
+      // A landing task's calls are paid from the task whose approved work it lands (card P10b), so that task's allowance is the one checked.
+      const report = await this.#deps.budgets.accounting(this.#deps.principal, (await this.#deps.landingOf?.(d.taskId))?.budgetTaskId ?? d.taskId);
       if (report !== undefined) {
         spent = report.spent.costMicros;
         if ((report.limit.costMicros > 0 && report.spent.costMicros + report.uncertain.costMicros >= report.limit.costMicros) || (report.limit.computeMs > 0 && report.spent.computeMs + report.uncertain.computeMs >= report.limit.computeMs)) return refused("the task's budget is used up");
