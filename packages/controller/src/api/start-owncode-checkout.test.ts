@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { test } from "node:test";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { ManualTimer } from "../dispatch/testing/timer.js";
@@ -102,5 +102,32 @@ test("the NimbleNewt development project works only in its own checkout, apart f
   } finally {
     await c.close();
     for (const p of [d, co, links]) rmSync(p, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
+
+// First review: the artifact store and the backup folder are the controller's own records too; a checkout inside either, or holding one, is refused. Both lie apart from the data directory here, and the
+// backup folder is given relative to the working directory, as the controller opens it.
+test("a checkout inside the artifact store, or one that holds the backup folder, is refused (card B06, third slice, first review)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-b06c-g-"));
+  const store = mkdtempSync(join(tmpdir(), "nn-b06c-art-"));
+  const outer = mkdtempSync(join(tmpdir(), "nn-b06c-bk-"));
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+    artifacts: { directory: store }, backup: { directory: relative(process.cwd(), join(outer, "backups")) } });
+  let n = 0;
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    const devProject = (await c.services.projects.createProject({ commandId: "p-dev", actor: rob.id, name: "NimbleNewt development" })).id;
+    const call = async (op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    const bind = async (label: string, locator: string) => c.services.resources.bindResource(rob, { commandId: `b${++n}`, projectId: devProject, kind: "repository", label, locator, access: "write" } as never);
+    mkdirSync(join(store, "dev"));
+    const inStore = await bind("in store", join(store, "dev"));
+    assert.match((await call("owncode.enable", { projectId: devProject }, `en-${++n}`)).error.message, /repository "in store" at .* is inside the controller's artifact store/);
+    await c.services.resources.unbindResource(rob, { commandId: `u${++n}`, resourceId: inStore.id, expectedRevision: inStore.revision });
+    await bind("around backups", outer);
+    assert.match((await call("owncode.enable", { projectId: devProject }, `en-${++n}`)).error.message, /repository "around backups" at .* holds the controller's backup folder/);
+  } finally {
+    await c.close();
+    for (const p of [d, store, outer]) rmSync(p, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
