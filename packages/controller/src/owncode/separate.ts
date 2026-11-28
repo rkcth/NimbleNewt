@@ -209,10 +209,21 @@ const related = (a: FsLocation, b: FsLocation): boolean => fsUnder(a, b) || fsUn
 
 /**
  * The extra places of a repository at `canon`: where git writes for it when that is not the folder itself. A `.git` link is followed; a `.git` file (a `git worktree`, a submodule) names its git folder,
- * and that folder's `commondir` names the common one (refs, objects, hooks and configuration shared with the main checkout). No `.git` at all: none. Anything else it cannot read: cannot tell.
+ * and that folder's `commondir` names the common one (refs, objects, hooks and configuration shared with the main checkout). Like git, the `.git` is the nearest one at `canon` or above it (first review of
+ * the fourth slice: a folder inside a checkout that has no `.git` of its own is worked on through the checkout's); `top` is the folder that holds it (git's work tree), when that is above `canon`. No `.git`
+ * up to the root: none. Anything else it cannot read: cannot tell.
  */
-async function gitPlaces(fs: SeparationFs, canon: string): Promise<string[]> {
-  if (fs.readText === undefined) return [];
+async function gitPlaces(fs: SeparationFs, canon: string): Promise<{ readonly top?: string; readonly folders: string[] }> {
+  if (fs.readText === undefined) return { folders: [] };
+  for (let at = canon, n = 0; ; at = dirname(at), n++) {
+    if (n >= SEPARATE_LIMITS.depth) throw new CannotTell(`it is more than ${SEPARATE_LIMITS.depth} folders deep`);
+    const folders = await gitPlacesAt(fs, at);
+    if (folders !== undefined) return { ...(at === canon ? {} : { top: at }), folders };
+    if (dirname(at) === at) return { folders: [] };
+  }
+}
+/** The git folders of the `.git` at `canon`, or `undefined` when there is no `.git` there. */
+async function gitPlacesAt(fs: SeparationFs, canon: string): Promise<string[] | undefined> {
   const read = async (path: string, what: string): Promise<string> => {
     // One byte past the limit is asked for, so a longer file is known to be longer (and is not judged by its start).
     const text = await fs.readText!(path, SEPARATE_LIMITS.gitFileBytes + 1);
@@ -231,7 +242,7 @@ async function gitPlaces(fs: SeparationFs, canon: string): Promise<string[]> {
   } catch (error) {
     if (error instanceof CannotTell) throw error;
     const code = (error as NodeJS.ErrnoException)?.code;
-    if (code === "ENOENT") return [];
+    if (code === "ENOENT") return undefined;
     // A .git folder (or a link to one): itself, and the common folder it may name too.
     if (code !== "EISDIR") throw new CannotTell(`its .git could not be read${typeof code === "string" ? ` (${code})` : ""}`);
     gitDir = dotGit;
@@ -278,13 +289,16 @@ export async function judgeSeparate(places: readonly OwnPlace[] | "too-many", gu
       // A git folder the installation's `.git` names must be there (a place's must be too), and its path is taken as written (`..` after a link leads where the link leads), so `realpath` alone places it.
       const got = g.derived ? await (async () => { const real = await fs.realpath(g.path); return { canon: real, exists: true, chain: await chainOf(fs, real) }; })() : await guardOf(fs, g.path);
       if (g.git && got.exists) {
-        for (const extra of await gitPlaces(fs, got.canon)) todo.push({ what: `the git folder of ${g.what}`, path: extra, git: false, derived: true });
+        for (const extra of (await gitPlaces(fs, got.canon)).folders) todo.push({ what: `the git folder of ${g.what}`, path: extra, git: false, derived: true });
         if (todo.length > SEPARATE_LIMITS.guarded) return no("this controller has more guarded folders than it checks, so it cannot tell whether the development project's checkout is apart from them");
       }
       const at = mounts === undefined ? undefined : locate(mounts, got.canon);
       guards.push({ what: g.what, path: g.path, canon: got.canon, exists: got.exists, ids: new Set(got.chain.map((c) => c.id)), ...(got.exists ? { self: got.chain[0]!.id } : {}), ...(at === undefined ? {} : { at }), holds: mounts === undefined || !got.exists ? [] : mountsBelow(mounts, got.canon) });
     } catch (error) {
-      return no(`${g.what} (${shown(g.path)}) cannot be checked: ${error instanceof CannotTell ? error.message : "it could not be read"}`);
+      const code = (error as NodeJS.ErrnoException)?.code;
+      // First review of the fourth slice: a broken installation git refuses every checkout, so the owner is told that it is the installation's git that must be put right.
+      const ownGit = g.git || g.derived ? "; no checkout can be confirmed separate until the installation's git can be read" : "";
+      return no(`${g.what} (${shown(g.path)}) cannot be checked: ${error instanceof CannotTell ? error.message : `it could not be read${typeof code === "string" ? ` (${code})` : ""}`}${ownGit}`);
     }
   }
   for (const p of places) {
@@ -305,7 +319,12 @@ export async function judgeSeparate(places: readonly OwnPlace[] | "too-many", gu
         canon = await fs.realpath(look.path);
         chain = await chainOf(fs, canon);
         if (mounts !== undefined) { at = locate(mounts, canon); holds = mountsBelow(mounts, canon); }
-        if (i === 0 && p.kind === "repository") for (const extra of await gitPlaces(fs, canon)) looks.push({ what: `the git folder of the development project's ${name} (${shown(extra)})`, path: extra });
+        if (i === 0 && p.kind === "repository") {
+          const git = await gitPlaces(fs, canon);
+          // A place with no `.git` of its own inside a checkout: git there works on that checkout's whole work tree too (first review of the fourth slice).
+          if (git.top !== undefined) looks.push({ what: `the work tree git uses for the development project's ${name} (${shown(git.top)})`, path: git.top });
+          for (const extra of git.folders) looks.push({ what: `the git folder of the development project's ${name} (${shown(extra)})`, path: extra });
+        }
       } catch (error) {
         const code = (error as NodeJS.ErrnoException)?.code;
         return no(`${look.what} cannot be checked: ${error instanceof CannotTell ? error.message : `it could not be read on the controller's machine${typeof code === "string" ? ` (${code})` : ""}`}`);

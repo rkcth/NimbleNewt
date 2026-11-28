@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { test } from "node:test";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { ManualTimer } from "../dispatch/testing/timer.js";
 import { PI } from "../dispatch/testing/world.js";
 import { programRoot } from "../owncode/index.js";
 import { startController } from "./index.js";
+import { ownCodeExtraGuards } from "./start.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
 const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
@@ -163,4 +164,19 @@ test("a checkout holding the watchdog record, the heartbeat file or the recovery
     await c.close();
     for (const p of [d, side, co]) rmSync(p, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
+});
+
+// First review of the fourth slice: each of the six extra files is the path the controller opens, resolved against the working directory as it opens it (the keyring, passcode and recovery files were
+// wired with no test). The heartbeat comes from the options, else from the launcher's environment; none when it is off or named empty (an empty name resolved would be the working directory itself).
+test("the installation's extra guarded files are the paths the controller opens, resolved against the working directory (card B06, fourth slice, first review)", () => {
+  const env = { NIMBLENEWT_HEARTBEAT_FILE: "env/beat" };
+  assert.deepEqual(ownCodeExtraGuards({ env: {} }), {});
+  assert.deepEqual(ownCodeExtraGuards({ env, backup: { directory: "b", encryption: { keyringFile: "k/ring", passcodeFile: "k/pass", recoveryFile: "/abs/rec" } }, recovery: { manifestDirectory: "m" }, watchdog: { file: "w/wd.json" } } as never), {
+    backupKeyring: resolve("k/ring"), backupPasscode: resolve("k/pass"), backupRecovery: "/abs/rec", recoveryManifests: resolve("m"), watchdogFile: resolve("w/wd.json"), heartbeatFile: resolve("env/beat"),
+  });
+  assert.deepEqual(ownCodeExtraGuards({ env, backup: { directory: "b", encryption: { keyringFile: "k/ring" } } } as never), { backupKeyring: resolve("k/ring"), heartbeatFile: resolve("env/beat") });
+  assert.deepEqual(ownCodeExtraGuards({ env, heartbeat: { file: "opt/beat" } } as never), { heartbeatFile: resolve("opt/beat") });
+  assert.deepEqual(ownCodeExtraGuards({ env, heartbeat: false }), {});
+  assert.deepEqual(ownCodeExtraGuards({ env: { NIMBLENEWT_HEARTBEAT_FILE: "" } }), {});
+  assert.deepEqual(ownCodeExtraGuards({ env, heartbeat: { file: "" } } as never), {});
 });

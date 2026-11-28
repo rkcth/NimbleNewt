@@ -498,7 +498,7 @@ export async function startController(options: StartOptions): Promise<Controller
  * Card B06 (fourth slice): the installation's other files a development checkout must be apart from, besides the folders given to `installationGuards` inline. Resolved against the working directory,
  * as the controller opens them. The heartbeat file is the one the start below beats into (an empty name is none).
  */
-function ownCodeExtraGuards(options: StartOptions): { backupKeyring?: string; backupPasscode?: string; backupRecovery?: string; recoveryManifests?: string; watchdogFile?: string; heartbeatFile?: string } {
+export function ownCodeExtraGuards(options: Pick<StartOptions, "backup" | "recovery" | "watchdog" | "heartbeat" | "env">): { backupKeyring?: string; backupPasscode?: string; backupRecovery?: string; recoveryManifests?: string; watchdogFile?: string; heartbeatFile?: string } {
   const e = options.backup?.encryption;
   const heartbeatFile = options.heartbeat === false ? undefined : options.heartbeat?.file ?? options.env[HEARTBEAT_ENV.file];
   return {
