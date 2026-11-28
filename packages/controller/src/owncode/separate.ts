@@ -1,6 +1,6 @@
 import { constants as fsConstants, readFileSync } from "node:fs";
 import { open, readFile, realpath, stat } from "node:fs/promises";
-import { dirname, isAbsolute, join, parse, posix, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
@@ -20,6 +20,10 @@ import { fileURLToPath } from "node:url";
  * leads elsewhere, as a `git worktree` makes, and the common folder it names) is judged as one of its places, since git writes there. It fails closed: a place that cannot be read on this machine, a
  * guarded list that is empty, more places than it looks at, a folder deeper than it walks, a file system that gives no folder identity, or a Linux mount table that cannot be read are all "cannot tell",
  * which is not separate.
+ *
+ * On Windows there is no mount table to read: folders are compared by the native `realpath` (which gives a junction's, a short 8.3 name's and a `subst` drive's long target folder), by identity (the
+ * volume serial number and file ID Node.js gives as `dev` and `ino`), and by path with case folded and either separator taken. A file system there that gives no file ID (inode 0) is "cannot tell", as on
+ * Linux: there is no fallback to paths alone. Paths are taken by the rules of the platform judged for (`pathOpsFor`).
  *
  * The detail names the place and the guarded folder; it is for the owner only. Anyone else is told only that the checkout could not be confirmed separate (`OWNCODE_CHECKOUT_REFUSED`), so the answer
  * says nothing about which folders exist on the controller's machine.
@@ -103,49 +107,56 @@ export const nodeSeparationFs: SeparationFs = {
 const no = (detail: string): Separation => ({ separate: false, detail: detail.slice(0, 400) });
 const shown = (s: string, max = 120): string => (s.length <= max ? s : `${s.slice(0, max - 3)}...`);
 class CannotTell extends Error {}
+/**
+ * The path rules the judge uses, from the platform it judges for (as Node.js itself chooses): Windows paths (drive letters, `\` and `/` both separators, UNC shares) for `win32`, POSIX paths for every
+ * other platform. The controller judges for the platform it runs on, so this is the host's own `node:path`; a test that names another platform (with a made-up file system) gets that platform's rules, so a
+ * Windows judgement is exercised on Linux and a Linux one on Windows. The Linux mount table is always POSIX.
+ */
+type PathOps = typeof posix;
+const pathOpsFor = (platform: string): PathOps => (platform === "win32" ? win32 : posix);
 
 /** The folders from `path` up to the root of its file system, each with its identity. `path` must be canonical (from `realpath`). */
-async function chainOf(fs: SeparationFs, path: string): Promise<{ readonly path: string; readonly id: string }[]> {
+async function chainOf(fs: SeparationFs, P: PathOps, path: string): Promise<{ readonly path: string; readonly id: string }[]> {
   const out: { path: string; id: string }[] = [];
-  for (let at = path; ; at = dirname(at)) {
+  for (let at = path; ; at = P.dirname(at)) {
     if (out.length >= SEPARATE_LIMITS.depth) throw new CannotTell(`it is more than ${SEPARATE_LIMITS.depth} folders deep`);
     const s = await fs.stat(at);
     // A file system that gives no identity (inode 0) cannot tell a second spelling of a folder from another folder.
     if (s.ino === 0n) throw new CannotTell("its file system gives no folder identity");
     out.push({ path: at, id: `${s.dev}:${s.ino}` });
-    if (dirname(at) === at) return out;
+    if (P.dirname(at) === at) return out;
   }
 }
 
 /** A guarded place as it stands: its canonical path and its chain. One that does not exist (yet) is placed under its nearest existing folder, and only that folder's chain is known. */
-async function guardOf(fs: SeparationFs, path: string): Promise<{ readonly canon: string; readonly exists: boolean; readonly chain: readonly { readonly path: string; readonly id: string }[] }> {
-  let at = resolve(path);
+async function guardOf(fs: SeparationFs, P: PathOps, path: string): Promise<{ readonly canon: string; readonly exists: boolean; readonly chain: readonly { readonly path: string; readonly id: string }[] }> {
+  let at = P.resolve(path);
   const rest: string[] = [];
   for (let i = 0; ; i++) {
     if (i >= SEPARATE_LIMITS.depth) throw new CannotTell(`it is more than ${SEPARATE_LIMITS.depth} folders deep`);
     try {
       const real = await fs.realpath(at);
-      const chain = await chainOf(fs, real);
-      return { canon: rest.length === 0 ? real : join(real, ...rest.reverse()), exists: rest.length === 0, chain };
+      const chain = await chainOf(fs, P, real);
+      return { canon: rest.length === 0 ? real : P.join(real, ...rest.reverse()), exists: rest.length === 0, chain };
     } catch (error) {
       if (error instanceof CannotTell) throw error;
       const code = (error as NodeJS.ErrnoException)?.code;
-      if ((code !== "ENOENT" && code !== "ENOTDIR") || dirname(at) === at) throw new CannotTell(`it could not be read${typeof code === "string" ? ` (${code})` : ""}`);
-      rest.push(parse(at).base);
-      at = dirname(at);
+      if ((code !== "ENOENT" && code !== "ENOTDIR") || P.dirname(at) === at) throw new CannotTell(`it could not be read${typeof code === "string" ? ` (${code})` : ""}`);
+      rest.push(P.parse(at).base);
+      at = P.dirname(at);
     }
   }
 }
 
 /** Whether a `relative` result stays at or below its start (a folder named `..x` is below it; `..` and `../x` are not). */
-const staysBelow = (r: string): boolean => r === "" || (r !== ".." && !r.startsWith("../") && !r.startsWith("..\\") && !isAbsolute(r));
+const staysBelow = (r: string, P: PathOps): boolean => r === "" || (r !== ".." && !r.startsWith("../") && !r.startsWith("..\\") && !P.isAbsolute(r));
 /** Whether `inner` is `outer` or below it, comparing paths (case folded where the platform's file systems usually fold case). */
-const lexicallyUnder = (inner: string, outer: string, platform: string): boolean => {
+const lexicallyUnder = (inner: string, outer: string, platform: string, P: PathOps): boolean => {
   const fold = platform === "win32" || platform === "darwin" ? (s: string) => s.toLowerCase() : (s: string) => s;
-  return staysBelow(relative(fold(outer), fold(inner)));
+  return staysBelow(P.relative(fold(outer), fold(inner)), P);
 };
 /** `lexicallyUnder` for the paths of the mount table and of one file system (Linux: case kept, `/` separated). */
-const posixUnder = (inner: string, outer: string): boolean => staysBelow(posix.relative(outer, inner));
+const posixUnder = (inner: string, outer: string): boolean => staysBelow(posix.relative(outer, inner), posix);
 
 /** Where a canonical path is in its file system: the mount it is seen through and the path inside that file system. */
 interface FsLocation { readonly dev: string; readonly path: string }
@@ -213,35 +224,35 @@ const related = (a: FsLocation, b: FsLocation): boolean => fsUnder(a, b) || fsUn
  * the fourth slice: a folder inside a checkout that has no `.git` of its own is worked on through the checkout's); `top` is the folder that holds it (git's work tree), when that is above `canon`. No `.git`
  * up to the root: none. Anything else it cannot read: cannot tell.
  */
-async function gitPlaces(fs: SeparationFs, canon: string): Promise<{ readonly top?: string; readonly folders: string[] }> {
+async function gitPlaces(fs: SeparationFs, P: PathOps, canon: string): Promise<{ readonly top?: string; readonly folders: string[] }> {
   if (fs.readText === undefined) return { folders: [] };
   // Second review of the fourth slice: git passes over a `.git` folder that is not a git folder (no HEAD, objects or refs) and goes on up. Such a `.git` is kept as a place too, and the walk goes on, so
   // only adding is possible: a folder that git would take as its work tree further up is never missed.
   const passed: string[] = [];
-  for (let at = canon, n = 0; ; at = dirname(at), n++) {
+  for (let at = canon, n = 0; ; at = P.dirname(at), n++) {
     if (n >= SEPARATE_LIMITS.depth) throw new CannotTell(`it is more than ${SEPARATE_LIMITS.depth} folders deep`);
-    const found = await gitPlacesAt(fs, at);
+    const found = await gitPlacesAt(fs, P, at);
     if (found !== undefined && found.final) return { ...(at === canon ? {} : { top: at }), folders: [...passed, ...found.folders] };
     if (found !== undefined) passed.push(...found.folders);
-    if (dirname(at) === at) return { folders: passed };
+    if (P.dirname(at) === at) return { folders: passed };
   }
 }
 /**
  * Whether git takes the folder `gitDir` as a git folder (git's `is_git_directory`): a HEAD that is a plain file naming a ref under `refs/` or an object ID, and `objects` and `refs` folders in its common
  * folder. Anything else (missing, unreadable, a HEAD link) is "not certain", which only makes the walk above go on.
  */
-async function isGitFolder(fs: SeparationFs, gitDir: string, common: string): Promise<boolean> {
+async function isGitFolder(fs: SeparationFs, P: PathOps, gitDir: string, common: string): Promise<boolean> {
   const folder = async (p: string): Promise<boolean> => { try { await fs.readText!(p, 1); return false; } catch (error) { return (error as NodeJS.ErrnoException)?.code === "EISDIR"; } };
   try {
     // A HEAD that is a link: git looks at the link's text, which is not read here, so it is not certain.
-    if ((await fs.realpath(`${gitDir}${sep}HEAD`)) !== join(await fs.realpath(gitDir), "HEAD")) return false;
-    const head = await fs.readText!(`${gitDir}${sep}HEAD`, 256);
+    if ((await fs.realpath(`${gitDir}${P.sep}HEAD`)) !== P.join(await fs.realpath(gitDir), "HEAD")) return false;
+    const head = await fs.readText!(`${gitDir}${P.sep}HEAD`, 256);
     if (!/^(ref:[ \t]*refs\/\S|[0-9a-f]{40}(?:[0-9a-f]{24})?[ \t\r]*(?:\n|$))/.test(head)) return false;
   } catch { return false; }
-  return (await folder(`${common}${sep}objects`)) && (await folder(`${common}${sep}refs`));
+  return (await folder(`${common}${P.sep}objects`)) && (await folder(`${common}${P.sep}refs`));
 }
 /** The git folders of the `.git` at `canon`, or `undefined` when there is no `.git` there; `final` when git stops there (a `.git` file, which git follows or fails on, or a `.git` folder git takes as one). */
-async function gitPlacesAt(fs: SeparationFs, canon: string): Promise<{ readonly folders: string[]; readonly final: boolean } | undefined> {
+async function gitPlacesAt(fs: SeparationFs, P: PathOps, canon: string): Promise<{ readonly folders: string[]; readonly final: boolean } | undefined> {
   const read = async (path: string, what: string): Promise<string> => {
     // One byte past the limit is asked for, so a longer file is known to be longer (and is not judged by its start).
     const text = await fs.readText!(path, SEPARATE_LIMITS.gitFileBytes + 1);
@@ -249,8 +260,8 @@ async function gitPlacesAt(fs: SeparationFs, canon: string): Promise<{ readonly 
     return text;
   };
   // Paths git names are joined as written, not tidied: `..` after a link leads where the link leads (as the disk and git take it), and `realpath` resolves them when they are judged.
-  const under = (base: string, named: string): string => (isAbsolute(named) ? named : `${base}${sep}${named}`);
-  const dotGit = join(canon, ".git");
+  const under = (base: string, named: string): string => (P.isAbsolute(named) ? named : `${base}${P.sep}${named}`);
+  const dotGit = P.join(canon, ".git");
   let gitDir: string;
   let isFile = true;
   try {
@@ -269,14 +280,14 @@ async function gitPlacesAt(fs: SeparationFs, canon: string): Promise<{ readonly 
   }
   const out = [gitDir];
   try {
-    const common = (await read(`${gitDir}${sep}commondir`, "its git folder's commondir")).trim();
+    const common = (await read(`${gitDir}${P.sep}commondir`, "its git folder's commondir")).trim();
     if (common !== "") out.push(under(gitDir, common));
   } catch (error) {
     if (error instanceof CannotTell) throw error;
     const code = (error as NodeJS.ErrnoException)?.code;
     if (code !== "ENOENT") throw new CannotTell(`its git folder's commondir could not be read${typeof code === "string" ? ` (${code})` : ""}`);
   }
-  return { folders: out, final: isFile || (await isGitFolder(fs, gitDir, out[out.length - 1]!)) };
+  return { folders: out, final: isFile || (await isGitFolder(fs, P, gitDir, out[out.length - 1]!)) };
 }
 
 /**
@@ -287,9 +298,10 @@ async function gitPlacesAt(fs: SeparationFs, canon: string): Promise<{ readonly 
 export async function judgeSeparate(places: readonly OwnPlace[] | "too-many", guarded: readonly GuardedPlace[], o: { readonly fs?: SeparationFs; readonly platform?: string } = {}): Promise<Separation> {
   const fs = o.fs ?? nodeSeparationFs;
   const platform = o.platform ?? process.platform;
+  const P = pathOpsFor(platform);
   if (places === "too-many" || places.length > SEPARATE_LIMITS.places) return no(`the development project has more than ${SEPARATE_LIMITS.places} places to check; remove the bindings it does not need`);
   if (guarded.length === 0 || guarded.length > SEPARATE_LIMITS.guarded) return no("this controller was not told where the running installation is, so it cannot tell whether the development project's checkout is apart from it");
-  if (!places.some((p) => p.kind === "repository" && p.write && isAbsolute(p.locator))) return no("the development project has no checkout of its own: bind a separate checkout of NimbleNewt's source to it as a repository with write access (resource.bind)");
+  if (!places.some((p) => p.kind === "repository" && p.write && P.isAbsolute(p.locator))) return no("the development project has no checkout of its own: bind a separate checkout of NimbleNewt's source to it as a repository with write access (resource.bind)");
   // The mount table (Linux): read once per judgement. Where there is none (another platform, or a port that does not give one) only identities and paths are compared.
   let mounts: readonly MountEntry[] | undefined;
   try {
@@ -304,12 +316,12 @@ export async function judgeSeparate(places: readonly OwnPlace[] | "too-many", gu
   const todo: { what: string; path: string; git: boolean; derived: boolean }[] = guarded.map((g) => ({ what: g.what, path: g.path, git: g.git === true, derived: false }));
   for (let i = 0; i < todo.length; i++) {
     const g = todo[i]!;
-    if (typeof g.path !== "string" || !isAbsolute(g.path)) return no(`${g.what} is not given as a full path, so the development project's checkout cannot be checked against it`);
+    if (typeof g.path !== "string" || !P.isAbsolute(g.path)) return no(`${g.what} is not given as a full path, so the development project's checkout cannot be checked against it`);
     try {
       // A git folder the installation's `.git` names must be there (a place's must be too), and its path is taken as written (`..` after a link leads where the link leads), so `realpath` alone places it.
-      const got = g.derived ? await (async () => { const real = await fs.realpath(g.path); return { canon: real, exists: true, chain: await chainOf(fs, real) }; })() : await guardOf(fs, g.path);
+      const got = g.derived ? await (async () => { const real = await fs.realpath(g.path); return { canon: real, exists: true, chain: await chainOf(fs, P, real) }; })() : await guardOf(fs, P, g.path);
       if (g.git && got.exists) {
-        for (const extra of (await gitPlaces(fs, got.canon)).folders) todo.push({ what: `the git folder of ${g.what}`, path: extra, git: false, derived: true });
+        for (const extra of (await gitPlaces(fs, P, got.canon)).folders) todo.push({ what: `the git folder of ${g.what}`, path: extra, git: false, derived: true });
         if (todo.length > SEPARATE_LIMITS.guarded) return no("this controller has more guarded folders than it checks, so it cannot tell whether the development project's checkout is apart from them");
       }
       const at = mounts === undefined ? undefined : locate(mounts, got.canon);
@@ -323,12 +335,12 @@ export async function judgeSeparate(places: readonly OwnPlace[] | "too-many", gu
   }
   for (const p of places) {
     const name = `${p.kind === "repository" ? "repository" : p.kind} "${shown(p.label, 80)}"`;
-    if (!isAbsolute(p.locator)) {
+    if (!P.isAbsolute(p.locator)) {
       if (p.kind === "repository") return no(`the development project's ${name} is at ${shown(p.locator)}, which is not a folder on the controller's machine, so it cannot be checked; bind a local checkout instead`);
       continue;
     }
     // The place itself, then (a repository) the git folders it writes to elsewhere.
-    const looks: { what: string; path: string }[] = [{ what: `the development project's ${name} at ${shown(p.locator)}`, path: resolve(p.locator) }];
+    const looks: { what: string; path: string }[] = [{ what: `the development project's ${name} at ${shown(p.locator)}`, path: P.resolve(p.locator) }];
     for (let i = 0; i < looks.length; i++) {
       const look = looks[i]!;
       let canon: string;
@@ -337,10 +349,10 @@ export async function judgeSeparate(places: readonly OwnPlace[] | "too-many", gu
       let holds: readonly { point: string; at: FsLocation }[] = [];
       try {
         canon = await fs.realpath(look.path);
-        chain = await chainOf(fs, canon);
+        chain = await chainOf(fs, P, canon);
         if (mounts !== undefined) { at = locate(mounts, canon); holds = mountsBelow(mounts, canon); }
         if (i === 0 && p.kind === "repository") {
-          const git = await gitPlaces(fs, canon);
+          const git = await gitPlaces(fs, P, canon);
           // A place with no `.git` of its own inside a checkout: git there works on that checkout's whole work tree too (first review of the fourth slice).
           if (git.top !== undefined) looks.push({ what: `the work tree git uses for the development project's ${name} (${shown(git.top)})`, path: git.top });
           for (const extra of git.folders) looks.push({ what: `the git folder of the development project's ${name} (${shown(extra)})`, path: extra });
@@ -352,8 +364,8 @@ export async function judgeSeparate(places: readonly OwnPlace[] | "too-many", gu
       const ids = new Set(chain.map((c) => c.id));
       for (const g of guards) {
         const same = (g.self !== undefined && g.self === chain[0]!.id) || (fsUnder(at, g.at) && fsUnder(g.at, at));
-        const inside = (g.self !== undefined && ids.has(g.self)) || lexicallyUnder(canon, g.canon, platform) || fsUnder(at, g.at);
-        const above = g.ids.has(chain[0]!.id) || lexicallyUnder(g.canon, canon, platform) || fsUnder(g.at, at);
+        const inside = (g.self !== undefined && ids.has(g.self)) || lexicallyUnder(canon, g.canon, platform, P) || fsUnder(at, g.at);
+        const above = g.ids.has(chain[0]!.id) || lexicallyUnder(g.canon, canon, platform, P) || fsUnder(g.at, at);
         if (same || (inside && above)) return no(`${look.what} is the same folder as ${g.what} (${shown(g.path)}); bind a separate checkout`);
         if (inside) return no(`${look.what} is inside ${g.what} (${shown(g.path)}); bind a separate checkout`);
         if (above) return no(`${look.what} holds ${g.what} (${shown(g.path)}); bind a separate checkout`);

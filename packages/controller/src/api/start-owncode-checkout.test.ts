@@ -41,7 +41,7 @@ test("the NimbleNewt development project works only in its own checkout, apart f
     const live = await bind("live", join(programRoot(), "packages", "controller"));
     const inProgram = await enable();
     assert.equal(inProgram.error?.code, "unavailable", JSON.stringify(inProgram));
-    assert.match(inProgram.error.message, /repository "live" at .*packages\/controller is inside the running installation's program files/);
+    assert.match(inProgram.error.message, /repository "live" at .*packages[\\/]controller is inside the running installation's program files/);
     await unbind(live);
     // Inside the data directory (the database's folder).
     mkdirSync(join(d, "dev"));
@@ -172,7 +172,7 @@ test("the installation's extra guarded files are the paths the controller opens,
   const env = { NIMBLENEWT_HEARTBEAT_FILE: "env/beat" };
   assert.deepEqual(ownCodeExtraGuards({ env: {} }), {});
   assert.deepEqual(ownCodeExtraGuards({ env, backup: { directory: "b", encryption: { keyringFile: "k/ring", passcodeFile: "k/pass", recoveryFile: "/abs/rec" } }, recovery: { manifestDirectory: "m" }, watchdog: { file: "w/wd.json" } } as never), {
-    backupKeyring: resolve("k/ring"), backupPasscode: resolve("k/pass"), backupRecovery: "/abs/rec", recoveryManifests: resolve("m"), watchdogFile: resolve("w/wd.json"), heartbeatFile: resolve("env/beat"),
+    backupKeyring: resolve("k/ring"), backupPasscode: resolve("k/pass"), backupRecovery: resolve("/abs/rec"), recoveryManifests: resolve("m"), watchdogFile: resolve("w/wd.json"), heartbeatFile: resolve("env/beat"),
   });
   assert.deepEqual(ownCodeExtraGuards({ env, backup: { directory: "b", encryption: { keyringFile: "k/ring" } } } as never), { backupKeyring: resolve("k/ring"), heartbeatFile: resolve("env/beat") });
   assert.deepEqual(ownCodeExtraGuards({ env, heartbeat: { file: "opt/beat" } } as never), { heartbeatFile: resolve("opt/beat") });
