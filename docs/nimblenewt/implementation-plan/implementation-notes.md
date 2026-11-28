@@ -22558,3 +22558,38 @@ Undoing each of the three changes in the built file makes the scenario fail.
 - The unit-boundary end overwrote an `endedAt` the owner's end had already set. It now keeps the first one.
 
 Tests added: notices, `pausedAt`, the first `endedAt`, the unit not left in flight, and a repeated done that changes nothing. Also two new scenarios: the owner ends the meeting during a unit while the inquiry is open; and a failing close-out followed by another floor in the same reminder. 19 deliberate breakages of the changed lines: 17 caught by the first test additions, 19 after.
+
+## W09 live bench, 6 concurrent, 2026-11-28 (Claude agent; branch `card-w09-live`; card W09 NOT flipped; task-plan files unchanged; not pushed)
+
+Rob said on 2026-11-28 that Radiance was back for testing, with up to 6 simultaneous streams. The coordinator then split that: at most 4 for this bench and 2 for another live agent. Later Rob limited all Radiance work to a window ending 08:44 EST. **Result: no rate was measured, and the W09 bar is NOT met.** Four short-task runs at 4 at once all hit the wall limit. One confirmation run alone ended as an error. No gate, grader, bench, product code or task limit used for scoring was changed. Times are US Eastern.
+
+**Setup.** Bench commit `081e8d4e` (origin/main, with W09 slices 1 to 3), `npm ci --ignore-scripts` and `tsc --build --force` clean. Route `radiance/qwen3.8-flash-next-iq4r`, kind `radiance`, window 200,000, no route budget, grading through `/tmp/nn-slot.sh`: the second reading's settings. The key was read only by the tooling (`radianceConfig`) and never printed. Nothing was loaded, unloaded or switched. Server `/stats` version 2.3.0, `max_num_seqs` 8, `kv_tokens_total` 200,236.
+- **Driver (not a bench change).** `worker-run.mjs` hard-codes one run at a time, and its idle gate needs `in_flight` 0, which concurrent runs of our own never give. So a scratch driver (`/tmp/claude-1000/w09-live/driver.mjs`) calls the unchanged `runWorkerOne` under a semaphore of 4. Each run's `radianceOnlyFetch` sends one request at a time, so there are at most 4 requests at once. Before each start and before each agent, it reads the tooling's `readRadiance` and starts only when the pinned model is served and `in_flight + waiting < max_num_seqs`. Every record is appended as it ends (`/tmp/claude-1000/w09-live/results/worker-results.jsonl`).
+- ASSUMPTION: the throwaway checkouts and installations live in `/srv/code/worktrees-pi/eval-work-worker-w09live` (ext4). The first attempt, with the work root on `/tmp`, was refused by the product's own environment check ("data directory: found tmpfs"), and that check was not loosened. The attempt is kept as a setup error, with no agent started.
+- ASSUMPTION: "A/B" means worker variants A (plain) and D (shipped). The "~41-run set" is not defined in the README or the notes (only cited in GOAL.md), so phase 2 was planned as D over the other seven tasks. It never ran.
+
+**Runs.**
+
+| when (EST) | run | concurrency, limit | outcome (cause) | agent calls: n, median, p95, max | output tokens | acceptance at the end | shipped | other |
+|---|---|---|---|---|---|---|---|---|
+| 00:20 | quote-lines D r1 (first try) | 4, 60 min | error before any agent (tmpfs data folder refused) | 0 | 0 | - | - | setup error, kept |
+| 00:21 to 01:23 | quote-lines D r1 | 4, 60 min | **timeout** (wall-limit) | 35, 75.7 s, 361 s, 399 s | 42,590 | 15 of 15 pass | - | still running, no done; PLAN 0/14 ticked |
+| 00:21 to 01:24 | grant-proposals D r1 | 4, 60 min | **timeout** (wall-limit) | 56, 15.5 s, 242 s, 276 s | 40,744 | 18 of 18 pass | - | still running, no done |
+| 00:22 to 01:25 | quote-lines A r1 | 4, 60 min | **timeout** (wall-limit) | 38, 53.1 s, 331 s, 575 s | 47,148 | 15 of 15 pass | - | 2 early stops, 2 readmits, 2 reply cuts |
+| 00:22 to 01:26 | grant-proposals A r1 | 4, 60 min | **timeout** (wall-limit) | 67, 22.3 s, 212 s, 388 s | 24,721 | 0 of 18 (checkout unchanged) | - | 1 early stop, 1 readmit |
+| 08:06 to 08:42 | quote-lines D r1 (confirm) | 1, 35 min (override, so it fits Rob's window; not a scored run) | **error** (ended-otherwise): attempt failed `message: must be text` after 34.3 min | 99, 5.8 s, 56 s, 107 s | 79,069 | 15 of 15 pass | 154 of 154 | done check: build passed, package tests failed, changed tests failed; second agent never asked |
+
+Counts per task and variant: verified finishes 0, false dones 0, timeouts 4 (one per cell; 3 of them with the acceptance suite passing at the limit), errors 1 (confirm) plus 1 setup error. That is one run per cell, so these are readings, not rates. Earlier: variant D size S quote-lines 2 of 3 verified (second reading), 0 of 3 (first reading).
+
+**Why the four timed out (diagnosis).** The route worked: 196 agent calls were answered, with no outage, refusal or HTTP error, and work was done. Model-call time used 3,565 of the 3,600 s in each run. Concurrency was the cause. KV was the limit (about 200k tokens in all, with contexts of 45k to 65k each): `/stats` showed `running` 1 to 4 and the rest `waiting`. Total throughput was about 6 requests a minute, about what one run gets alone, so each run got a quarter of it against an unchanged wall limit. Alone, the confirm run's median call was 5.8 s, against 15 to 76 s at 4 at once. `/stats` also showed one request in flight before our first call and after our last one, a non-bench stream during r1. Server total_requests rose 804 to 903 over the confirm run, all 99 ours.
+
+**What the failures look like.**
+- quote-lines D r1: work correct (15/15) at 60 min, never sent work.end; waiting on queued model calls.
+- grant-proposals D r1: work correct (18/18) at 60 min, never ended; last third of calls 100 to 275 s each.
+- quote-lines A r1: work correct (15/15), two thinking-only reply cuts and two readmits ate the time.
+- grant-proposals A r1: no change to the checkout in 60 min (57 run calls, 8 reads, no write or edit).
+- confirm: work correct (15/15, shipped 154/154). The done check refused twice on the package tests and the changed tests (the acceptance files are graded outside). The attempt then failed on a worker-channel decode error `message: must be text` (`packages/contracts/src/worker-channel.ts:195`: a frame's `message` not a string, or over 1,000,000 characters). Context had grown to about 89k input tokens a call. Not investigated further. Candidate product bug.
+
+**Recommendation.** The W09 bar is not met and was not measured. On this server, concurrency above 1 or 2 gives no throughput, and it turns queueing into timeouts. Run the set one run at a time, or 2 at most when contexts are small, on a reserved window. The ~34 h figure for a full set at one at a time stands. Before that, look into the `message: must be text` channel failure, and why the done check's package tests fail when the acceptance suite passes. Gates unchanged.
+
+**Housekeeping.** The worktree `/srv/ai/code-worktrees/card-w09-live` and its branch were removed while idle, most likely by the merged-worktree cleanup, since there were no commits beyond origin/main. They were recreated at `081e8d4e` before the confirm run. The session sat idle from 01:26 to 08:04 EST after the r1 runs drained, waiting for an event that never came. Phase 2 was not run.
