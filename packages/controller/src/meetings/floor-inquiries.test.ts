@@ -316,6 +316,7 @@ floorSuite(test, "a well-formed list that leaves out an open inquiry (an earlier
   const rev = (await w.storage.getAggregate(INDEX))!.revision;
   assert.deepEqual((await w.floor.openInquiries(w.owner, 10)).items.map((i) => i.recordId), [a, b]);
   assert.equal((await w.storage.getAggregate(INDEX))!.revision, rev, "a list that matches the floors is not written");
+  assert.equal(await walks(w, () => reads(w)), 0, "and it is marked checked: later reads and the reminder walk no floor");
   // a list that still names an inquiry the earlier release ended (c) is put right too
   await plant(w, { ids: [a, b, c] });
   w.reopen();

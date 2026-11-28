@@ -22174,3 +22174,28 @@ The typical tier (`.github/workflows/ci.yml`, five parts via `scripts/test-chang
 - `recovery/recovery.test` ("the same writes give the same manifest on ... PostgreSQL"): it collects one manifest digest per backend from the preceding per-backend tests and asserted exactly 4. `domain/testing/backends.ts` gives only the reference store and SQLite when `NIMBLENEWT_TIER=typical`, so the typical tier has 2. This dates from K04 (`343b86d1`), not from K05. The test now expects `backends.length` digests (4 on the exhaustive tier, 2 on the typical tier), requires at least 2, and still requires all of them to be equal. A backend whose test failed pushes no digest, so the count still catches it.
 
 No product code changed. Runs are listed in the commit message.
+
+## CI fix: a status question wrote a record after the M05 open-inquiry list merge (Claude agent, 2026-11-27 EST; branch `card-fixstatus` from main `c16a17ff`; no card flipped; not pushed)
+
+**What failed.** The typical tier on Linux Node 22 failed `api/start-status.test` ("a status question in the owner chat ... nothing is written (card U05)"): `answering writes no record`, 8 !== 7. It is red from `84d67d61`, the merge of `card-m05b`.
+
+**Cause.** The M05 first review added a check of the stored list `meeting-floor-inquiries`/`installation` on the first use after each start. The check walks the floors and stores the list when it is missing, cannot be trusted or differs. It lived in `#openInquiryIds`, which serves both the write paths (`sweep`, `openInquiry`) and the reads (`ownerPending`, which is `meeting.floor.needs-you`, and `openInquiries`, the status view's Needs-you list). Every owner-chat reply reads the Needs-you count (`StatusService.needsYouCount` reaches `openInquiries`). So the first status question after a start, with no list yet, ran the `meeting.floor.inquiries` command and wrote one audit record. That breaks the U05 rule that answering a status question writes nothing.
+
+**Fix (`meetings/floor.ts`).** `#openInquiryIds(store)`. Only the write paths store the built list: the reminder (`sweep`, run by every scheduled `tick`) and `openInquiry`. Both write anyway. The reads pass `store = false` and write nothing. They answer from their own bounded walk of the floors and keep that walk in memory (`#walked`) for the stored list's revision at the time. Every inquiry open or end changes the stored list in the same write, so the revision moves and the next read walks again. Until the reminder stores the list, repeated reads do not walk every floor again. M05's guarantees are unchanged:
+- no inquiry is lost: the reads answer from the floors, not from a stale list;
+- the walk is bounded the same way (`indexPages`);
+- a read is refused `unavailable` only when there is no trusted list and the walk does not finish; a well-formed list is then believed;
+- a list that matches the floors marks the instance checked without a write;
+- the revision-guarded store and the lost-race retry now happen on the reminder instead of the first read.
+
+**Tests.**
+- `meetings/floor-inquiries.test`: the scenarios that expected the first read to store the list now expect the reminder to store it. Before that, they check that a read leaves the list as it was. The "checked once after the start" steps use `sweep`.
+- New scenario: `ownerPending` and `openInquiries` write nothing (every `applyOperation` counted) after a start with the list missing, untrusted, stale either way, or empty, and they still answer from the floors. The kept walk is redone after another controller ends or opens an inquiry. With no list and too many floors, the refused reads write nothing.
+- A list that matches is marked checked: later reads and the reminder walk no floor.
+- New `api/start-status.test` case: after a restart with the list missing, stale or untrusted, these write no non-chat audit record and still show the open inquiry: `status.ask` `needs_you` and `overview`, `meeting.floor.needs-you`, and owner-chat status questions. The next dispatcher tick then stores the list.
+
+**Breakages.** 15 single edits to the built `dist/meetings/floor.js` in a copy of the tree. Each was run alone against `floor-inquiries.test` and `start-status.test` under the typical tier, then restored and checked by SHA-256 (script `/tmp/claude-1000/fixstatus/breakages.py`). 14 of 15 were caught at first, including the original regression (a read stores the list). The missed edit, "a matching list is not marked checked", is caught after the walk-count assertion above was added.
+
+**Other red.** All 229 `api/start*.test.js` files were run under `NIMBLENEWT_TIER=typical NIMBLENEWT_FAST=1` on Node 22 in 12 batches, with the fix in place: 583 of 583 passed. Nothing else from the M05b merge is red there.
+
+No interpreter prompt text, API summary text, task-plan file or card status changed.
