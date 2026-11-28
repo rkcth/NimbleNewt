@@ -22558,3 +22558,9 @@ Undoing each of the three changes in the built file makes the scenario fail.
 - The unit-boundary end overwrote an `endedAt` the owner's end had already set. It now keeps the first one.
 
 Tests added: notices, `pausedAt`, the first `endedAt`, the unit not left in flight, and a repeated done that changes nothing. Also two new scenarios: the owner ends the meeting during a unit while the inquiry is open; and a failing close-out followed by another floor in the same reminder. 19 deliberate breakages of the changed lines: 17 caught by the first test additions, 19 after.
+
+## Live runs on Radiance 2026-11-28 (Claude agent, 2026-11-28 EST; branch `card-live-other` from main `081e8d4e`; no card flipped; not pushed)
+
+Rob said on 2026-11-28 that Radiance is back and the live-model testing should begin, with up to 6 concurrent requests in all; the W09 bench agent uses up to 4 and this work at most 2. Never loading, unloading, switching or restarting a model; no cloud or ChatGPT route; the key stays in the tooling's own Authorization header.
+
+**M00 batch 5 budget (set before any batch-5 model call).** ASSUMPTION: (Rob delegates; nothing waits on him) M00 batch 5 spend: $0 cloud, a 3,000,000-token cap on Radiance, recorded per meeting. It covers the one M00 experiment batch 4 left incomplete: chair notes written once against rolling notes at 20 members (rule 6), one meeting of each on the same server version, plus at most one retry of a meeting cut off by a server fault. The budget file with the cap is `evidence/m00-raw/batch5/budget.json`, committed before the first run; the runner enforces the cap over both meetings (`--budget <file> --cap-tokens 3000000`). As in batch 4, $0 is held by the route (local model only), not by a runner dollar cap (`--cap-usd 0` would refuse every call, since the ledger refuses at `>=`), so the runner will write `capUsd: null` after the first run.
