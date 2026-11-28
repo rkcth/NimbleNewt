@@ -1725,7 +1725,7 @@ Result: `{ item }`.
 
 #### `owncode.list`
 
-Requests to work on NimbleNewt's own code, oldest first, a page at a time: the owner sees all, an agent its own. `status` keeps one status.
+Requests to work on NimbleNewt's own code, oldest first, a page at a time: the owner sees all, an agent its own. `status` keeps one status. The list holds every open request and the newest ended ones (500 in all); `archived` (the owner's view) counts the ended ones that left it, each still readable by its ID.
 
 Arguments:
 
@@ -1733,7 +1733,7 @@ Arguments:
 - `afterId` (optional): continue after this request
 - `limit` (optional): at most 100
 
-Result: `{ items, next? }`.
+Result: `{ items, next?, archived? }`.
 
 #### `backup.config.status`
 
@@ -6136,7 +6136,7 @@ Result: `{ revision }`.
 
 #### `owncode.request`
 
-An agent asks to work on NimbleNewt's own code, before any work: `what` it wants to change, `why`, the expected `effort` and the expected `cost`, in its own words. Refused while the feature is off (the message says the owner can enable it). At most 5 of one requester wait at a time; nothing starts until the owner approves.
+An agent asks to work on NimbleNewt's own code, before any work: `what` it wants to change, `why`, the expected `effort` and the expected `cost`, in its own words. Refused while the feature is off (the message says the owner can enable it). At most 5 of one requester wait at a time; nothing starts until the owner approves. When 500 are listed, the oldest ended one (rejected, withdrawn, or approved with its task done or cancelled) leaves the list (archived: kept, readable by its ID); when all 500 are open a new request is refused.
 
 Arguments:
 
@@ -6164,7 +6164,7 @@ Result: `{ revision, status, taskId? }`.
 
 #### `owncode.withdraw`
 
-Withdraws a request to work on NimbleNewt's own code, with a reason: the owner a waiting or an approved one (no further attempt starts on its task), the requester its own waiting one. It stays listed.
+Withdraws a request to work on NimbleNewt's own code, with a reason: the owner a waiting or an approved one (no further attempt starts on its task), the requester its own waiting one. It is kept, and stays listed until newer requests move it out (archived, still readable by its ID).
 
 Arguments:
 
