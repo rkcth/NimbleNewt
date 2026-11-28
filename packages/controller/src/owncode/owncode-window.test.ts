@@ -242,6 +242,82 @@ for (const backend of backends) {
     assert.equal(idx.archived, 5, "five ended entries left: 504 listed, the new one makes 500");
   });
 
+  suite("first review: two requests at the cap at once each move out a different ended request (or the second is refused when only one was ended); none is lost or listed twice and archived counts each once", async (c) => {
+    const open = await c.ask(); const task = await c.approve(open);
+    const ended = fakeIds(2, "r");
+    const ids = fakeIds(LISTED - 3, "s");
+    const approved = (id: string) => ({ id, body: { requestedBy: c.dev.id, status: "approved", projectId: c.devProject, taskId: task, request: ASK, history: [] } });
+    await c.plant([open, ...ended, ...ids], [...ended.map((id) => ({ id, body: { requestedBy: c.dev.id, status: "rejected", request: ASK, history: [] } })), ...ids.map(approved)]);
+    const [a, b] = await Promise.all([c.ask(c.dev), c.ask(c.dev2)]);
+    let idx = await c.index();
+    assert.equal(idx.ids.length, LISTED);
+    assert.equal(new Set(idx.ids).size, LISTED, "no entry is listed twice");
+    assert.ok(idx.ids.includes(a) && idx.ids.includes(b) && idx.ids[0] === open);
+    assert.ok(!ended.some((x) => idx.ids.includes(x)));
+    assert.equal(idx.archived, 2);
+    // Only one ended now: of two at once, one is added and the other is refused with nothing of its own written.
+    await c.withdraw(ids[100]!);
+    const results = await Promise.allSettled([c.ask(c.dev), c.ask(c.dev2)]);
+    const added = results.filter((r): r is PromiseFulfilledResult<string> => r.status === "fulfilled").map((r) => r.value);
+    const refused = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+    assert.equal(added.length, 1);
+    assert.equal(refused.length, 1);
+    assert.ok(refused[0]!.reason instanceof DomainError && refused[0]!.reason.code === "unavailable", String(refused[0]!.reason));
+    idx = await c.index();
+    assert.equal(idx.ids.length, LISTED);
+    assert.equal(new Set(idx.ids).size, LISTED);
+    assert.ok(idx.ids.at(-1) === added[0] && !idx.ids.includes(ids[100]!));
+    assert.equal(idx.archived, 3);
+    assert.equal(Object.values(idx.pending).flat().length, 3, "the refused request waits nowhere");
+  });
+
+  suite("first review: an approval whose task is done is ended and leaves; one withdrawn from approval leaves although its task is still open (the gate still refuses that task)", async (c) => {
+    const open = await c.ask(); const task = await c.approve(open);
+    const made = async (label: string): Promise<{ id: string; revision: number }> => { const t = await c.projects.createTask({ commandId: cid(label), actor: c.owner.id, projectId: c.devProject, title: label, description: label }); return { id: t.id, revision: (await c.projects.getTask(t.id))!.revision }; };
+    const step = async (taskId: string, to: "ready" | "in_progress" | "done") => { await c.projects.transitionTask({ commandId: cid(to), actor: c.owner.id, taskId, expectedRevision: (await c.projects.getTask(taskId))!.revision, to }); };
+    const finished = await made("finished");
+    await step(finished.id, "ready"); await step(finished.id, "in_progress"); await step(finished.id, "done");
+    assert.equal((await c.projects.getTask(finished.id))!.state, "done");
+    const [doneReq, withdrawnReq] = fakeIds(2, "w");
+    const ids = fakeIds(LISTED - 3, "x");
+    const approved = (id: string, taskId: string, extra: Record<string, unknown> = {}) => ({ id, body: { requestedBy: c.dev.id, status: "approved", projectId: c.devProject, taskId, request: ASK, history: [], ...extra } });
+    await c.plant([open, doneReq!, withdrawnReq!, ...ids], [approved(doneReq!, finished.id), approved(withdrawnReq!, task, { status: "withdrawn", withdrawnFrom: "approved" }), ...ids.map((id) => approved(id, task))]);
+    await c.ask(c.dev2);
+    let idx = await c.index();
+    assert.ok(!idx.ids.includes(doneReq!) && idx.ids.includes(withdrawnReq!) && idx.ids[0] === open, "the done approval leaves first");
+    await c.ask(c.dev2);
+    idx = await c.index();
+    assert.ok(!idx.ids.includes(withdrawnReq!) && idx.ids[0] === open && idx.ids[1] === ids[0]);
+    assert.equal(idx.archived, 2);
+    assert.ok((await c.svc().get(c.owner, withdrawnReq!)) !== undefined, "moved out, still readable by its ID");
+  });
+
+  suite("first review: a list longer than the window (a damaged store) reads only its last 500 places; the entries before them are not read and count as open, so nothing leaves and the request is refused", async (c) => {
+    const open = await c.ask(); const task = await c.approve(open);
+    const before500 = fakeIds(1500, "u");
+    const ids = fakeIds(LISTED - 1, "v");
+    await c.plant([...before500, open, ...ids], ids.map((id) => ({ id, body: { requestedBy: c.dev.id, status: "approved", projectId: c.devProject, taskId: task, request: ASK, history: [] } })));
+    const before = await c.index();
+    const counts = new Map<string, number>();
+    await refuses("unavailable", () => c.svc(counts).request(c.dev2, { commandId: "over-1", ...ASK } as never), /all are waiting or approved/);
+    assert.deepEqual(await c.index(), before, "nothing is written");
+    assert.ok((counts.get("owncode-request") ?? 0) <= LISTED + 2, `request reads ${counts.get("owncode-request")}`);
+    assert.ok((counts.get("task") ?? 0) <= LISTED + 1, `task reads ${counts.get("task")}`);
+    // An ended place in the window does not help: the unread entries cannot leave, so the list cannot come under the cap (fail closed until the store is repaired); still nothing is written.
+    await c.withdraw(ids[0]!);
+    const after = await c.index();
+    await refuses("unavailable", () => c.ask(c.dev2), /all are waiting or approved/);
+    assert.deepEqual(await c.index(), after);
+    assert.deepEqual(after.ids.slice(0, 1500), before500);
+    // 600 listed, the 101 oldest rejected: only one of them is in the window (the 100 before it are not read), so the list cannot come under the cap and nothing leaves.
+    const old = fakeIds(101, "y");
+    await c.plant([...old, open, ...ids.slice(1, LISTED - 1)], old.map((id) => ({ id, body: { requestedBy: c.dev.id, status: "rejected", request: ASK, history: [] } })));
+    const six = await c.index();
+    assert.equal(six.ids.length, 600);
+    await refuses("unavailable", () => c.ask(c.dev2), /all are waiting or approved/);
+    assert.deepEqual(await c.index(), six);
+  });
+
   suite("retention: the status counts every request (archived ones too), the owner's export still carries the approved ones moved out, and a scoped backup restores every own-code record unchanged", async (c) => {
     const kept = await c.ask(); const keptTask = await c.approve(kept);
     const gone = await c.ask(); const goneTask = await c.approve(gone); await c.withdraw(gone);

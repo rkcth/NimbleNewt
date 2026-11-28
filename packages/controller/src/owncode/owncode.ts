@@ -504,13 +504,15 @@ export class OwnCodeService {
   /**
    * The listed window for a new request `add` (retention slice): the list with `add` at its end, after the oldest ended requests left it when it is full; `undefined` when every listed request is open.
    * Only a full list is looked at: oldest first, one request read (and, for an approval, one task read) per entry, stopping once enough ended ones are found. A list that is not a list of strings is an
-   * integrity failure (nothing is written).
+   * integrity failure (nothing is written). A list longer than the window (no controller writes one; only a damaged store): the IDs before its last `OWNCODE_LIMITS.listed` are not read and count as open, so
+   * none of them leaves and the reads stay at most one request and one task per window place (as card B05's experiment index does; first review of the retention slice). Such a list comes back under the
+   * cap only when its window holds enough ended requests; otherwise (from 1000 entries always) a new request is refused, as every full list was before this slice.
    */
   async #window(ids: readonly string[], add: string): Promise<{ ids: string[]; archived: string[] } | undefined> {
     if (!Array.isArray(ids) || !ids.every((x) => typeof x === "string")) throw new DomainError("integrity", "the list of requests to work on NimbleNewt's own code cannot be read, so no request is added");
     const need = ids.length - OWNCODE_LIMITS.listed + 1;
     const ended = new Set<string>();
-    for (const x of ids) { if (ended.size >= need) break; if (!(await this.#open(x))) ended.add(x); }
+    for (const x of ids.slice(Math.max(0, ids.length - OWNCODE_LIMITS.listed))) { if (ended.size >= need) break; if (!(await this.#open(x))) ended.add(x); }
     return keptWindow(ids, (x) => !ended.has(x), OWNCODE_LIMITS.listed, add);
   }
 
