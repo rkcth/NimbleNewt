@@ -263,7 +263,8 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
     // The loss is told to the host at once, with a turn open as well (card G08), so the host ends the process when the grace is over whatever else it waits for: without this a remote host that could not reach its controller
     // kept the sandbox for minutes, while its reports of the turn timed out. It is told before the abort below, which can take long on a loaded machine (the grace counts from the loss, not from the end of the abort).
     // With no turn running this message is how the loss is told: an unsolicited `result` has no waiter on the host and would be dropped.
-    send({ t: "lease.lost", reason });
+    // A channel that cannot be written (the file channel at its limit throws) must not keep the turn from being aborted (card G08 second review): the abort below runs whatever the send does.
+    try { send({ t: "lease.lost", reason }); } catch { /* the host ends the process when the channel fails; the abort still runs */ }
     try { await adapter?.root().abort(); } catch { /* the turn's result is what is reported */ }
     // A turn that is running reports in its own `finally`-path, and is quiet once it has told the host.
     if (!turnOpen) dog?.quiet();

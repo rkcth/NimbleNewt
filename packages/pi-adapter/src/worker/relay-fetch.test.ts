@@ -31,6 +31,21 @@ test("closeAll fails every call in flight and asks the host to abort each one; a
   assert.equal(sent.filter((m) => m.t === "fetch").length, 3);
 });
 
+test("a call its caller already aborted (its signal) is not aborted at the host a second time by closeAll (G08 second review)", async () => {
+  const sent: FromChild[] = [];
+  const relay = relayFetch("http://relay.local", (m) => { sent.push(m); });
+  const stop = new AbortController();
+  const a = relay.fetch("http://relay.local/m0/chat/completions", { method: "POST", body: "{}", signal: stop.signal });
+  const b = relay.fetch("http://relay.local/m0/chat/completions", { method: "POST", body: "{}" });
+  await new Promise((ok) => setImmediate(ok));
+  const ids = sent.filter((m) => m.t === "fetch").map((m) => (m as { id: number }).id);
+  stop.abort();
+  await assert.rejects(a, { name: "AbortError" });
+  relay.closeAll("the lease ended (silent)", { abortAtHost: true });
+  await assert.rejects(b, /the lease ended \(silent\)/);
+  assert.deepEqual(sent.filter((m) => m.t === "fetch.abort").map((m) => (m as { id: number }).id), [ids[0], ids[1]], "each call aborted at the host once");
+});
+
 test("a call whose reply is streaming is aborted at the host by closeAll, and its stream fails in the process", async () => {
   const sent: FromChild[] = [];
   const relay = relayFetch("http://relay.local", (m) => { sent.push(m); });

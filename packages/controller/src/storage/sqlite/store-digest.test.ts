@@ -50,6 +50,17 @@ test("the store digest sees a value rewritten in place in each table that holds 
     assert.ok(extra.tables.includes("later one"));
     assert.notEqual(extra.digest, base.digest, "a table the list does not name is covered too");
 
+    // The order SQLite returns rows in is not part of the digest (G08 second review): the same rows read back in another order (a row deleted and written again goes last) give the same digest.
+    const order = new DatabaseSync(path);
+    try { order.exec("INSERT INTO \"later one\" VALUES (2)"); } finally { order.close(); }
+    const twoRows = storeDigest(path);
+    const again = new DatabaseSync(path);
+    try {
+      again.exec("DELETE FROM \"later one\" WHERE x = 1; INSERT INTO \"later one\" VALUES (1)");
+      assert.deepEqual((again.prepare("SELECT x FROM \"later one\"").all() as { x: number }[]).map((r) => r.x), [2, 1], "the rows now come back in the other order");
+    } finally { again.close(); }
+    assert.deepEqual(storeDigest(path), twoRows, "the same rows in another order: the same digest");
+
     const foreign = join(dir, "other.sqlite");
     makeForeignDatabase(foreign);
     assert.throws(() => storeDigest(foreign), /not a controller store/);
