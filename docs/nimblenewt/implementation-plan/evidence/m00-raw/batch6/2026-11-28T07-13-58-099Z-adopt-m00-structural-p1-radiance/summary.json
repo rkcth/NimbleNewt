@@ -1,0 +1,200 @@
+{
+  "scenario": "Adopt Lintwise as a required pre-merge check (eight engineers)",
+  "variant": {
+    "name": "m00-structural-p1",
+    "firstRound": "blind",
+    "rounds": 2,
+    "transcriptMode": "full",
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "chairQuestionCheck": "structural",
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 1,
+    "allowTabling": true,
+    "directQuestions": true,
+    "deskRead": true
+  },
+  "model": "qwen3.8-flash-next-iq4r",
+  "roster": [
+    {
+      "id": "a1",
+      "name": "Priya",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a2",
+      "name": "Marcus",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a3",
+      "name": "Elena",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a4",
+      "name": "Tom",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a5",
+      "name": "Sana",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a6",
+      "name": "Lars",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a7",
+      "name": "Jin",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a8",
+      "name": "Olga",
+      "model": "qwen3.8-flash-next-iq4r"
+    }
+  ],
+  "chairModel": "qwen3.8-flash-next-iq4r",
+  "motion": {
+    "text": "The team adopts Lintwise, an automated code-quality checker, as a required pre-merge check on every repository.",
+    "version": 1
+  },
+  "result": {
+    "yes": 8,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  },
+  "stats": {
+    "objections": [
+      {
+        "attempt": 0,
+        "objectors": []
+      }
+    ],
+    "chairQuestions": [
+      {
+        "to": "a1",
+        "topic": "Observed runtime and scope of Lintwise checks",
+        "experience_sought": "Over your six months using Lintwise, what was the typical wall-clock time for a single run, and did you configure it to scan only changed files or the full tree? Any experience with timeouts or hung runs?"
+      },
+      {
+        "to": "a4",
+        "topic": "Actionable-finding ratio and false-positive rate",
+        "experience_sought": "In your two months running Lintwise on your side project, roughly what fraction of findings were genuine bugs or contract issues versus purely cosmetic style nits? Did you end up disabling any rule categories?"
+      }
+    ],
+    "rejectedChairQuestions": [],
+    "skippedAbsent": [],
+    "inquiries": [],
+    "ownerReports": [],
+    "deskRead": {
+      "refused": [],
+      "excerpts": [],
+      "rejectedExcerpts": [],
+      "corrections": []
+    },
+    "directQuestions": [
+      {
+        "from": "a1",
+        "to": "4",
+        "refused": "unknown or self"
+      },
+      {
+        "from": "a2",
+        "to": "Priya",
+        "refused": "unknown or self"
+      },
+      {
+        "from": "a5",
+        "to": "Priya",
+        "refused": "unknown or self"
+      },
+      {
+        "from": "a6",
+        "to": "Sana",
+        "refused": "unknown or self"
+      },
+      {
+        "from": "a8",
+        "to": "17",
+        "refused": "unknown or self"
+      }
+    ],
+    "inquiryChecks": {
+      "heldAnswers": 0,
+      "leaks": [],
+      "revisionsPerVoter": {},
+      "voterRevisionTurnsOk": true,
+      "clockMs": {
+        "total": 360366,
+        "paused": 0,
+        "meeting": 360366
+      }
+    }
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 0.42857142857142855,
+    "membersWhoChangedStanceInRound2": 3,
+    "cacheHitRatio": 0.5270996695763673,
+    "calls": 35,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1-blind": {
+        "calls": 8,
+        "input": 2046,
+        "cached": 0,
+        "output": 8511,
+        "ms": 105160,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 1687,
+        "cached": 0,
+        "output": 588,
+        "ms": 8223,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 2,
+        "input": 3782,
+        "cached": 0,
+        "output": 2149,
+        "ms": 27212,
+        "costUsd": 0
+      },
+      "round2": {
+        "calls": 8,
+        "input": 21120,
+        "cached": 10240,
+        "output": 8857,
+        "ms": 122071,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 8,
+        "input": 6150,
+        "cached": 0,
+        "output": 4257,
+        "ms": 55057,
+        "costUsd": 0
+      },
+      "ballot": {
+        "calls": 8,
+        "input": 26046,
+        "cached": 21824,
+        "output": 3245,
+        "ms": 42626,
+        "costUsd": 0
+      }
+    }
+  }
+}

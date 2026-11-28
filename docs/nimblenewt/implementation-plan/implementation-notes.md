@@ -22600,3 +22600,26 @@ Rob said on 2026-11-28 that Radiance is back and the live-model testing should b
 - M00 clause status (not flipped): "compare ... the chair's notes written once after round 1 against rolling notes ..., with a 20-participant meeting in the set" is now met with a completed local pair, and the owner's budget for this batch was set and committed (`2964ea26`, 00:21:15 EST) before the first call (00:21:25 EST). Still as before: no budget shown before the 2026-10-22, 2026-10-23 and Radiance 1 to 3 batches (deviations 1 to 4 in the M00 record); "one or two comment rounds" stays partly met; the per-route visible-text cap is not built (code, not a run).
 
 **M00 batch 6 budget (set before any batch-6 model call).** ASSUMPTION: (Rob delegates; nothing waits on him) M00 batch 6 spend: $0 cloud, a 1,000,000-token cap on Radiance, recorded per meeting. It is for a clean one-or-two comment rounds pair (rule 2). Every earlier one-round variant differed from its two-round partner in more than the round count: the cloud `one-round` dropped chair questions and desk notes, and the local `m00-one-round`/`m00-one-round-p1` lacked the structural question check. New variant `prototypes/meeting/variants/m00-structural-one-round-p1.json` is `m00-structural-p1` with `rounds: 1` and nothing else changed. Plan: scenario `tool-adoption` (8 members), 3 meetings of each variant, alternating, each started only after the idle check. Budget file `evidence/m00-raw/batch6/budget.json`, committed before the first run; the runner enforces the cap (`--cap-tokens 1000000`).
+
+**M00 batch 6: one or two comment rounds, a clean pair (rule 2).** Scenario `tool-adoption` (8 members), `m00-structural-p1` (two rounds) against `m00-structural-one-round-p1` (the same with one round), alternating, 02:13 to 02:37 EST. All six started after the idle check passed the first time, and in each one the request counter rose by exactly its own calls (no other traffic).
+
+| Meeting | Rounds | Outcome | Calls | Tokens | Cached input | Time | Chair questions | Members who changed stance in round 2 |
+|---|---|---|---|---|---|---|---|---|
+| `07-13-58` | 2 | passed 8-0 (1 objection round) | 35 | 88,438 | 52.7% | 360 s | 2 | 3 |
+| `07-19-58` | 1 | tabled | 20 | 27,914 | 0% | 177 s | 2 | n/a |
+| `07-22-56` | 2 | passed 8-0 (1 objection round) | 35 | 87,257 | 55.6% | 328 s | 2 | 1 |
+| `07-28-24` | 1 | tabled | 20 | 26,728 | 0% | 159 s | 2 | n/a |
+| `07-31-03` | 2 | tabled | 28 | 59,960 | 36.3% | 253 s | 2 | 0 |
+| `07-35-16` | 1 | tabled | 20 | 27,082 | 0% | 120 s | 2 | n/a |
+
+- Budget: 317,379 of 1,000,000 tokens over 6 meetings, $0 (local model only; `capUsd: null` as above).
+- Verdict for rule 2: with only the round count changed, one round tabled the motion 3 times in 3. Two rounds passed it 2 times in 3 and tabled it once. One round never reaches ballots here, so its lower cost (about 27k tokens against 60k to 88k) is mostly the meeting stopping early, not a cheaper way to the same decision. That agrees with the local batches 1 and 2 (one round tabled 3 of 4) and with the record's "keep two as the default". The comparison is now clean. Three meetings per cell; one model, one scenario.
+- Raw files: `evidence/m00-raw/batch6/` (6 complete meeting folders, `budget.json`); figures: `evidence/m00-radiance-batch6.json`. Secret search as above: 0 matches; the key itself found 0 times in all 317 evidence files.
+- M00 clause status (not flipped): "one or two comment rounds" can now be read as met with a clean local pair (it was "partly").
+
+**What was not done, and what remains.**
+- W04 variant C part (b): already done before this session (see above); nothing run.
+- M00: the earlier batches still have no budget shown before their runs (the record's deviations 1 to 4; these cannot be fixed afterwards). The per-route visible-text cap is not built (code). Cloud repeats are not allowed (no cloud spend). The cache comparison of prompt orders on a hosted provider rests on the recorded figures.
+- G10: retention past 300 s (up to the one-hour setting) is not measured. The 3 unexplained reuse figures under load are not diagnosed; a probe with a differing fact in the first 2,048 tokens is the next step, and that is a bench change. Concurrency (to 8) and the refusal fallback were measured on 2.2.0 and not repeated (concurrency above 2 is outside this session's share). Pinned memory, FP8 KV and container settings: not exposed by the engine.
+- M05 and M06 live items (a real model route for `options.meetingFloor.runner`, the measured defaults in the running controller) need code that is not built, so there was no small run to make. D04 needs an agreed plan with the owner. W09 is the other agent's.
+- Attempts recorded in full: M00 attempt 1 failed (fetch failed, server load); one idle-check refusal (rolling, 00:38:55 EST), nothing sent; every other run completed. No 502 and no non-200 answer was seen in the G10 runs.

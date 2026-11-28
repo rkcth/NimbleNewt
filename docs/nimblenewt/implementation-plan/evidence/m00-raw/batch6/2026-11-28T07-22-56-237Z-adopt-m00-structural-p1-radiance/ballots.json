@@ -1,0 +1,117 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "yes",
+      "reason": "The motion now includes parallel execution, a curated correctness-plus-secret-detection subset, a one-week shadow period, rule-by-rule promotion, and a hard timeout—all the mitigations I asked for after six months of real-world use, so the false-positive noise and CI-time risks I saw on my previous team are addressed."
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "yes",
+      "reason": "The motion now bakes in my three non-negotiables—one-week shadow-mode on our actual monorepo, parallel execution with a hard timeout, and rule-by-rule promotion after the data lands—so the hard gate is conditional on a warm-cache number I will actually see before it blocks anyone's merge."
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "yes",
+      "reason": "The motion now explicitly enables secret-detection rules (hardcoded keys, high-entropy strings, risky dependency imports) in the curated subset from day one and keeps them active during the shadow week so we measure their false-positive rate on real diffs before they become blocking, which closes the gap that let a test API key reach main last quarter."
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "yes",
+      "reason": "With the curated correctness-plus-secrets subset, parallel execution under a 90-second cap, and Marcus's shadow-mode week to benchmark on our actual monorepo, the gate catches the trivial bugs and style issues I keep re-fixing without pushing our CI past what I'll tolerate, so I'm in."
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "yes",
+      "reason": "The team has incorporated my SQL-linter pairing and shadow-week validation of correctness rules against config-key typos, so the gate now covers both halves of my pipeline with measurable safeguards before it blocks anything."
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "yes",
+      "reason": "The curated subset of ten correctness rules plus secret-detection rules, enforced only after a one-week shadow period with rule-by-rule promotion and a hard timeout, gives me the clean test signal I need without drowning developers in subjective noise."
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "yes",
+      "reason": "The team has converged on every condition I set—parallel execution, 90-second cap, hard timeout, one-week shadow period, rule-by-rule promotion under ten percent false positives, per-rule rollback toggle, hotfix override, and SQL-linter pairing—so the motion as stated is safe to adopt."
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "yes",
+      "reason": "The shadow-mode week and rule-by-rule promotion mean I get a gentle feedback loop to learn our conventions one rule at a time before anything blocks my merges, which is exactly what I need as someone still building a mental model of the codebase."
+    }
+  ],
+  "ballotHistory": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "yes",
+      "reason": "The motion now includes parallel execution, a curated correctness-plus-secret-detection subset, a one-week shadow period, rule-by-rule promotion, and a hard timeout—all the mitigations I asked for after six months of real-world use, so the false-positive noise and CI-time risks I saw on my previous team are addressed.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "yes",
+      "reason": "The motion now bakes in my three non-negotiables—one-week shadow-mode on our actual monorepo, parallel execution with a hard timeout, and rule-by-rule promotion after the data lands—so the hard gate is conditional on a warm-cache number I will actually see before it blocks anyone's merge.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "yes",
+      "reason": "The motion now explicitly enables secret-detection rules (hardcoded keys, high-entropy strings, risky dependency imports) in the curated subset from day one and keeps them active during the shadow week so we measure their false-positive rate on real diffs before they become blocking, which closes the gap that let a test API key reach main last quarter.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "yes",
+      "reason": "With the curated correctness-plus-secrets subset, parallel execution under a 90-second cap, and Marcus's shadow-mode week to benchmark on our actual monorepo, the gate catches the trivial bugs and style issues I keep re-fixing without pushing our CI past what I'll tolerate, so I'm in.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "yes",
+      "reason": "The team has incorporated my SQL-linter pairing and shadow-week validation of correctness rules against config-key typos, so the gate now covers both halves of my pipeline with measurable safeguards before it blocks anything.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "yes",
+      "reason": "The curated subset of ten correctness rules plus secret-detection rules, enforced only after a one-week shadow period with rule-by-rule promotion and a hard timeout, gives me the clean test signal I need without drowning developers in subjective noise.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "yes",
+      "reason": "The team has converged on every condition I set—parallel execution, 90-second cap, hard timeout, one-week shadow period, rule-by-rule promotion under ten percent false positives, per-rule rollback toggle, hotfix override, and SQL-linter pairing—so the motion as stated is safe to adopt.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "yes",
+      "reason": "The shadow-mode week and rule-by-rule promotion mean I get a gentle feedback loop to learn our conventions one rule at a time before anything blocks my merges, which is exactly what I need as someone still building a mental model of the codebase.",
+      "trigger": "original ballot"
+    }
+  ],
+  "result": {
+    "yes": 8,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  }
+}

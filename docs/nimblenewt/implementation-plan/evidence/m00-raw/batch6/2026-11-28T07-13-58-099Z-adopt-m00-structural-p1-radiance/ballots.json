@@ -1,0 +1,117 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "yes",
+      "reason": "The cached one-minute runtime clears my CI-penalty concern, the two-week advisory trial with a strict rule set and baseline mode addresses the noise risk, and Elena's secret-detection carve-out means the gate catches real bugs from day one—exactly the guardrails I asked for in round one."
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "yes",
+      "reason": "The cached one-minute runtime with parallel execution clears my ninety-second threshold, and the two-week advisory trial with cache hit/miss instrumentation gives me the measured data I need before we flip to a hard gate—if cache hits drop below eighty percent, I pull support, but that safeguard is built into the plan."
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "yes",
+      "reason": "Lintwise's secret-detection rule set closes a real gap—last quarter's leaked test key would have been caught pre-merge—and with the cached one-minute runtime, parallel execution, and my carve-out that secret rules stay hard-fail from day one, the gate protects credentials without slowing the pipeline."
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "yes",
+      "reason": "The two-week advisory trial, parallel execution with the cached one-minute runtime, Lars's strict rule set with baseline mode, and Elena's secret-detection carve-out address every concern I raised, and I'm ready to tune the JavaScript rules during the window and report back the actionable ratio."
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "yes",
+      "reason": "The cached one-minute runtime, parallel execution, and two-week advisory trial resolve my latency and pilot concerns, and I'll validate SQL coverage during that window—if Lintwise skips SQL, I'll add a separate linter without blocking the rest of the team."
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "yes",
+      "reason": "The 8-percent false-positive rate with tuned rules plus baseline mode clears my noise bar, and Jin's phased promotion with per-language reporting and a one-maintainer rollback path protects the signal-to-noise ratio I need to trust our gates."
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "yes",
+      "reason": "The phased rollout, secret-rule carve-out, parallel execution, strict rule set with baseline mode, and the one-maintainer rollback path I drafted into the merge-policy amendment collectively address every risk I raised, so I can sign the amendment this week."
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "yes",
+      "reason": "The advisory trial, Tom's onboarding doc with concrete fixes, Lars's baseline mode so I'm not punished for pre-existing debt, and Jin's phased promotion together turn this gate into a teacher rather than a trap, which is exactly what I need as someone still learning our conventions."
+    }
+  ],
+  "ballotHistory": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "yes",
+      "reason": "The cached one-minute runtime clears my CI-penalty concern, the two-week advisory trial with a strict rule set and baseline mode addresses the noise risk, and Elena's secret-detection carve-out means the gate catches real bugs from day one—exactly the guardrails I asked for in round one.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "yes",
+      "reason": "The cached one-minute runtime with parallel execution clears my ninety-second threshold, and the two-week advisory trial with cache hit/miss instrumentation gives me the measured data I need before we flip to a hard gate—if cache hits drop below eighty percent, I pull support, but that safeguard is built into the plan.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "yes",
+      "reason": "Lintwise's secret-detection rule set closes a real gap—last quarter's leaked test key would have been caught pre-merge—and with the cached one-minute runtime, parallel execution, and my carve-out that secret rules stay hard-fail from day one, the gate protects credentials without slowing the pipeline.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "yes",
+      "reason": "The two-week advisory trial, parallel execution with the cached one-minute runtime, Lars's strict rule set with baseline mode, and Elena's secret-detection carve-out address every concern I raised, and I'm ready to tune the JavaScript rules during the window and report back the actionable ratio.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "yes",
+      "reason": "The cached one-minute runtime, parallel execution, and two-week advisory trial resolve my latency and pilot concerns, and I'll validate SQL coverage during that window—if Lintwise skips SQL, I'll add a separate linter without blocking the rest of the team.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "yes",
+      "reason": "The 8-percent false-positive rate with tuned rules plus baseline mode clears my noise bar, and Jin's phased promotion with per-language reporting and a one-maintainer rollback path protects the signal-to-noise ratio I need to trust our gates.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "yes",
+      "reason": "The phased rollout, secret-rule carve-out, parallel execution, strict rule set with baseline mode, and the one-maintainer rollback path I drafted into the merge-policy amendment collectively address every risk I raised, so I can sign the amendment this week.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "yes",
+      "reason": "The advisory trial, Tom's onboarding doc with concrete fixes, Lars's baseline mode so I'm not punished for pre-existing debt, and Jin's phased promotion together turn this gate into a teacher rather than a trap, which is exactly what I need as someone still learning our conventions.",
+      "trigger": "original ballot"
+    }
+  ],
+  "result": {
+    "yes": 8,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  }
+}

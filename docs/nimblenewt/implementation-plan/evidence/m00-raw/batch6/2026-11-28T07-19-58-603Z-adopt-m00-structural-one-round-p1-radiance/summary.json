@@ -1,0 +1,168 @@
+{
+  "scenario": "Adopt Lintwise as a required pre-merge check (eight engineers)",
+  "variant": {
+    "name": "m00-structural-one-round-p1",
+    "firstRound": "blind",
+    "rounds": 1,
+    "transcriptMode": "full",
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "chairQuestionCheck": "structural",
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 1,
+    "allowTabling": true,
+    "directQuestions": true,
+    "deskRead": true
+  },
+  "model": "qwen3.8-flash-next-iq4r",
+  "roster": [
+    {
+      "id": "a1",
+      "name": "Priya",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a2",
+      "name": "Marcus",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a3",
+      "name": "Elena",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a4",
+      "name": "Tom",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a5",
+      "name": "Sana",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a6",
+      "name": "Lars",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a7",
+      "name": "Jin",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a8",
+      "name": "Olga",
+      "model": "qwen3.8-flash-next-iq4r"
+    }
+  ],
+  "chairModel": "qwen3.8-flash-next-iq4r",
+  "motion": {
+    "text": "The team adopts Lintwise, an automated code-quality checker, as a required pre-merge check on every repository.",
+    "version": 1
+  },
+  "result": {
+    "outcome": "tabled",
+    "research": [
+      "Elena: Confirm whether Lintwise ships secret-detection rules (API keys, tokens, connection strings) and whether it can run in the same CI stage as our existing dependency scanner. Report findings to the team before the next meeting.",
+      "Sana: Run Lintwise in advisory (non-blocking) mode on a representative sample of your Python/SQL pipeline files for one week. Report false-positive count and wall-clock time added per run.",
+      "Lars: Pull the exact count of error-level vs. warning/cosmetic rules from Lintwise's default rule set so we can finalize the curated subset size."
+    ]
+  },
+  "stats": {
+    "objections": [],
+    "chairQuestions": [
+      {
+        "to": "a1",
+        "topic": "Lintwise false-positive rate and incremental (changed-files-only) execution",
+        "experience_sought": "During your six months using Lintwise, what was the approximate false-positive rate you observed on real PRs, and did the tool support running only on changed files or the affected package? If so, what wall-clock time did that incremental mode add versus a full-repo scan?"
+      },
+      {
+        "to": "a6",
+        "topic": "Lintwise parallel-execution support and error-level rule subset size",
+        "experience_sought": "From the documentation you read, does Lintwise support running as a parallel CI job alongside the build, or does it require sequential execution? Also, roughly how many of the ~200 default rules are classified as error-level versus warning/cosmetic?"
+      }
+    ],
+    "rejectedChairQuestions": [],
+    "skippedAbsent": [],
+    "inquiries": [],
+    "ownerReports": [],
+    "deskRead": {
+      "refused": [],
+      "excerpts": [],
+      "rejectedExcerpts": [],
+      "corrections": []
+    },
+    "tabled": {
+      "research": [
+        "Elena: Confirm whether Lintwise ships secret-detection rules (API keys, tokens, connection strings) and whether it can run in the same CI stage as our existing dependency scanner. Report findings to the team before the next meeting.",
+        "Sana: Run Lintwise in advisory (non-blocking) mode on a representative sample of your Python/SQL pipeline files for one week. Report false-positive count and wall-clock time added per run.",
+        "Lars: Pull the exact count of error-level vs. warning/cosmetic rules from Lintwise's default rule set so we can finalize the curated subset size."
+      ]
+    },
+    "inquiryChecks": {
+      "heldAnswers": 0,
+      "leaks": [],
+      "revisionsPerVoter": {},
+      "voterRevisionTurnsOk": true,
+      "clockMs": {
+        "total": 177485,
+        "paused": 0,
+        "meeting": 177485
+      }
+    }
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 0.42857142857142855,
+    "membersWhoChangedStanceInRound2": 0,
+    "cacheHitRatio": 0,
+    "calls": 20,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1-blind": {
+        "calls": 8,
+        "input": 2046,
+        "cached": 0,
+        "output": 5731,
+        "ms": 75779,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 1746,
+        "cached": 0,
+        "output": 591,
+        "ms": 9064,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 2,
+        "input": 4004,
+        "cached": 0,
+        "output": 2960,
+        "ms": 34175,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 8,
+        "input": 4294,
+        "cached": 0,
+        "output": 3674,
+        "ms": 48078,
+        "costUsd": 0
+      },
+      "chair-ruling": {
+        "calls": 1,
+        "input": 2130,
+        "cached": 0,
+        "output": 738,
+        "ms": 10381,
+        "costUsd": 0
+      }
+    }
+  }
+}

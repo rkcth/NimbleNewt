@@ -1,0 +1,12 @@
+{
+  "ballots": [],
+  "ballotHistory": [],
+  "result": {
+    "outcome": "tabled",
+    "research": [
+      "Elena: Confirm whether Lintwise ships secret-detection rules (API keys, tokens, connection strings) and whether it can run in the same CI stage as our existing dependency scanner. Report findings to the team before the next meeting.",
+      "Sana: Run Lintwise in advisory (non-blocking) mode on a representative sample of your Python/SQL pipeline files for one week. Report false-positive count and wall-clock time added per run.",
+      "Lars: Pull the exact count of error-level vs. warning/cosmetic rules from Lintwise's default rule set so we can finalize the curated subset size."
+    ]
+  }
+}

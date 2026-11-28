@@ -34,7 +34,7 @@ Prototype additions made for this completion (all in `prototypes/meeting/`): a s
 | Chair notes once after round 1 against rolling notes, with a 20-participant meeting | Yes (earlier batch, raw files of its 2026-10-22 runs now in git); the batch-4 local repeat is **not completed**: notes-once finished, both rolling attempts were cut short (server outage, then the token cap), so the local figure is a lower bound only | rule 6, "Fourth local batch" |
 | Role personalities and information habits, notes from the first round, tabling | Yes (earlier batch); tabling again here with a scenario where research matters | rules 13, 19 |
 | Blind or open first round | Yes (earlier batch, and all new `m00-full` runs are blind) | rule 3 |
-| One or two comment rounds | Partly: `one-round` ran 3 times here; it also drops chair questions and desk notes, so it is not a clean comparison | rule 2 |
+| One or two comment rounds | Partly: `one-round` ran 3 times here; it also drops chair questions and desk notes, so it is not a clean comparison. **Clean local pair added 2026-11-28 (sixth local batch, below): one round tabled 3 of 3, two rounds passed 2 of 3** | rule 2 |
 | Whole transcript against a short summary of each turn written by the speaker (the summary chain), full text kept and retrievable, against a digest | Summary chain and facts-style summaries: yes (earlier batch); full text is kept in `transcript.md`; a separate digest variant was not built at the time of the runs; it is built (variant `digest`, see the implementation notes, M00 finish) and was run three times on the local model (see "Local model batch" below) | rule 14 |
 | Turn limits counted in output tokens | Yes, all runs, measured | rule 14 |
 | Shared-first against agent-first prompt order, cache hit rate on a hosted provider | Yes: 12 OpenRouter meetings, 3 per model and variant; on the local server 6 meetings (3 per order, third local batch) | rule 15, "Third local batch" |
@@ -347,6 +347,10 @@ Budget set and committed before the first call (`2964ea26`): $0 cloud, a 3,000,0
 | 20 members, chair notes rolling (`tldr-facts-rolling`) | passed 20-0 | 127 | 482,425 | 44.9% | 1,744 s |
 
 Rolling cost 26% more tokens and 70% more time and changed no outcome. Both notes files name all 20 members. Rule 6 keeps its verdict ("worked once; rolling is not worth it"), now with a completed local pair (one meeting per cell). Raw files: `evidence/m00-raw/batch5/`; figures: `evidence/m00-radiance-batch5.json`; details in implementation-notes, "Live runs on Radiance 2026-11-28".
+
+### Sixth local batch (Radiance 2.3.0, 2026-11-28 07:13 to 07:37 UTC): one or two comment rounds, a clean pair
+
+Budget committed before the first call (`352c21f0`): $0 cloud, a 1,000,000-token cap; 317,379 used. `m00-structural-one-round-p1` is `m00-structural-p1` with `rounds: 1` and nothing else changed. On `tool-adoption` (8 members), three of each: two rounds passed 8-0, passed 8-0, tabled (35, 35, 28 calls; 88k, 87k, 60k tokens); one round tabled three times (20 calls and about 27k tokens each). With only the round count changed, one round stops at research tasks rather than reaching a vote. Rule 2's verdict ("keep two as the default") stands with a clean comparison. Raw files: `evidence/m00-raw/batch6/`; figures: `evidence/m00-radiance-batch6.json`.
 
 ## Reproduce
 

@@ -1,0 +1,166 @@
+{
+  "scenario": "Adopt Lintwise as a required pre-merge check (eight engineers)",
+  "variant": {
+    "name": "m00-structural-one-round-p1",
+    "firstRound": "blind",
+    "rounds": 1,
+    "transcriptMode": "full",
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "chairQuestionCheck": "structural",
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 1,
+    "allowTabling": true,
+    "directQuestions": true,
+    "deskRead": true
+  },
+  "model": "qwen3.8-flash-next-iq4r",
+  "roster": [
+    {
+      "id": "a1",
+      "name": "Priya",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a2",
+      "name": "Marcus",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a3",
+      "name": "Elena",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a4",
+      "name": "Tom",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a5",
+      "name": "Sana",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a6",
+      "name": "Lars",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a7",
+      "name": "Jin",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a8",
+      "name": "Olga",
+      "model": "qwen3.8-flash-next-iq4r"
+    }
+  ],
+  "chairModel": "qwen3.8-flash-next-iq4r",
+  "motion": {
+    "text": "The team adopts Lintwise, an automated code-quality checker, as a required pre-merge check on every repository.",
+    "version": 1
+  },
+  "result": {
+    "outcome": "tabled",
+    "research": [
+      "Marcus: Measure Lintwise wall-clock runtime on our actual monorepo and confirm whether it can execute as a parallel CI job alongside compilation rather than as a serial pre-build gate. Report the added latency in seconds and whether it stays under the 60-second threshold.",
+      "Sana: Run Lintwise against a representative slice of our SQL queries and Python pipeline scripts for a short trial. Report the false-positive rate on those languages specifically, so we can determine whether the JavaScript noise figure (~30 %) generalises or whether SQL/Python need a separate, narrower rule set before the gate is made mandatory."
+    ]
+  },
+  "stats": {
+    "objections": [],
+    "chairQuestions": [
+      {
+        "to": "a1",
+        "topic": "False-positive rate and rule tuning over six months of Lintwise use",
+        "experience_sought": "In your six months running Lintwise, roughly what fraction of flagged issues were genuine bugs versus stylistic or intentional-trade-off noise, and how often did you adjust or disable rules to keep the signal-to-noise ratio acceptable for the team?"
+      },
+      {
+        "to": "a4",
+        "topic": "Specific false positives and rule categories encountered in your three-week Lintwise trial",
+        "experience_sought": "You mentioned Lintwise flagged intentional trade-offs in your React project. Can you recall which rule categories produced those false positives—stylistic, accessibility, async-pattern—and whether you could suppress them per-file or only globally?"
+      }
+    ],
+    "rejectedChairQuestions": [],
+    "skippedAbsent": [],
+    "inquiries": [],
+    "ownerReports": [],
+    "deskRead": {
+      "refused": [],
+      "excerpts": [],
+      "rejectedExcerpts": [],
+      "corrections": []
+    },
+    "tabled": {
+      "research": [
+        "Marcus: Measure Lintwise wall-clock runtime on our actual monorepo and confirm whether it can execute as a parallel CI job alongside compilation rather than as a serial pre-build gate. Report the added latency in seconds and whether it stays under the 60-second threshold.",
+        "Sana: Run Lintwise against a representative slice of our SQL queries and Python pipeline scripts for a short trial. Report the false-positive rate on those languages specifically, so we can determine whether the JavaScript noise figure (~30 %) generalises or whether SQL/Python need a separate, narrower rule set before the gate is made mandatory."
+      ]
+    },
+    "inquiryChecks": {
+      "heldAnswers": 0,
+      "leaks": [],
+      "revisionsPerVoter": {},
+      "voterRevisionTurnsOk": true,
+      "clockMs": {
+        "total": 158671,
+        "paused": 0,
+        "meeting": 158671
+      }
+    }
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 0.42857142857142855,
+    "membersWhoChangedStanceInRound2": 0,
+    "cacheHitRatio": 0,
+    "calls": 20,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1-blind": {
+        "calls": 8,
+        "input": 2046,
+        "cached": 0,
+        "output": 4235,
+        "ms": 57757,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 1798,
+        "cached": 0,
+        "output": 655,
+        "ms": 9696,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 2,
+        "input": 4055,
+        "cached": 0,
+        "output": 2186,
+        "ms": 26950,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 8,
+        "input": 4238,
+        "cached": 0,
+        "output": 4747,
+        "ms": 56294,
+        "costUsd": 0
+      },
+      "chair-ruling": {
+        "calls": 1,
+        "input": 2246,
+        "cached": 0,
+        "output": 522,
+        "ms": 7962,
+        "costUsd": 0
+      }
+    }
+  }
+}
