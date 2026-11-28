@@ -1,0 +1,645 @@
+{
+ "startedAt": "2026-11-28T05:39:52.702Z",
+ "model": "qwen3.8-flash-next-iq4r",
+ "parts": "R",
+ "gapsS": [
+  0,
+  30,
+  60,
+  90,
+  120,
+  300
+ ],
+ "lines": 300,
+ "levels": [
+  1,
+  2,
+  4,
+  8
+ ],
+ "statsAtStart": {
+  "at": "2026-11-28T05:39:52.711Z",
+  "version": "2.3.0",
+  "running": 1,
+  "waiting": 2,
+  "in_flight": 4,
+  "max_num_seqs": 8,
+  "kv_tokens_used": 39032,
+  "kv_tokens_total": 200236,
+  "kv_tokens_cached": 2096,
+  "kv_bytes_used": 410447480,
+  "kv_bytes_total": 2438949040,
+  "prefix_hit_rate": 0.9379048347473145,
+  "prefix_evictions": 0,
+  "linear_hit_rate": 0.9090984463691711,
+  "linear_cached_tokens": 7322048,
+  "checkpoints_written": 185,
+  "ckpt_evictions": {
+   "retention": 126,
+   "store_full": 0
+  },
+  "ckpt_refused": 0,
+  "hit_cuts": {
+   "no_snapshot": 22,
+   "windowed_group": 0,
+   "adopt_failed": 0,
+   "resumed_below": 18
+  },
+  "total_requests": 186,
+  "prefill_tps": 0,
+  "decode_tps": 69.77141571044922,
+  "cards": [
+   {
+    "index": 0,
+    "vramUsed": 32237281280,
+    "vramTotal": 34208743424
+   },
+   {
+    "index": 1,
+    "vramUsed": 32340078592,
+    "vramTotal": 34208743424
+   }
+  ]
+ },
+ "retained": {
+  "steps": [
+   {
+    "phase": "cold-native",
+    "step": "cold",
+    "status": 200,
+    "outcome": "cold",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 10073,
+    "cachedTokens": 0,
+    "computedTokens": 10073,
+    "expectedCachedTokens": 0,
+    "serverPromptMs": 28143,
+    "serverTtftMs": 28753,
+    "clientTtftMs": 28761,
+    "wallMs": 29119,
+    "answer": "saffron-319",
+    "expected": "saffron-319",
+    "correct": true
+   },
+   {
+    "phase": "cold-native",
+    "step": "native-repeat",
+    "status": 200,
+    "outcome": "hit",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 10073,
+    "cachedTokens": 8192,
+    "computedTokens": 1881,
+    "expectedCachedTokens": 1,
+    "serverPromptMs": 13731,
+    "serverTtftMs": 18842,
+    "clientTtftMs": 18845,
+    "wallMs": 19174,
+    "answer": "saffron-319",
+    "expected": "saffron-319",
+    "correct": true
+   },
+   {
+    "phase": "other",
+    "step": "other-0",
+    "status": 200,
+    "outcome": "cold",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 3272,
+    "cachedTokens": 0,
+    "computedTokens": 3272,
+    "expectedCachedTokens": 0,
+    "serverPromptMs": 23044,
+    "serverTtftMs": 24581,
+    "clientTtftMs": 24583,
+    "wallMs": 24766,
+    "answer": "violet-529",
+    "expected": "violet-529",
+    "correct": true
+   },
+   {
+    "phase": "retained",
+    "step": "retained-after-0s",
+    "status": 200,
+    "outcome": "hit",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 10073,
+    "cachedTokens": 8192,
+    "computedTokens": 1881,
+    "expectedCachedTokens": 8192,
+    "serverPromptMs": 33432,
+    "serverTtftMs": 34639,
+    "clientTtftMs": 34642,
+    "wallMs": 34886,
+    "answer": "saffron-319",
+    "expected": "saffron-319",
+    "correct": true
+   },
+   {
+    "phase": "other",
+    "step": "other-1",
+    "status": 200,
+    "outcome": "cold",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 3273,
+    "cachedTokens": 0,
+    "computedTokens": 3273,
+    "expectedCachedTokens": 0,
+    "serverPromptMs": 12110,
+    "serverTtftMs": 12800,
+    "clientTtftMs": 12803,
+    "wallMs": 12948,
+    "answer": "amber-945",
+    "expected": "amber-945",
+    "correct": true
+   },
+   {
+    "phase": "retained",
+    "step": "retained-after-30s",
+    "status": 200,
+    "outcome": "hit",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 10073,
+    "cachedTokens": 8192,
+    "computedTokens": 1881,
+    "expectedCachedTokens": 8192,
+    "serverPromptMs": 9193,
+    "serverTtftMs": 25928,
+    "clientTtftMs": 25932,
+    "wallMs": 26022,
+    "answer": "Plover",
+    "expected": "Plover",
+    "correct": true
+   },
+   {
+    "phase": "other",
+    "step": "other-2",
+    "status": 200,
+    "outcome": "cold",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 3274,
+    "cachedTokens": 0,
+    "computedTokens": 3274,
+    "expectedCachedTokens": 0,
+    "serverPromptMs": 7368,
+    "serverTtftMs": 35667,
+    "clientTtftMs": 35669,
+    "wallMs": 36042,
+    "answer": "amber-651",
+    "expected": "amber-651",
+    "correct": true
+   },
+   {
+    "phase": "retained",
+    "step": "retained-after-60s",
+    "status": 200,
+    "outcome": "hit",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 10073,
+    "cachedTokens": 8192,
+    "computedTokens": 1881,
+    "expectedCachedTokens": 8192,
+    "serverPromptMs": 11151,
+    "serverTtftMs": 14760,
+    "clientTtftMs": 14763,
+    "wallMs": 79935,
+    "answer": "saffron-319",
+    "expected": "saffron-319",
+    "correct": true
+   },
+   {
+    "phase": "other",
+    "step": "other-3",
+    "status": 200,
+    "outcome": "hit",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 3273,
+    "cachedTokens": 2048,
+    "computedTokens": 1225,
+    "expectedCachedTokens": 0,
+    "serverPromptMs": 54104,
+    "serverTtftMs": 55607,
+    "clientTtftMs": 55609,
+    "wallMs": 55989,
+    "answer": "saffron-202",
+    "expected": "saffron-202",
+    "correct": true
+   },
+   {
+    "phase": "retained",
+    "step": "retained-after-90s",
+    "status": 200,
+    "outcome": "hit",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 10073,
+    "cachedTokens": 8192,
+    "computedTokens": 1881,
+    "expectedCachedTokens": 8192,
+    "serverPromptMs": 2703,
+    "serverTtftMs": 129102,
+    "clientTtftMs": 129104,
+    "wallMs": 129241,
+    "answer": "Plover",
+    "expected": "Plover",
+    "correct": true
+   },
+   {
+    "phase": "other",
+    "step": "other-4",
+    "status": 200,
+    "outcome": "cold",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 3275,
+    "cachedTokens": 0,
+    "computedTokens": 3275,
+    "expectedCachedTokens": 0,
+    "serverPromptMs": 13830,
+    "serverTtftMs": 15125,
+    "clientTtftMs": 15126,
+    "wallMs": 15320,
+    "answer": "amber-459",
+    "expected": "amber-459",
+    "correct": true
+   },
+   {
+    "phase": "retained",
+    "step": "retained-after-120s",
+    "status": 200,
+    "outcome": "hit",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 10073,
+    "cachedTokens": 8192,
+    "computedTokens": 1881,
+    "expectedCachedTokens": 8192,
+    "serverPromptMs": 12739,
+    "serverTtftMs": 51412,
+    "clientTtftMs": 51414,
+    "wallMs": 51862,
+    "answer": "saffron-319",
+    "expected": "saffron-319",
+    "correct": true
+   },
+   {
+    "phase": "other",
+    "step": "other-5",
+    "status": 200,
+    "outcome": "cold",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 3275,
+    "cachedTokens": 0,
+    "computedTokens": 3275,
+    "expectedCachedTokens": 0,
+    "serverPromptMs": 13152,
+    "serverTtftMs": 44562,
+    "clientTtftMs": 44564,
+    "wallMs": 111333,
+    "answer": "saffron-867",
+    "expected": "saffron-867",
+    "correct": true
+   },
+   {
+    "phase": "retained",
+    "step": "retained-after-300s",
+    "status": 200,
+    "outcome": "hit",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 10073,
+    "cachedTokens": 8192,
+    "computedTokens": 1881,
+    "expectedCachedTokens": 8192,
+    "serverPromptMs": 2945,
+    "serverTtftMs": 42580,
+    "clientTtftMs": 42582,
+    "wallMs": 42768,
+    "answer": "Plover",
+    "expected": "Plover",
+    "correct": true
+   },
+   {
+    "phase": "retained",
+    "step": "retained-switch-back",
+    "status": 200,
+    "outcome": "hit",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 10073,
+    "cachedTokens": 8192,
+    "computedTokens": 1881,
+    "expectedCachedTokens": 8192,
+    "serverPromptMs": 16939,
+    "serverTtftMs": 17786,
+    "clientTtftMs": 17788,
+    "wallMs": 17927,
+    "answer": "Plover",
+    "expected": "Plover",
+    "correct": true
+   },
+   {
+    "phase": "retained",
+    "step": "lost-changed-head",
+    "status": 200,
+    "outcome": "miss",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 10075,
+    "cachedTokens": 0,
+    "computedTokens": 10075,
+    "expectedCachedTokens": 8192,
+    "serverPromptMs": 26717,
+    "serverTtftMs": 27511,
+    "clientTtftMs": 27512,
+    "wallMs": 62395,
+    "answer": "saffron-319",
+    "expected": "saffron-319",
+    "correct": true
+   }
+  ],
+  "markers": [
+   {
+    "gapS": 0,
+    "expectedCachedTokens": 8192,
+    "servedCachedTokens": 8192,
+    "outcome": "hit",
+    "reusedAll": true,
+    "answerCorrect": true
+   },
+   {
+    "gapS": 30,
+    "expectedCachedTokens": 8192,
+    "servedCachedTokens": 8192,
+    "outcome": "hit",
+    "reusedAll": true,
+    "answerCorrect": true
+   },
+   {
+    "gapS": 60,
+    "expectedCachedTokens": 8192,
+    "servedCachedTokens": 8192,
+    "outcome": "hit",
+    "reusedAll": true,
+    "answerCorrect": true
+   },
+   {
+    "gapS": 90,
+    "expectedCachedTokens": 8192,
+    "servedCachedTokens": 8192,
+    "outcome": "hit",
+    "reusedAll": true,
+    "answerCorrect": true
+   },
+   {
+    "gapS": 120,
+    "expectedCachedTokens": 8192,
+    "servedCachedTokens": 8192,
+    "outcome": "hit",
+    "reusedAll": true,
+    "answerCorrect": true
+   },
+   {
+    "gapS": 300,
+    "expectedCachedTokens": 8192,
+    "servedCachedTokens": 8192,
+    "outcome": "hit",
+    "reusedAll": true,
+    "answerCorrect": true
+   },
+   {
+    "switchBack": true,
+    "expectedCachedTokens": 8192,
+    "servedCachedTokens": 8192,
+    "outcome": "hit",
+    "answerCorrect": true
+   },
+   {
+    "changedHead": true,
+    "expectedCachedTokens": 8192,
+    "servedCachedTokens": 0,
+    "outcome": "miss",
+    "answerCorrect": true,
+    "markerAfter": "lost"
+   },
+   {
+    "activeMarkersAtEnd": []
+   }
+  ],
+  "sessions": [
+   {
+    "id": 234,
+    "model": "qwen4exp",
+    "label": "nn-ego79qIVkl8MPellO_5PBlVP9nH",
+    "tokens": 10082,
+    "bytes": 152006400,
+    "idle_s": 0.034064239,
+    "age_s": 34.901435405,
+    "on_device": 2050,
+    "on_host": 470,
+    "moving": true,
+    "snapshots": 4,
+    "snap_bytes": 475971776,
+    "resume_tokens": 8192
+   },
+   {
+    "id": 231,
+    "model": "qwen4exp",
+    "label": "nn-ego79qIVkl8MPellO_5PBlVP9nH",
+    "tokens": 10075,
+    "bytes": 151885760,
+    "idle_s": 62.421615927,
+    "age_s": 1173.110756857,
+    "on_device": 0,
+    "on_host": 2518,
+    "moving": false,
+    "snapshots": 4,
+    "snap_bytes": 475971776,
+    "resume_tokens": 8192
+   },
+   {
+    "id": 213,
+    "model": "qwen4exp",
+    "label": "nn-ego79qIVkl8MPellO_5PBlVP9nH",
+    "tokens": 10080,
+    "bytes": 152006400,
+    "idle_s": 534.509877032,
+    "age_s": 1341.281273569,
+    "on_device": 0,
+    "on_host": 2520,
+    "moving": false,
+    "snapshots": 4,
+    "snap_bytes": 475971776,
+    "resume_tokens": 8192
+   }
+  ],
+  "statsBefore": {
+   "at": "2026-11-28T05:39:52.825Z",
+   "version": "2.3.0",
+   "running": 1,
+   "waiting": 2,
+   "in_flight": 4,
+   "max_num_seqs": 8,
+   "kv_tokens_used": 39032,
+   "kv_tokens_total": 200236,
+   "kv_tokens_cached": 2096,
+   "kv_bytes_used": 410447480,
+   "kv_bytes_total": 2438949040,
+   "prefix_hit_rate": 0.9379048347473145,
+   "prefix_evictions": 0,
+   "linear_hit_rate": 0.9090984463691711,
+   "linear_cached_tokens": 7322048,
+   "checkpoints_written": 185,
+   "ckpt_evictions": {
+    "retention": 126,
+    "store_full": 0
+   },
+   "ckpt_refused": 0,
+   "hit_cuts": {
+    "no_snapshot": 22,
+    "windowed_group": 0,
+    "adopt_failed": 0,
+    "resumed_below": 18
+   },
+   "total_requests": 186,
+   "prefill_tps": 0,
+   "decode_tps": 69.77141571044922,
+   "cards": [
+    {
+     "index": 0,
+     "vramUsed": 32237281280,
+     "vramTotal": 34208743424
+    },
+    {
+     "index": 1,
+     "vramUsed": 32340078592,
+     "vramTotal": 34208743424
+    }
+   ]
+  },
+  "statsAfter": {
+   "at": "2026-11-28T06:02:22.885Z",
+   "version": "2.3.0",
+   "running": 4,
+   "waiting": 0,
+   "in_flight": 4,
+   "max_num_seqs": 8,
+   "kv_tokens_used": 193956,
+   "kv_tokens_total": 200236,
+   "kv_tokens_cached": 0,
+   "kv_bytes_used": 2043159240,
+   "kv_bytes_total": 2438949040,
+   "prefix_hit_rate": 0.8839787244796753,
+   "prefix_evictions": 0,
+   "linear_hit_rate": 0.8567378520965576,
+   "linear_cached_tokens": 11504064,
+   "checkpoints_written": 479,
+   "ckpt_evictions": {
+    "retention": 356,
+    "store_full": 0
+   },
+   "ckpt_refused": 0,
+   "hit_cuts": {
+    "no_snapshot": 29,
+    "windowed_group": 0,
+    "adopt_failed": 0,
+    "resumed_below": 34
+   },
+   "total_requests": 284,
+   "prefill_tps": 1213.54638671875,
+   "decode_tps": 25.951623916625977,
+   "cards": [
+    {
+     "index": 0,
+     "vramUsed": 32239374336,
+     "vramTotal": 34208743424
+    },
+    {
+     "index": 1,
+     "vramUsed": 32342171648,
+     "vramTotal": 34208743424
+    }
+   ]
+  },
+  "checks": {
+   "coldComputedEverything": true,
+   "nativeReuseServed": true,
+   "missMarkedLost": true,
+   "missStillAnsweredFromFullContext": true,
+   "retainedReusedAll": true,
+   "retentionMissObserved": false,
+   "allAnswersCorrect": true
+  }
+ },
+ "statsAtEnd": {
+  "at": "2026-11-28T06:02:22.889Z",
+  "version": "2.3.0",
+  "running": 4,
+  "waiting": 0,
+  "in_flight": 4,
+  "max_num_seqs": 8,
+  "kv_tokens_used": 193956,
+  "kv_tokens_total": 200236,
+  "kv_tokens_cached": 0,
+  "kv_bytes_used": 2043159240,
+  "kv_bytes_total": 2438949040,
+  "prefix_hit_rate": 0.8839787244796753,
+  "prefix_evictions": 0,
+  "linear_hit_rate": 0.8567378520965576,
+  "linear_cached_tokens": 11504064,
+  "checkpoints_written": 479,
+  "ckpt_evictions": {
+   "retention": 356,
+   "store_full": 0
+  },
+  "ckpt_refused": 0,
+  "hit_cuts": {
+   "no_snapshot": 29,
+   "windowed_group": 0,
+   "adopt_failed": 0,
+   "resumed_below": 34
+  },
+  "total_requests": 284,
+  "prefill_tps": 1213.54638671875,
+  "decode_tps": 25.951623916625977,
+  "cards": [
+   {
+    "index": 0,
+    "vramUsed": 32239374336,
+    "vramTotal": 34208743424
+   },
+   {
+    "index": 1,
+    "vramUsed": 32342171648,
+    "vramTotal": 34208743424
+   }
+  ]
+ },
+ "finishedAt": "2026-11-28T06:02:22.889Z"
+}
