@@ -116,9 +116,14 @@ export class MeetingFloorService {
   #tickAfter: string | undefined;
   /**
    * Whether this controller has checked the stored list of open inquiries against the floors since it started. A well-formed list can still leave out an inquiry that an earlier release opened (after a release rollback, that
-   * release writes floors without the list), so the first read after each start walks the floors once and stores the list again when it differs.
+   * release writes floors without the list), so the first use after each start walks the floors once. Only a write path (the reminder, `sweep`, and opening an inquiry) stores the list again when it differs; a read writes nothing.
    */
   #inquiriesChecked = false;
+  /**
+   * The open inquiries a read walked from the floors, with the revision of the stored list it found then (0: no list). A read writes nothing (card U05: answering a status question writes no record), so until a write path stores the
+   * list, later reads use this while the stored list keeps that revision, instead of walking every floor again. Every inquiry that opens or ends changes the stored list, so its revision moves and the walk is done again.
+   */
+  #walked: { revision: number; ids: readonly string[] } | undefined;
   private constructor(runner: CommandRunner, deps: FloorDeps) { this.#runner = runner; this.#deps = deps; }
 
   static withEpoch(storage: ControllerStorage, epoch: number, deps: FloorDeps, options: RunnerOptions = {}): MeetingFloorService {
@@ -222,12 +227,14 @@ export class MeetingFloorService {
   }
 
   /**
-   * The record IDs of the floors whose inquiry is open, oldest first. When the list does not exist yet or cannot be trusted it is built once from the floors and stored (written as the floor's service), so later reads do not walk every
-   * floor again. A write that loses a race is left: whoever won wrote the list in the same write as its floor change.
+   * The record IDs of the floors whose inquiry is open, oldest first. When the list does not exist yet, cannot be trusted or has not been checked since the start, it is built from the floors. With `store` (the reminder and opening an
+   * inquiry, which write anyway) the built list is stored (written as the floor's service), so later reads do not walk every floor again; a write that loses a race is left: whoever won wrote the list in the same write as its floor
+   * change. Without it (the Needs-you list and the status view) nothing is written: the walk is kept in memory for the list's current revision.
    */
-  async #openInquiryIds(): Promise<readonly string[]> {
+  async #openInquiryIds(store: boolean): Promise<readonly string[]> {
     const index = await this.#inquiryIndex();
     if (index.ids !== undefined && this.#inquiriesChecked) return index.ids;
+    if (!store && this.#walked !== undefined && this.#walked.revision === index.revision) return this.#walked.ids;
     const ids = await this.#scanInquiries();
     if (ids === undefined) {
       // Too many floors to check them all: a well-formed list is believed (not checked again until the next start); with none, the read is refused.
@@ -236,6 +243,7 @@ export class MeetingFloorService {
       return index.ids!;
     }
     if (index.ids !== undefined && index.ids.length === ids.length && ids.every((x) => index.ids!.includes(x))) { this.#inquiriesChecked = true; return index.ids; }
+    if (!store) { this.#walked = { revision: index.revision, ids }; return ids; }
     // More than the limit (floors kept before the list existed) is never stored cut short: the floors are walked again until inquiries are ended. The write is revision-guarded: a floor change that opens or ends an inquiry after the
     // list was read also changes the list, so this write then loses, and the next read checks again.
     if (ids.length <= FLOOR_LIMITS.openInquiries) {
@@ -1128,7 +1136,7 @@ export class MeetingFloorService {
     const f = await this.#need(recordId);
     if (f.body.inquiry !== undefined) return { voteHeld: f.body.inquiry.voteHeld, replayed: true };
     // Refused before anything is written (the owner's note, a held vote) when the open inquiries are at their limit; the write below checks again.
-    const openIds = await this.#openInquiryIds();
+    const openIds = await this.#openInquiryIds(true);
     if (!openIds.includes(recordId) && openIds.length >= FLOOR_LIMITS.openInquiries) throw new DomainError("invalid_command", `at most ${FLOOR_LIMITS.openInquiries} owner inquiries can be open at once; end one first`, { field: "recordId" });
     // The vote open on the record is held, whoever runs it (the floor, the meeting procedure of card M06, or the record itself); one a crash already held is not held twice.
     // The motion's revision is in the hold's command ID: the same command sent again after a refusal that resumed the vote holds it again instead of being answered with the earlier hold.
@@ -1367,7 +1375,7 @@ export class MeetingFloorService {
     const now = this.#runner.now();
     const reminded: string[] = [];
     const gone: string[] = [];
-    for (const id of await this.#openInquiryIds()) {
+    for (const id of await this.#openInquiryIds(true)) {
       const b = (await this.#load(id))?.body;
       if (b === undefined || b.inquiry === undefined) { gone.push(id); continue; }
       if (command.projectId !== undefined && b.projectId !== command.projectId) continue;
@@ -1387,7 +1395,7 @@ export class MeetingFloorService {
   async ownerPending(by: Principal, limit = 50): Promise<{ items: { recordId: string; projectId: string; since: string; lastActivityAt: string; questions: number; voteHeld: boolean }[] }> {
     this.#ownerOnly(by, "list open inquiries");
     const items: { recordId: string; projectId: string; since: string; lastActivityAt: string; questions: number; voteHeld: boolean }[] = [];
-    for (const id of await this.#openInquiryIds()) {
+    for (const id of await this.#openInquiryIds(false)) {
       if (items.length >= limit) break;
       const b = (await this.#load(id))?.body;
       if (b?.inquiry !== undefined) items.push({ recordId: b.recordId, projectId: b.projectId, since: b.inquiry.openedAt, lastActivityAt: b.inquiry.lastActivityAt, questions: b.inquiry.questions, voteHeld: b.inquiry.voteHeld });
@@ -1803,7 +1811,7 @@ export class MeetingFloorService {
     if (!(viewer.kind === "owner" && viewer.taskScope === undefined)) return { items: [], truncated: false };
     const items: { recordId: string; projectId: string; since: string; idleMinutes: number; questions: number }[] = [];
     const now = ms(this.#runner.now());
-    for (const id of await this.#openInquiryIds()) {
+    for (const id of await this.#openInquiryIds(false)) {
       const b = (await this.#load(id))?.body;
       if (b === undefined || b.state !== "running" || b.inquiry === undefined) continue;
       items.push({ recordId: b.recordId, projectId: b.projectId, since: b.inquiry.openedAt, idleMinutes: Math.max(0, Math.floor((now - ms(b.inquiry.lastActivityAt)) / 60_000)), questions: b.inquiry.questions });
