@@ -1,0 +1,176 @@
+{
+  "scenario": "Adopt Lintwise as a required pre-merge check (eight engineers)",
+  "variant": {
+    "name": "m00-structural-one-round-p1",
+    "firstRound": "blind",
+    "rounds": 1,
+    "transcriptMode": "full",
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "chairQuestionCheck": "structural",
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 1,
+    "allowTabling": true,
+    "directQuestions": true,
+    "deskRead": true
+  },
+  "model": "qwen3.8-flash-next-iq4r",
+  "roster": [
+    {
+      "id": "a1",
+      "name": "Priya",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a2",
+      "name": "Marcus",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a3",
+      "name": "Elena",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a4",
+      "name": "Tom",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a5",
+      "name": "Sana",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a6",
+      "name": "Lars",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a7",
+      "name": "Jin",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a8",
+      "name": "Olga",
+      "model": "qwen3.8-flash-next-iq4r"
+    }
+  ],
+  "chairModel": "qwen3.8-flash-next-iq4r",
+  "motion": {
+    "text": "The team adopts Lintwise, an automated code-quality checker, as a required pre-merge check on every repository.",
+    "version": 1
+  },
+  "result": {
+    "outcome": "tabled",
+    "research": [
+      "Priya: Pull old suppress-comment count from six-month Lintwise usage to produce a concrete false-positive percentage per rule category.",
+      "Marcus: Run a one-week shadow pass on the monorepo to measure (a) Lintwise wall-clock time on changed files, (b) whether existing CI runners have spare capacity to launch it as a parallel job at the 2 PM peak queue, and (c) resulting queue-depth impact.",
+      "Elena: Pull Lintwise's published ruleset and confirm it ships secret-detection patterns (API keys, tokens, private keys) and a dependency-vulnerability check; report coverage gaps.",
+      "Sana: Run a timed shadow check on one SQL-heavy pipeline repo to confirm Lintwise parses .sql files without dialect false positives and measure added latency against her specific workload.",
+      "Lars: Review the shadow-run output for measured false-positive rate per rule category; flag any rule emitting noise above ~5%.",
+      "Jin: Aggregate shadow-run wall-clock and FP data; confirm the lint step stays under 15 s in parallel before endorsing a hard merge gate.",
+      "Olga: Review shadow-run findings on a sample PR to judge whether the feedback is clear and actionable for a junior dev, or noisy enough to cause confusion."
+    ]
+  },
+  "stats": {
+    "objections": [],
+    "chairQuestions": [
+      {
+        "to": "a1",
+        "topic": "Measured wall-clock runtime and false-positive rate of Lintwise during six months of daily use",
+        "experience_sought": "I need concrete numbers: how many seconds did Lintwise typically take on a changed-files run versus a full-repo run, and roughly what percentage of its findings turned out to be false positives that required a manual suppress or ignore comment?"
+      },
+      {
+        "to": "a2",
+        "topic": "Current CI infrastructure's ability to run a parallel lint job alongside the 11-minute build",
+        "experience_sought": "Can you confirm whether the existing CI runners have spare capacity to launch Lintwise as a parallel job next to the build step without increasing queue wait time, and what the current peak queue depth looks like around 2 PM?"
+      }
+    ],
+    "rejectedChairQuestions": [],
+    "skippedAbsent": [],
+    "inquiries": [],
+    "ownerReports": [],
+    "deskRead": {
+      "refused": [],
+      "excerpts": [],
+      "rejectedExcerpts": [],
+      "corrections": []
+    },
+    "tabled": {
+      "research": [
+        "Priya: Pull old suppress-comment count from six-month Lintwise usage to produce a concrete false-positive percentage per rule category.",
+        "Marcus: Run a one-week shadow pass on the monorepo to measure (a) Lintwise wall-clock time on changed files, (b) whether existing CI runners have spare capacity to launch it as a parallel job at the 2 PM peak queue, and (c) resulting queue-depth impact.",
+        "Elena: Pull Lintwise's published ruleset and confirm it ships secret-detection patterns (API keys, tokens, private keys) and a dependency-vulnerability check; report coverage gaps.",
+        "Sana: Run a timed shadow check on one SQL-heavy pipeline repo to confirm Lintwise parses .sql files without dialect false positives and measure added latency against her specific workload.",
+        "Lars: Review the shadow-run output for measured false-positive rate per rule category; flag any rule emitting noise above ~5%.",
+        "Jin: Aggregate shadow-run wall-clock and FP data; confirm the lint step stays under 15 s in parallel before endorsing a hard merge gate.",
+        "Olga: Review shadow-run findings on a sample PR to judge whether the feedback is clear and actionable for a junior dev, or noisy enough to cause confusion."
+      ]
+    },
+    "inquiryChecks": {
+      "heldAnswers": 0,
+      "leaks": [],
+      "revisionsPerVoter": {},
+      "voterRevisionTurnsOk": true,
+      "clockMs": {
+        "total": 119551,
+        "paused": 0,
+        "meeting": 119551
+      }
+    }
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 0.42857142857142855,
+    "membersWhoChangedStanceInRound2": 0,
+    "cacheHitRatio": 0,
+    "calls": 20,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1-blind": {
+        "calls": 8,
+        "input": 2046,
+        "cached": 0,
+        "output": 4539,
+        "ms": 45016,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 1716,
+        "cached": 0,
+        "output": 563,
+        "ms": 6233,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 2,
+        "input": 3912,
+        "cached": 0,
+        "output": 1996,
+        "ms": 18122,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 8,
+        "input": 4110,
+        "cached": 0,
+        "output": 4954,
+        "ms": 43100,
+        "costUsd": 0
+      },
+      "chair-ruling": {
+        "calls": 1,
+        "input": 2644,
+        "cached": 0,
+        "output": 602,
+        "ms": 7065,
+        "costUsd": 0
+      }
+    }
+  }
+}

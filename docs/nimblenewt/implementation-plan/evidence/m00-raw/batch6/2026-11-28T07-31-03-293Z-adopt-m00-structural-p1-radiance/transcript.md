@@ -1,0 +1,101 @@
+# Adopt Lintwise as a required pre-merge check (eight engineers)
+Variant: {"name":"m00-structural-p1","firstRound":"blind","rounds":2,"transcriptMode":"full","promptOrder":"shared-first","chairQuestions":2,"chairQuestionCheck":"structural","deskCheck":true,"tokenLimit":220,"objectionCheck":true,"maxObjectionReruns":2,"parallel":1,"allowTabling":true,"directQuestions":true,"deskRead":true}
+Model: qwen3.8-flash-next-iq4r
+
+**#1 Chair** _(opening)_
+Motion (version 1): The team adopts Lintwise, an automated code-quality checker, as a required pre-merge check on every repository.
+
+**#2 Priya** _(round 1 (blind))_ [for]
+I ran Lintwise for six months on my previous team and it caught genuine bugs that had slipped through manual review—null-pointer dereferences, off-by-one errors, that kind of thing. The value is real. My concern is the time cost. Lintwise added roughly four minutes to our pipeline back then. Our monorepo CI already averages eleven minutes; tacking on four pushes us toward fifteen, which is a noticeable drag on iteration speed, especially when someone is doing rapid fix-and-push cycles. I'd support making it a required pre-merge check, but I'd want us to scope its ruleset tightly from day one—start with the high-severity checks that actually caught bugs for us, not the full default rulebook. That should keep the overhead closer to one or two minutes. Also, we should measure the true delta on our monorepo before locking in the config.
+> tl;dr (what later speakers saw in summary mode): For adoption, but scope rules tightly to keep the four-minute overhead from ballooning our eleven-minute CI.
+
+**#3 Marcus** _(round 1 (blind))_ [undecided]
+I'm not opposed in principle—catching style and quality issues before they hit the main branch saves me from chasing flaky diffs at 2 a.m. But I own the 11-minute build and the queue for eight developers on one monorepo. Before I can say "required," I need three numbers: median Lintwise runtime on our repo, worst-case tail latency, and how it behaves when a PR touches 40+ files. If Lintwise adds more than 90 seconds, our queue depth roughly doubles during peak merge windows and people start bypassing checks, which defeats the purpose. I also want a clear false-positive escalation path so a single noisy rule doesn't block an urgent hotfix. Give me a two-week shadow-mode run with those metrics and I'll come back with a firm yes or no.
+> tl;dr (what later speakers saw in summary mode): I need runtime and false-positive data from a shadow run before committing Lintwise to the critical merge path.
+
+**#4 Elena** _(round 1 (blind))_ [for]
+As a security engineer, I support this. Hardcoded secrets and vulnerable dependency versions are the two issues I chase most in PR reviews, and a static checker catching them before merge is exactly what we need. Our 11-minute CI already tolerates a few extra seconds for a lint pass. My one condition: we configure Lintwise with rules that flag embedded credentials, API tokens, and known-vulnerable package versions—not just style nits. If the default ruleset is purely cosmetic, this motion is harmless but pointless for security. I'll review the rule set within two days and file a follow-up if we need custom secret-detection patterns. I'm for adoption with that configuration caveat.
+> tl;dr (what later speakers saw in summary mode): Support adopting Lintwise if configured with secret-detection and vulnerable-dependency rules, not just style checks.
+
+**#5 Tom** _(round 1 (blind))_ [for]
+I tried Lintwise on a small React side project last quarter. It caught a handful of real issues—unused variables, a few accessibility gaps in JSX, and some inconsistent naming—that I'd been shipping without noticing. That experience makes me supportive of making it a required pre-merge check. However, I want to flag two practical concerns. First, CI already averages eleven minutes. I need to see a measured impact before we commit; if Lintwise adds more than a minute or two, we should explore running it in parallel with the build rather than sequentially. Second, because I write most of the JavaScript here, I'll be the one most affected by any false positives or overly strict rules. I'd like us to agree on a one-week trial period where warnings don't block merges, so we can tune the rule set before enforcing it.
+> tl;dr (what later speakers saw in summary mode): Lintwise caught real issues on my side project; I support it but want a parallel-run trial and tuned rules before hard enforcement.
+
+**#6 Sana** _(round 1 (blind))_ [undecided]
+I'm open in principle—my Python pipeline code could benefit from consistent style enforcement before it hits review. But I have two honest concerns. First, I haven't used Lintwise, so I don't know how it handles SQL files. My pipelines are heavily SQL-heavy; if it flags every stored-procedure pattern as a violation or, worse, silently skips them, that's a problem either way. Second, our CI already averages eleven minutes. A required pre-merge check that adds even a few minutes per PR compounds across eight people pushing daily. I'd want a one-week trial on my pipeline directory, measuring added CI time and false-positive rate on SQL, before I can vote for making it mandatory repo-wide.
+> tl;dr (what later speakers saw in summary mode): Open to Lintwise for Python, but need SQL coverage and CI-time data before supporting a repo-wide mandate.
+
+**#7 Lars** _(round 1 (blind))_ [for]
+As QA lead, I want fewer spurious test failures caused by obvious code-quality slips. Lintwise catches those before they reach my test suite, which improves signal. However, I've read the docs: default rule sets are noisy. If we turn this on with defaults, developers will drown in warnings and start blanket-suppressing, which is worse than the status quo. My condition: we run Lintwise in advisory mode for two sprints, tune the rule set to our codebase, then flip it to blocking. That gives us the signal benefit without the noise penalty. I also want the lint step cached or parallelized so we don't push the 11-minute build higher.
+> tl;dr (what later speakers saw in summary mode): For, conditional on two-sprint advisory tuning to eliminate false-positive noise before blocking merges.
+
+**#8 Jin** _(round 1 (blind))_ [for]
+I'm in favor, but with guardrails. We have one monorepo and eight maintainers; without a shared gate, style drift is inevitable and review time balloons. Lintwise as a required check codifies what we already argue about in PR comments. However, our CI already averages eleven minutes. If Lintwise adds more than sixty seconds to that, we've traded one bottleneck for another. I want three conditions: first, Lintwise runs in parallel with existing CI steps, not sequentially. Second, we ship with warnings-only for the first two sprints so nobody is blocked on legacy formatting. Third, any rule that fires on more than thirty percent of existing files gets demoted to advisory until we can fix the backlog. If we can meet those conditions, this is the right move. If Lintwise serializes our pipeline, I flip to against.
+> tl;dr (what later speakers saw in summary mode): Support Lintwise as a required check if it runs in parallel and ships warnings-only initially.
+
+**#9 Olga** _(round 1 (blind))_ [for]
+I'm for this. As someone still learning our conventions, I often hesitate on a PR wondering if my formatting or naming matches what the team expects. A required automated check would give me a clear, objective answer before I even ask for review, which takes the guesswork out of it. I haven't used Lintwise yet, so I'd appreciate a short onboarding doc or a "what to expect" note in the repo README so I'm not blindsided by unfamiliar rule names in CI output. My only small concern is whether early false positives or overly strict rules could slow down my first few PRs while I'm still ramping up. If the team can agree on a reasonable rule set and a quick "how to read Lintwise errors" guide, I think this helps me most of all.
+> tl;dr (what later speakers saw in summary mode): Automated linting gives me the clear style guidance I need as a junior, provided onboarding docs exist.
+
+**#10 Chair** _(fact-finding question)_
+To Priya: Measured runtime delta of Lintwise with a scoped high-severity ruleset versus the default full rulebook on a comparable codebase (Priya ran Lintwise for six months on a prior team. We need the concrete wall-clock numbers: was the ~4-minute figure with the default rulebook, and what did the runtime drop to after she scoped to high-severity checks? Also, was that measured on a monorepo of similar scale or a smaller repo?)
+
+**#11 Priya** _(answer to chair)_ [for]
+Yes, the four-minute figure was the default full rulebook. My notes show that enabling Lintwise's built-in result cache—not a scoped high-severity ruleset—dropped it to roughly one minute. I don't have a separate measurement for a hand-curated high-severity subset; I relied on the cache. I also can't confirm the prior repo was monorepo-scale; it may have been smaller. We should measure both approaches on our own repo.
+> tl;dr (what later speakers saw in summary mode): Default was ~4 min; result cache cut it to ~1 min; I lack a scoped-ruleset number and repo-scale confirmation.
+
+**#12 Chair** _(fact-finding question)_
+To Tom: Specific false-positive instances encountered on the React project and how each was resolved (Tom ran Lintwise on a small React project and flagged issues. We need the factual record: what were the false positives (rule names, file types), how many per PR on average, and what resolution did he use—inline suppression comment, config exclusion, or rule disable?)
+
+**#13 Tom** _(answer to chair)_ [undecided]
+I can't give you rule names or per-PR counts. My notes say the default ruleset produced roughly 30 percent noise across JavaScript files on that small React project—unused-variable and naming warnings I judged not real bugs. I never tuned rules, never added inline suppressions or config exclusions; I simply ignored the noise and moved on. So I have no resolution record to report. I still want a trial period before enforcement.
+> tl;dr (what later speakers saw in summary mode): I saw ~30% noise but never tuned rules or recorded specific false positives, so I lack the details requested.
+
+**#14 Priya** _(round 2)_ [for]
+I'm confirming my support, and the group's direction aligns with what I'd want. My earlier "scope the ruleset tightly" instinct was partly wrong: my notes show the built-in result cache alone dropped runtime from four minutes to about one, without hand-curating rules. That, combined with Jin's and Tom's parallel-execution condition, neutralizes my main time-cost worry. I'll back a two-week shadow-mode run as Marcus requested, provided we measure median runtime, tail latency, and 40+ file PR behavior on our actual monorepo. I'll help set up the cache config and run those measurements. One caveat I still hold: we must not ship the default full rulebook on day one of enforcement—Lars and Jin are right that noise breeds blanket-suppression. The shadow period is the right mechanism to tune before flipping to blocking.
+> tl;dr (what later speakers saw in summary mode): Cache plus parallel execution resolves my time concern; I support a two-week shadow run before enforcement.
+
+**#15 Marcus** _(round 2)_ [undecided]
+Priya's cache result of ~1 minute is encouraging but unvalidated on our monorepo, and she can't confirm the prior repo was comparable in scale. My notes show peak queue wait is already 6 minutes on top of the 11-minute build; even a sequential 1-minute lint pass pushes effective turnaround to 18 minutes and deepens the queue during merge windows. Jin's parallel-execution condition is non-negotiable for me—if Lintwise runs concurrently with the build, the wall-clock delta could be near zero and my 90-second threshold becomes moot. I'll accept the two-week shadow-mode run Priya endorsed, but I'm adding one metric to her list: queue-depth impact at peak, not just single-build runtime. If parallel execution holds and median added wall-clock stays under 60 seconds on a 40-file PR, I move to for. Until I see our numbers, undecided.
+> tl;dr (what later speakers saw in summary mode): Undecided pending shadow-mode data; parallel execution and queue-depth metrics on our monorepo are my gating conditions.
+
+**#16 Elena** _(round 2)_ [for]
+I support the two-week shadow run, but I want one carve-out: secret-detection rules must be blocking from day one, even during shadow. My notes record a hard-coded test key that reached main last quarter and forced an emergency rotation. Lintwise's secret-detection rule set would have caught that commit. Style warnings can wait two sprints; a leaked credential cannot. I'll review the rule set within two days as promised and file custom patterns for our internal token formats. Parallel execution and caching are fine—I don't need sequential ordering for security checks. I'm for, conditional on that carve-out.
+> tl;dr (what later speakers saw in summary mode): For adoption with shadow mode, but secret-detection rules must block from day one given last quarter's leaked key.
+
+**#17 Tom** _(round 2)_ [for]
+I'm for adoption, and the cache finding plus Jin's parallel-execution condition largely dissolve my CI-time worry. But my 30-percent-noise number on JavaScript files is the real risk for me—I write most of that code, and I never tuned a single rule. I back Marcus's two-week shadow run and Jin's warnings-only period; that's longer than my original one-week ask, which is fine. One addition: during shadow, I want a rule-level report showing which checks fire most on our JS/JSX files so I can propose exclusions before we flip to blocking. Elena's secret-detection carve-out is sensible and doesn't affect my workflow. I won't vote for enforcement until I've seen the shadow report and we've trimmed the noise I'd actually hit daily.
+> tl;dr (what later speakers saw in summary mode): For adoption, but I need a rule-level noise report on our JS files before flipping to blocking.
+
+**#18 Sana** _(round 2)_ [undecided]
+The two-week shadow run and parallel execution address my CI-time concern—good. And my notes on two outages from config-key typos make me want this check: a static pass catching a misspelled key before merge would have prevented both. But no one has addressed my SQL question. My pipelines are SQL-heavy; if Lintwise silently skips .sql files, I get zero coverage where I need it most, or it flags every stored-procedure pattern and I'm drowning in noise. I'll support the shadow run only if it includes a dedicated SQL pass on my pipeline directory, measuring both coverage and false-positive rate on .sql files specifically. Tom's rule-level report idea is good; I want the same for SQL rules. Without that, I can't vote for enforcement.
+> tl;dr (what later speakers saw in summary mode): Shadow run is fine, but I need proof Lintwise actually parses SQL before I support enforcement.
+
+**#19 Lars** _(round 2)_ [for]
+The group's convergence on a shadow run with parallel execution resolves my two round-one conditions—noise and CI time. I'll add one concrete mechanism from my notes: Lintwise has a baseline mode that ignores pre-existing findings and reports only new violations. That eliminates the legacy-code flood Jin worried about and removes the blanket-suppression risk I flagged. Combined with the 30-percent demotion rule, we get clean signal from day one of enforcement. My notes also record a tuned-rule trial with roughly 8 percent false-positive rate—encouraging, but from a different codebase, so Tom's and Sana's per-language rule reports during shadow are essential before we flip. I'm for, conditional on baseline mode being enabled and the shadow metrics Marcus listed.
+> tl;dr (what later speakers saw in summary mode): Support adoption with baseline mode, parallel execution, and shadow-period rule tuning before enforcement.
+
+**#20 Jin** _(round 2)_ [for]
+The group's convergence addresses all three of my round-one conditions. Parallel execution is agreed, warnings-only for two sprints is agreed, and Lars's baseline mode is actually stronger than my 30-percent demotion rule—it eliminates the legacy flood at the source rather than demoting noisy rules. I'm for.
+
+Two additions from my notes. First, we've reversed two policy changes before because they were rolled out repo-wide at once. I want an explicit rollback path: if shadow metrics show median wall-clock delta above 60 seconds or false-positive rate above 15 percent, we revert to advisory within one sprint, no debate. Second, the research I looked up recommends promoting rules to blocking one at a time, not flipping the whole set. So enforcement should be per-rule, not per-repo.
+
+Elena's secret-detection carve-out is correct and doesn't conflict with either addition.
+> tl;dr (what later speakers saw in summary mode): For adoption with parallel execution, baseline mode, per-rule promotion, and an explicit rollback path if shadow metrics fail.
+
+**#21 Olga** _(round 2)_ [for]
+The shadow run and warnings-only period solve my round-one worry about false positives blocking early PRs. I'm for. My notes confirm style questions consume the most time in my reviews, so an automated gate answering "is my formatting right?" before review is exactly what I need. One unresolved item: I want clear messages explaining each finding, not just a rule ID. Tom, you ran Lintwise on your React project—were the error messages self-explanatory, or did you look up rule names in docs? If cryptic, I'd want a one-page "reading Lintwise output" guide in the README before enforcement. I'll help draft it.
+> tl;dr (what later speakers saw in summary mode): Shadow run solves my false-positive worry; I still need clear finding messages and a reading guide before enforcement.
+
+**#22 Marcus** _(needs time to research)_
+I need to run Lintwise in parallel on a representative branch set and measure the delta in queue-depth and wall-clock build time on our monorepo before I can vote, because a required check that adds even 60–90 seconds serial time could push our 11-minute pipeline into a bottleneck that starves the merge queue, and no one has produced that number yet.
+
+**#23 Sana** _(needs time to research)_
+I need to confirm whether Lintwise actually parses and lints SQL (not just Python), because roughly half my pipeline code is SQL and a repo-wide mandate that silently skips or mis-parses it would give false confidence; I would check Lintwise's supported-language list and run it against a sample of our .sql files before voting.
+
+**#24 Chair** _(tabled)_
+Motion tabled to the next meeting. Research: Marcus: Run Lintwise in parallel with the existing CI build on a representative branch set of our monorepo (including a 40+ file PR); record median wall-clock delta, worst-case tail latency, and queue-depth impact at peak merge windows. Bring the numbers to the next meeting. | Sana: Check Lintwise's supported-language list for SQL; run it against a sample of our pipeline .sql files to confirm it actually parses them (not silently skips) and measure false-positive rate on stored-procedure patterns. Bring coverage and noise numbers to the next meeting.
+
+## Ballots (revealed together at the close)
+
+Result: {"outcome":"tabled","research":["Marcus: Run Lintwise in parallel with the existing CI build on a representative branch set of our monorepo (including a 40+ file PR); record median wall-clock delta, worst-case tail latency, and queue-depth impact at peak merge windows. Bring the numbers to the next meeting.","Sana: Check Lintwise's supported-language list for SQL; run it against a sample of our pipeline .sql files to confirm it actually parses them (not silently skips) and measure false-positive rate on stored-procedure patterns. Bring coverage and noise numbers to the next meeting."]}

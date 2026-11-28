@@ -253,7 +253,7 @@ for (const backend of backends) {
     const s = await admission.snapshot();
     assert.deepEqual(s.queue.map((e) => e.id), [w1.id, w2.id]);
     assert.equal(s.queue.length, 2);
-    // Inquiries still get in: they go to the reserve, not the full productive queue... but a control request that must wait counts against the same bound.
+    // Inquiries still get in: they go to the reserve, not the full productive queue; a control request that must wait counts against its own lane's bound (card P10b), so the authors' full queue never refuses it.
     assert.equal((await ask({ class: "inquiry", host: undefined as never })).state, "running");
   });
 

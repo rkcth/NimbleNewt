@@ -262,6 +262,12 @@ export interface DispatchHandle {
 }
 
 export interface ComposeInput {
+  /** Card P10b: what a landing task lands (the integrator wake's records); its attempts ask admission for a `landing` place and hold their budget on the landed work's task. Absent: no landing tasks. */
+  readonly landingOf?: DispatcherDeps["landingOf"];
+  /** Card P10b: the task a cost of a task is charged to after the fact (a landing task's: the queued work's own task, `IntegratorWake.chargeTaskOf`), for review and background-job compute and the continuation's budget line. Absent: the task itself. */
+  readonly chargeTaskOf?: (taskId: string) => Promise<string>;
+  /** Card P10b: `chargeTaskOf` fixed per charge command at its first try (`IntegratorWake.chargeTaskFor`), so a charge made again names the same task. Absent: `chargeTaskOf`. */
+  readonly chargeTaskFor?: (commandId: string, taskId: string) => Promise<string>;
   /** Called once everything is built and nothing is running yet, right before the driver starts (card F04e notes the first-start counters here). */
   readonly beforeLoops?: () => Promise<void>;
   /** Told once per window when the owner's aggregate spending cap refuses a reservation or stops paid calls (the same function the API's own budget service uses). */
@@ -493,6 +499,17 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   }, i.onError);
   // A charge the ledger could not take is kept and tried again by a loop (card R05g); one given up on is reported.
   const chargeRetry = ChargeRetryService.withEpoch(storage, epoch, { budgets }, { ...ro, onDropped: (e) => i.onError?.(new Error(`charge ${e.commandId} was given up on: ${e.reason}`)) });
+  // The task a review or job charge is booked to (card P10b). A pin that cannot be read or written (card P10b fifth slice, second review) does not lose the charge: the task is resolved before the charge reaches the
+  // retry store, so a thrown pin would cost the spending for good (an under-charge). It is charged where `chargeTaskOf` says now, kept and tried again like any charge, and the failure is reported. The budget
+  // books a command ID once and refuses it with another task, so this never books a charge twice; at worst a later try of the same command is refused and reported.
+  const chargeTaskOfUse = async (u: { commandId: string; taskId: string }): Promise<string> => {
+    if (i.chargeTaskFor !== undefined) {
+      try { return await i.chargeTaskFor(u.commandId, u.taskId); } catch (error) {
+        i.onError?.(new Error(`the budget task of charge ${u.commandId} could not be fixed (${(error instanceof Error ? error.message : String(error)).slice(0, 200)}); it is charged to the task named now`));
+      }
+    }
+    return (await i.chargeTaskOf?.(u.taskId)) ?? u.taskId;
+  };
   const meetings = MeetingService.withEpoch(storage, epoch, { inquiries: i.inquiries }, { ...ro, availability: pauses.availability, invitations, ...(i.leadMinutes === undefined ? {} : { leadMinutes: i.leadMinutes }) });
   const messages = AgentMessageService.withEpoch(storage, epoch, {
     ...ro, availability: pauses.availability, taskPaused: (t) => pauses.isPaused(t), guard: (t) => pauses.guard(t), waits: i.waits, assignments: i.assignments, meetings, inquiries: i.inquiries, notifications,
@@ -897,13 +914,13 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       continuations, principal,
       sources: {
         compaction: async (taskId) => await context.latestCompaction(principal, taskId),
-        budget: async (taskId) => { const r = await budgets.accounting(principal, taskId); return r === undefined ? undefined : { spent: r.spent.costMicros, remaining: r.available.costMicros, unit: `${r.currency} micros` }; },
+        budget: async (taskId) => { const r = await budgets.accounting(principal, (await i.chargeTaskOf?.(taskId)) ?? taskId); return r === undefined ? undefined : { spent: r.spent.costMicros, remaining: r.available.costMicros, unit: `${r.currency} micros` }; },
         previous: async (taskId) => await continuations.latest(principal, taskId),
       },
       ...(i.onError === undefined ? {} : { onError: i.onError }),
     });
     const dispatcher = DispatcherService.withEpoch(storage, epoch, {
-      ...(i.agentReach === undefined ? {} : { agentReach: i.agentReach }), ...(i.targetVersion === undefined ? {} : { targetVersion: i.targetVersion }), ...(i.toolBridge === undefined ? {} : { replaySafe: i.toolBridge.replaySafe }), ...(i.environments === undefined ? {} : { environments: i.environments }), launchDefaults: async () => (i.workerLimits === undefined ? checkLocalWorkerLimits(i.options.local?.limits) : i.workerLimits()), principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, reportsTo: reportsToOf, hosts, workers, ...(i.workspaceOps === undefined ? {} : { workspaceBusy: (taskId: string) => i.workspaceOps!.isBusy(taskId) }), contracts: i.contracts, harnesses: i.catalog, policy, decided: (decision, actionId) => ApprovalLoadService.withEpoch(storage, epoch, i.grants, ro).recordDecision(decision, { actionId }), protectedBranch: (projectId, branch) => branchSettings.isProtected(projectId, branch), ...(i.onDenied === undefined ? {} : { denied: i.onDenied }), effects, blockers, route, ...(modelCalls === undefined ? {} : { modelCalls }),
+      ...(i.agentReach === undefined ? {} : { agentReach: i.agentReach }), ...(i.targetVersion === undefined ? {} : { targetVersion: i.targetVersion }), ...(i.toolBridge === undefined ? {} : { replaySafe: i.toolBridge.replaySafe }), ...(i.environments === undefined ? {} : { environments: i.environments }), launchDefaults: async () => (i.workerLimits === undefined ? checkLocalWorkerLimits(i.options.local?.limits) : i.workerLimits()), principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, reportsTo: reportsToOf, hosts, workers, ...(i.workspaceOps === undefined ? {} : { workspaceBusy: (taskId: string) => i.workspaceOps!.isBusy(taskId) }), contracts: i.contracts, ...(i.landingOf === undefined ? {} : { landingOf: i.landingOf }), harnesses: i.catalog, policy, decided: (decision, actionId) => ApprovalLoadService.withEpoch(storage, epoch, i.grants, ro).recordDecision(decision, { actionId }), protectedBranch: (projectId, branch) => branchSettings.isProtected(projectId, branch), ...(i.onDenied === undefined ? {} : { denied: i.onDenied }), effects, blockers, route, ...(modelCalls === undefined ? {} : { modelCalls }),
       activity: async (step) => { await ActivityService.withEpoch(storage, epoch, ro).recordFinishing(principal, { commandId: step.commandId, taskId: step.taskId, kind: step.kind, summary: step.summary, manifest: { refs: step.refs }, outcome: step.outcome } as never, step.finishes); }, routing: i.routing, pauses,
       ...(i.interrogator === undefined ? {} : { interrogator: i.interrogator }),
       ...(i.jobWaits === undefined ? {} : { jobWakes: { waitable: i.jobWaits, ...(i.stops === undefined ? {} : { stopped: async (taskId: string) => { const held = await i.stops!.holding(taskId, undefined, { wider: true }); return held !== undefined && held.mode !== "suspend"; } }) } }), ...(i.stops === undefined ? {} : { heldBy: async (taskId: string) => { const ancestor = await stoppedAncestor(storage, i.stops!, taskId); return ancestor === undefined ? undefined : `its parent task ${ancestor.taskId} is ${ancestor.mode === "suspend" ? "suspended" : "stopped"} (stop ${ancestor.intentId}); its swarm children are not started while that holds`; } }), decisions, ...(i.startGate === undefined ? {} : { startGate: i.startGate }), ...(i.adoptGate === undefined ? {} : { adoptGate: i.adoptGate }), ...(i.resumes === undefined ? {} : { resumes: i.resumes }), ...(i.handoffs === undefined ? {} : { handedIn: (taskId: string) => i.handoffs!.latestForTask(taskId) }), ...(i.newestCodeOf === undefined ? {} : { newestCodeOf: i.newestCodeOf }), prerequisites: async (taskId: string, scan?: Map<string, unknown>) => { const deps = await i.contracts.prerequisitesOf(taskId, scan); if (deps === undefined) throw new DomainError("unavailable", "the task's dependencies could not be read"); const open: string[] = []; const dead: string[] = []; for (const e of deps.dependsOn) { if (e.state === undefined) dead.push(`${e.taskId} (missing)`); else if (e.state === "cancelled") dead.push(`${e.taskId} (cancelled)`); else if (e.state !== "done") open.push(`${e.taskId} (${e.state})`); } return { open, dead }; }, checkouts: ProjectResourceService.withEpoch(storage, epoch, ro), generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,
@@ -987,7 +1004,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       attemptControl: { live: (taskId) => dispatcher.liveAttemptsOf(principal, { taskId }), frozenReason: async (id) => (await dispatcher.get(principal, id))?.frozen?.reason, release: (id) => dispatcher.release(principal, id), tell: (id, text) => dispatcher.tell(principal, id, text), stop: (id, reason) => dispatcher.stop(principal, id, { reason }) },
       attendance, standups, watches,
       unsettledCharges: (by) => chargeRetry.unsettled(by),
-      chargeUse: (u) => chargeRetry.submit(principal, { commandId: u.commandId, activity: u.activity, taskId: u.taskId, computeMs: u.computeMs, ...(u.agentId === undefined ? {} : { agentId: u.agentId }) }).then(() => undefined),
+      chargeUse: async (u) => chargeRetry.submit(principal, { commandId: u.commandId, activity: u.activity, taskId: await chargeTaskOfUse(u), computeMs: u.computeMs, ...(u.agentId === undefined ? {} : { agentId: u.agentId }) }).then(() => undefined),
       // An outside server's text is framed as data on every page, with the injection check over the page itself (the visible head was checked when it was cut).
       readSpill: async (by, spillId, index, size) => {
         const found = await context.readSpill(by, spillId, index, size);

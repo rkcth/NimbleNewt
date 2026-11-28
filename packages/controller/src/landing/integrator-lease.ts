@@ -36,6 +36,11 @@ export interface IntegratorLeaseBody {
   readonly epoch?: number;
   readonly releasedAt?: string;
   readonly note?: string;
+  /**
+   * Card P10b: the landing task whose own credential took this hold (a woken integrator's take). Kept while the hold is renewed on that same credential; dropped when the holder renews it on any other credential
+   * (its own), and when the hold is handed over. So a hold that carries it is provably the take of that landing task and nothing since: the wake's round gives back only such a hold once that task is done.
+   */
+  readonly landingTask?: string;
 }
 export interface IntegratorLease extends IntegratorLeaseBody { readonly leaseId: string; readonly revision: number; readonly live: boolean }
 
@@ -66,17 +71,18 @@ export class IntegratorLeaseService {
   static leaseIdOf(projectId: string, branch: string): string { return derivedId("ilz", `lease\0${projectId}\0${branch}`); }
 
   /** Takes the branch's lease for `holder` working on `taskId`. Refused (`unavailable`) while someone else holds it and it has not expired; two at the same moment: one wins, the other is refused. */
-  async acquire(command: { commandId: string; projectId: string; branch: string; holder: string; taskId: string; ttlMs: number }): Promise<IntegratorLease> {
+  async acquire(command: { commandId: string; projectId: string; branch: string; holder: string; taskId: string; ttlMs: number; landingTask?: string }): Promise<IntegratorLease> {
     const projectId = text(command.projectId, "projectId", { min: 1, max: 100 });
     const branch = text(command.branch, "branch", { min: 1, max: LEASE_LIMITS.branch });
     if (!BRANCH.test(branch)) invalid("branch", "is not a branch name");
     const holder = text(command.holder, "holder", { min: 1, max: 100 });
     const taskId = checkTaskId(command.taskId);
     const ttlMs = this.#ttl(command.ttlMs);
+    const landingTask = command.landingTask === undefined ? undefined : checkTaskId(command.landingTask);
     const leaseId = IntegratorLeaseService.leaseIdOf(projectId, branch);
     // A lost race on the task's index alone (the same task taking another branch at that moment) is built again; a lost race on the lease itself is a refusal, said by the next build or below.
     await retried(`branch ${branch} was leased by someone else at the same moment`, () => this.#runner.command("lease.acquire", { commandId: command.commandId, actor: "controller" }, async () => ({
-      payload: { projectId, branch, holder, taskId, ttlMs },
+      payload: { projectId, branch, holder, taskId, ttlMs, ...(landingTask === undefined ? {} : { landingTask }) },
       build: async () => {
         const ref: AggregateRef = { kind: KIND, id: leaseId };
         // The task the hold is worked under must belong to the project whose branch it is (card P10): a lease of project A is never taken under a task of project B.
@@ -87,7 +93,7 @@ export class IntegratorLeaseService {
         const b = current?.body as unknown as IntegratorLeaseBody | undefined;
         if (b !== undefined && this.#live(b)) throw new DomainError("unavailable", `branch ${branch} is leased to agent ${b.holder} for task ${b.taskId} until ${b.expiresAt}`);
         const now = this.#runner.now();
-        const body: IntegratorLeaseBody = { projectId, branch, holder, taskId, fence: (b?.fence ?? 0) + 1, ttlMs, acquiredAt: now, expiresAt: this.#after(now, ttlMs), state: "held", epoch: this.#epoch };
+        const body: IntegratorLeaseBody = { projectId, branch, holder, taskId, fence: (b?.fence ?? 0) + 1, ttlMs, acquiredAt: now, expiresAt: this.#after(now, ttlMs), state: "held", epoch: this.#epoch, ...(landingTask === undefined ? {} : { landingTask }) };
         return {
           ref, creates: current === undefined,
           changes: [current === undefined ? { type: "create", ref, body: json(body) } : { type: "update", ref, expectedRevision: current.revision, body: json(body) }, ...(await this.#index(taskId, leaseId))],
@@ -99,12 +105,17 @@ export class IntegratorLeaseService {
     return (await this.get(leaseId))!;
   }
 
-  /** Extends the hold of the current holder. `fenced` when `fence` is not the current one, the lease was released, or it expired. */
-  async renew(command: { commandId: string; leaseId: string; fence: number; holder: string }): Promise<IntegratorLease> {
-    await this.#change("lease.renew", command.commandId, command.leaseId, { fence: command.fence, holder: command.holder }, (b) => {
+  /**
+   * Extends the hold of the current holder. `fenced` when `fence` is not the current one, the lease was released, or it expired. `landingTask`: the landing task whose own credential renews (card P10b); a hold taken
+   * by a landing task keeps that mark only when renewed on that same task's credential, and loses it on any other (the holder's own), so the wake never takes it for the landing task's idle hold after that.
+   */
+  async renew(command: { commandId: string; leaseId: string; fence: number; holder: string; landingTask?: string }): Promise<IntegratorLease> {
+    const via = command.landingTask === undefined ? undefined : checkTaskId(command.landingTask);
+    await this.#change("lease.renew", command.commandId, command.leaseId, { fence: command.fence, holder: command.holder, ...(via === undefined ? {} : { landingTask: via }) }, (b) => {
       if (b.fence !== command.fence || b.state !== "held" || b.holder !== command.holder) throw fenced(`lease ${command.leaseId} is not held with fence ${command.fence} by ${command.holder}`);
       if (!this.#live(b)) throw fenced(`lease ${command.leaseId} expired at ${b.expiresAt}; take it again`);
-      return { ...b, expiresAt: this.#after(this.#runner.now(), b.ttlMs) };
+      const { landingTask: mark, ...rest } = b;
+      return { ...rest, ...(mark !== undefined && mark === via ? { landingTask: mark } : {}), expiresAt: this.#after(this.#runner.now(), b.ttlMs) };
     });
     return (await this.get(command.leaseId))!;
   }
@@ -112,11 +123,20 @@ export class IntegratorLeaseService {
   /**
    * Lets the lease go. Only the hold named by `fence` is released: a release for an older fence (the lease expired and was taken by another, or it was released already under another command) is refused `fenced`, so a hold
    * is never released twice and never someone else's. An expired hold of this fence that nobody took since is released too (it was free anyway).
+   *
+   * `expiresAt` (card P10b, the wake's release of an idle hold): when given, only a hold that still runs to exactly that time is released. A renew keeps the fence, so the fence alone does not tell a hold renewed
+   * after the caller read it; this does, and such a hold is refused `fenced` and left as it is.
    */
-  async release(command: { commandId: string; leaseId: string; fence: number; note?: string }): Promise<IntegratorLease> {
+  async release(command: { commandId: string; leaseId: string; fence: number; note?: string; expiresAt?: string; landingTask?: string }): Promise<IntegratorLease> {
     const note = command.note === undefined ? undefined : text(command.note, "note", { min: 1, max: LEASE_LIMITS.note });
-    await this.#change("lease.release", command.commandId, command.leaseId, { fence: command.fence, ...(note === undefined ? {} : { note }) }, (b) => {
+    const until = command.expiresAt === undefined ? undefined : text(command.expiresAt, "expiresAt", { min: 1, max: 40 });
+    // `landingTask` (card P10b, first review): when given, only a hold that still carries exactly that mark is released. A renew on the holder's own credential in the same millisecond as the hold's last
+    // expiry was computed (or after the clock stepped back) leaves `expiresAt` equal but drops the mark; such a hold is the holder's own and is refused `fenced`.
+    const mark = command.landingTask === undefined ? undefined : checkTaskId(command.landingTask);
+    await this.#change("lease.release", command.commandId, command.leaseId, { fence: command.fence, ...(note === undefined ? {} : { note }), ...(until === undefined ? {} : { expiresAt: until }), ...(mark === undefined ? {} : { landingTask: mark }) }, (b) => {
       if (b.fence !== command.fence || b.state !== "held") throw fenced(`lease ${command.leaseId} is not held with fence ${command.fence}`);
+      if (until !== undefined && b.expiresAt !== until) throw fenced(`lease ${command.leaseId} was renewed after it was read (it now runs to ${b.expiresAt}); it is left as it is`);
+      if (mark !== undefined && b.landingTask !== mark) throw fenced(`lease ${command.leaseId} is no longer the take of landing task ${mark}; it is left as it is`);
       return { ...b, state: "released", releasedAt: this.#runner.now(), ...(note === undefined ? {} : { note }) };
     });
     return (await this.get(command.leaseId))!;
@@ -137,7 +157,8 @@ export class IntegratorLeaseService {
       if (b.fence !== command.fence || b.state !== "held") throw fenced(`lease ${command.leaseId} is not held with fence ${command.fence}`);
       if (!this.#live(b)) throw fenced(`lease ${command.leaseId} expired at ${b.expiresAt}, so it is free and not handed to anyone`);
       const now = this.#runner.now();
-      return { ...b, holder: to, taskId, fence: b.fence + 1, acquiredAt: now, expiresAt: this.#after(now, b.ttlMs), ...(note === undefined ? {} : { note }) };
+      const { landingTask: _taken, ...rest } = b;
+      return { ...rest, holder: to, taskId, fence: b.fence + 1, acquiredAt: now, expiresAt: this.#after(now, b.ttlMs), ...(note === undefined ? {} : { note }) };
     }, taskId);
     return (await this.get(command.leaseId))!;
   }

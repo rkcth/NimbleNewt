@@ -1,0 +1,203 @@
+[
+ {
+  "seq": 1,
+  "who": "Chair",
+  "kind": "motion",
+  "text": "Motion (version 1): The team adopts Lintwise, an automated code-quality checker, as a required pre-merge check on every repository.",
+  "label": "opening"
+ },
+ {
+  "seq": 2,
+  "who": "Priya",
+  "kind": "statement",
+  "text": "Having run Lintwise for six months on my previous team, I can confirm it caught genuine bugs that slipped past code review. That said, it added roughly four minutes to CI. Our builds already average eleven minutes, so we're looking at fifteen-plus on every PR. I support making it required, but we should run it in parallel with existing checks rather than sequentially, and we should tune the rule set to suppress noisy warnings that generate false positives. Without those two mitigations, the time cost will discourage developers from running CI locally and erode trust in the tool.",
+  "tldr": "Lintwise catches real bugs; I'm for it, provided we parallelize it and tune rules to keep CI under fifteen minutes.",
+  "stance": "for",
+  "label": "round 1 (blind)",
+  "agent": "a1"
+ },
+ {
+  "seq": 3,
+  "who": "Marcus",
+  "kind": "statement",
+  "text": "I want this to work, but I can't sign off without data. Our 11-minute average is already tight; the queue backs up during peak hours and any added step compounds that. Static checkers are usually fast—seconds, not minutes—but \"usually\" isn't a guarantee. I need Lintwise benchmarked against our actual monorepo: cold-cache runtime, incremental behavior, and how it handles partial-failure retries. I also want a clear timeout policy so a hung Lintwise run doesn't block the queue for ten minutes. If it adds under 30 seconds on a warm cache, I'm for it. If it's closer to a minute or behaves unpredictably on large diffs, I'll push back. Give me a week of shadow-mode runs on the pipeline before we make it a hard gate.",
+  "tldr": "Cautiously open, but need Lintwise's real runtime on our monorepo before I'll make it a blocking gate.",
+  "stance": "undecided",
+  "label": "round 1 (blind)",
+  "agent": "a2"
+ },
+ {
+  "seq": 4,
+  "who": "Elena",
+  "kind": "statement",
+  "text": "I support this, but with a condition. From a secrets perspective, a pre-merge gate is the right place to catch hardcoded API keys, tokens, and credentials before they hit main. I want to verify Lintwise ships with, or can be configured with, rules that flag literal secrets, suspicious entropy strings, and risky dependency import patterns. My concern is scope creep: if the team treats \"lint passes\" as sufficient, we may skip a dedicated secret-scanning step. I also need to confirm the added runtime won't push our 11-minute CI past the threshold where developers start ignoring red checks. If Lintwise's security rule set is thin, we pair it with a secret scanner in the same gate. Conditionally in favor.",
+  "tldr": "Supportive if Lintwise covers secret detection and doesn't replace dedicated scanning.",
+  "stance": "for",
+  "label": "round 1 (blind)",
+  "agent": "a3"
+ },
+ {
+  "seq": 5,
+  "who": "Tom",
+  "kind": "statement",
+  "text": "I'm in favor. I've been the one writing most of our JavaScript, and Lintwise caught a few real bugs in my side project—unused imports, inconsistent null checks—that would've been painful to debug in the monorepo. Having it as a required gate means I stop relying on memory to run the checker locally before every PR. My one concern: our CI already averages eleven minutes. Lintwise on my side project was fast, but our monorepo is much larger. I'd want a quick benchmark on a representative branch before we wire it into the pre-merge pipeline, so we don't push that eleven minutes past fifteen. Otherwise, yes, let's adopt it. It'll save me—and everyone else—reviewing the same trivial style issues over and over.",
+  "tldr": "Tried Lintwise personally; it catches real JS bugs, but benchmark its speed on our monorepo before committing.",
+  "stance": "for",
+  "label": "round 1 (blind)",
+  "agent": "a4"
+ },
+ {
+  "seq": 6,
+  "who": "Sana",
+  "kind": "statement",
+  "text": "I haven't used Lintwise, so I can't vouch for it. Two concerns from my side. First, my pipelines are roughly half SQL, half Python. If Lintwise's SQL coverage is thin, we get a false sense of \"checked\" while raw SQL files slip through unreviewed. I'd need to see a concrete list of supported SQL dialects and rule sets before trusting it as a gate. Second, our CI already averages 11 minutes. I want to know Lintwise's wall-clock cost on a typical pipeline PR before it becomes mandatory for eight people. That said, Python-side linting has caught real bugs for me—unused imports, silent type mismatches in ETL transforms—so I'm not opposed in principle. I just need the SQL answer and a timing number before I'd sign off on making it a hard requirement.",
+  "tldr": "I need proof of SQL coverage and a CI-time impact number before I'll back making Lintwise a hard gate.",
+  "stance": "undecided",
+  "label": "round 1 (blind)",
+  "agent": "a5"
+ },
+ {
+  "seq": 7,
+  "who": "Lars",
+  "kind": "statement",
+  "text": "I'm in favor, with one hard condition. Lintwise catches style and correctness issues before they ever reach my test suite, which means fewer spurious failures and a cleaner signal when a test actually breaks. That's exactly what I want. However, I've read the docs, and the default rule set ships with roughly forty rules, several of which flag subjective patterns. If we enable all of them on day one, developers will start dismissing the gate as noise, and we'll lose the signal we're trying to protect. My condition: we start with a curated subset—maybe ten rules targeting real bug patterns—and expand only when a rule proves it doesn't generate false positives over two sprints. I also want a two-week grace period where failures are warnings, not blockers, so we can measure noise before enforcing.",
+  "tldr": "Support Lintwise, but only with a tuned rule set and a grace period to keep the gate signal clean.",
+  "stance": "for",
+  "label": "round 1 (blind)",
+  "agent": "a6"
+ },
+ {
+  "seq": 8,
+  "who": "Jin",
+  "kind": "statement",
+  "text": "I support making Lintwise a required pre-merge gate. With eight of us pushing into one monorepo, inconsistent style and subtle bugs in early PRs compound quickly—someone else's unchecked code becomes my merge conflict. A static checker is cheap to run relative to our 11-minute CI, so the speed cost should be negligible if we configure it to run in parallel with the build rather than sequentially. My conditions: we cap its runtime at 90 seconds, we tune the ruleset in a two-week trial so we're not drowning in false positives, and I retain authority to temporarily disable specific rules if they block a production hotfix. Consistency here isn't bureaucracy; it's the contract that lets eight people share one codebase without stepping on each other.",
+  "tldr": "For, with a 90-second cap, tuned ruleset, and hotfix override—consistency protects eight devs in one monorepo.",
+  "stance": "for",
+  "label": "round 1 (blind)",
+  "agent": "a7"
+ },
+ {
+  "seq": 9,
+  "who": "Olga",
+  "kind": "statement",
+  "text": "I'm in favor. As someone still learning our conventions, I often get style comments in review and have to go back and rework things. A required pre-merge check would tell me *before* I open a PR whether my code matches what the team expects, instead of waiting for a senior dev to flag it. That's a clearer feedback loop for me. My only concern is the 11-minute CI baseline—if Lintwise adds meaningful time on top, I'd want to know the expected overhead before we flip it on for every repo. But I'd rather have a slightly longer pipeline than another round of \"please rename this variable\" comments. I haven't used Lintwise yet, so I'd appreciate a short onboarding doc or a config walkthrough so I understand what rules we're enforcing and why.",
+  "tldr": "Clear automated style feedback helps a junior dev more than review comments; support it if CI overhead is reasonable.",
+  "stance": "for",
+  "label": "round 1 (blind)",
+  "agent": "a8"
+ },
+ {
+  "seq": 10,
+  "who": "Chair",
+  "kind": "chair-question",
+  "text": "To Priya: Runtime and false-positive characteristics of Lintwise over your six-month deployment (Was the roughly four-minute addition measured on a cold cache or a warm incremental cache, and was it run sequentially or in parallel with other checks? Also, what proportion of the warnings it produced were genuine findings versus false positives you had to suppress, and did you tune the rule set or run it with defaults?)",
+  "label": "fact-finding question"
+ },
+ {
+  "seq": 11,
+  "who": "Priya",
+  "kind": "answer",
+  "text": "The four-minute figure was the cold-cache, default-rule-set run, executed sequentially after our build. With Lintwise's result cache enabled, it dropped to roughly one minute on warm incremental runs. I didn't formally track a false-positive ratio, but the three null-handling bugs caught in month one were genuine; I did suppress a handful of style warnings. We ran defaults for sprint one, then trimmed a few noisy rules. I can't confirm parallel execution—we never tested it.",
+  "tldr": "Four minutes was cold-cache sequential defaults; cache brought it to one minute; we trimmed noisy rules after sprint one.",
+  "stance": "for",
+  "label": "answer to chair",
+  "agent": "a1"
+ },
+ {
+  "seq": 12,
+  "who": "Chair",
+  "kind": "chair-question",
+  "text": "To Lars: Composition of Lintwise's default rule set as described in the documentation you read (Of the roughly forty default rules, how many target correctness or bug patterns versus subjective style choices, and does the rule catalog include any secret-detection rules (hardcoded keys, high-entropy strings) or SQL-specific checks, or are those entirely absent from the shipped set?)",
+  "label": "fact-finding question"
+ },
+ {
+  "seq": 13,
+  "who": "Lars",
+  "kind": "answer",
+  "text": "From the docs I read, roughly ten of the forty default rules target correctness or bug patterns—null handling, unused imports, silent type mismatches. The remaining thirty lean subjective: naming, formatting, structure. I did not see secret-detection rules (hardcoded keys, high-entropy strings) or SQL-specific checks in the shipped catalog. Those appear absent. My notes confirm a tuned set drops false positives to about eight percent, and baseline mode ignores pre-existing findings, which helps.",
+  "tldr": "About ten correctness rules, thirty style; no secret-detection or SQL rules in the default set.",
+  "stance": "for",
+  "label": "answer to chair",
+  "agent": "a6"
+ },
+ {
+  "seq": 14,
+  "who": "Priya",
+  "kind": "statement",
+  "text": "I'll confirm my stance: for, with mitigations. Lars's answer clarifies the rule split—ten correctness rules, thirty subjective. That matches my experience: the three null-handling bugs I caught were all from those correctness rules; the suppressed warnings were style noise. So Lars's curated-subset approach is right. On runtime: my four-minute number was cold-cache, sequential, defaults. With result cache it was about one minute. Marcus, if you benchmark on warm cache with a tuned rule set, I'd expect well under your 30-second threshold. Elena, Lars confirmed no secret-detection rules ship in the default set, so we do need a separate secret scanner in the same gate. Sana, no SQL checks either—your concern is valid. I'd support Jin's 90-second cap and parallel execution.",
+  "tldr": "For adoption with curated rules, parallel execution, and a separate secret scanner since Lintwise ships no security or SQL checks.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "a1"
+ },
+ {
+  "seq": 15,
+  "who": "Marcus",
+  "kind": "statement",
+  "text": "Priya's clarification helps—cold-cache four minutes was sequential, defaults; warm incremental drops to about one minute. That's encouraging but still above my thirty-second threshold, and it's her team's monorepo, not ours. My queue already backs up six minutes at peak on top of eleven-minute builds; even a sixty-second addition compounds that for eight people. I'm not blocking, but I still need a week of shadow-mode runs on our actual pipeline before I call it a hard gate. I want parallel execution, a hard timeout so a hung run can't stall the queue, and a warm-cache number measured on our largest typical diff. If shadow-mode shows under thirty seconds warm and parallel, I flip to for. If it's closer to a minute or behaves oddly on large diffs, I push back.",
+  "tldr": "Warm-cache one-minute is promising but unmeasured on our repo; I need shadow-mode data before committing.",
+  "stance": "undecided",
+  "label": "round 2",
+  "agent": "a2"
+ },
+ {
+  "seq": 16,
+  "who": "Elena",
+  "kind": "statement",
+  "text": "I need to correct the record. Lars and Priya both said secret-detection rules are absent from Lintwise's shipped catalog. My notes say otherwise: Lintwise *does* include a secret-detection rule set—hardcoded keys, high-entropy strings, risky dependency imports. Last quarter a test API key reached main and had to be rotated; that rule set would have caught it. The rules likely exist but aren't enabled in the default forty, which is why Lars didn't see them. That distinction matters: we don't need a separate scanner bolted on. We need those rules explicitly enabled in our curated subset from day one. I support the shadow-mode week Marcus wants, but secret-detection rules must be active during it so we measure their false-positive rate on real diffs. My condition stands: no merging without them.",
+  "tldr": "Secret-detection rules do ship in Lintwise; they just aren't default-enabled—enable them in our curated subset immediately.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "a3"
+ },
+ {
+  "seq": 17,
+  "who": "Tom",
+  "kind": "statement",
+  "text": "I'm still for this. My side-project experience lines up with what Lars described: about thirty percent of default-rule warnings in my JavaScript files were noise—mostly naming and formatting. That's consistent with his ten-correctness, thirty-subjective split. If we curate down to the correctness rules as Lars suggests, that noise should drop significantly. Elena's correction is good news: secret-detection rules exist, just aren't in the default forty. I'll make sure they're enabled in our subset. I support Marcus's shadow-mode week—let's measure warm-cache time on our actual monorepo before flipping the gate. On my side project Lintwise ran in seconds, but I didn't tune rules or test on anything near our monorepo size, so I defer to the benchmark. Parallel execution and a timeout policy are essential.",
+  "tldr": "Thirty percent noise on defaults matches Lars's split; curating to correctness rules should fix it; shadow-mode week settles runtime.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "a4"
+ },
+ {
+  "seq": 18,
+  "who": "Sana",
+  "kind": "statement",
+  "text": "Lars confirmed no SQL-specific checks ship in Lintwise's catalog. That's half my pipeline unaddressed. But the ten correctness rules—null handling, silent type mismatches—directly target the ETL bugs I worry about, and config-key typos like the two that caused outages last year are exactly what those rules catch in Python. I'm for adoption with two conditions: we pair Lintwise with a SQL linter so my raw SQL files aren't invisible to the gate, and we confirm during Marcus's shadow week whether the correctness rules actually flag config-key typos in our pipeline code. Parallel execution and a hard timeout, yes. The 90-second cap works if warm cache holds.",
+  "tldr": "For adoption, but the confirmed SQL gap means we need a separate SQL linter alongside Lintwise.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "a5"
+ },
+ {
+  "seq": 19,
+  "who": "Lars",
+  "kind": "statement",
+  "text": "Elena's correction is important—secret-detection rules exist but aren't in the default forty. That changes my recommendation: our curated subset should include those rules from day one, not bolt on a separate scanner. My notes confirm baseline mode ignores pre-existing findings, so we won't block merges on legacy code. Combined with the tuned-rule-set false-positive rate of roughly eight percent I read about, signal-to-noise should be strong. I'll align my grace period with Marcus's shadow-mode week rather than my original two weeks—one week warnings-only is enough to calibrate. I still insist we start with the ten correctness rules plus secret-detection rules, not the full forty. Parallel execution and a hard timeout remain non-negotiable for test-signal integrity.",
+  "tldr": "For adoption with curated correctness-plus-secrets rules, baseline mode, one-week shadow period, parallel execution, and hard timeout.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "a6"
+ },
+ {
+  "seq": 20,
+  "who": "Jin",
+  "kind": "statement",
+  "text": "I'm for adoption, and the team has converged well. Marcus's shadow-mode week, Lars's curated subset, Elena's secret-detection rules from day one, Sana's SQL-linter pairing—all fit. But my notes flag a pattern: we reversed two policy changes because they went repo-wide at once. So I amend my two-week trial to the one-week shadow period everyone agreed on, but I require rule-by-rule promotion after that week, not a single flip. Each correctness rule gets promoted to blocking only after its false-positive rate is published and stays under ten percent for a sprint. Rollback is a one-line config toggle per rule, not a revert. I retain hotfix-override authority. Parallel execution, 90-second cap, hard timeout: confirmed. Sana, we pair the SQL linter in the same gate.",
+  "tldr": "For adoption with one-week shadow, rule-by-rule promotion with published false-positive rates, and per-rule rollback toggles.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "a7"
+ },
+ {
+  "seq": 21,
+  "who": "Olga",
+  "kind": "statement",
+  "text": "I'm still for adoption. My notes confirm style questions eat the most time in my reviews, so a pre-merge gate that flags them before a senior dev sees my PR is exactly the feedback loop I need. Two practical asks: first, the onboarding doc I mentioned—I need a short walkthrough of which rules are in our curated subset and what each one means in plain language, not just rule IDs. Second, I'd like to confirm that Lintwise's output messages explain *why* a finding matters, not just *what* it is. If a rule says \"rename this variable,\" I need to understand the convention behind it, or I'll keep hitting the same wall. Jin's rule-by-rule promotion helps here: I can learn one rule per sprint instead of forty at once. The shadow-mode week gives me time to build that mental model before anything blocks my merges.",
+  "tldr": "A required gate with clear explanations and gradual rule rollout gives me the style feedback I need without drowning in forty rules on day one.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "a8"
+ }
+]

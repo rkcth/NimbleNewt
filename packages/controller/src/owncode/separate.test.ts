@@ -1,17 +1,25 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { join, resolve, sep, win32 } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { after, test } from "node:test";
 import { SEPARATE_LIMITS, installationGuards, judgeSeparate, nodeSeparationFs, parseMountInfo, programRoot, type GuardedPlace, type MountEntry, type OwnPlace, type SeparationFs } from "./separate.js";
 
 // Card B06, third slice: the NimbleNewt development project's own checkout must be apart from the running installation. These tests judge places against guarded folders on a real disk (symbolic links,
 // missing folders, loops) and on a file system the test makes up (a bind mount, a file system without folder identity, a folder too deep, a failing disk). Nothing here touches the controller's records.
 
-const root = realpathSync(mkdtempSync(join(tmpdir(), "nn-b06c-sep-")));
+// The native realpath, as the judge's own: on Windows it gives the long name of a folder the temporary folder names by its short (8.3) name (`RUNNER~1`), so a path the test builds is spelled as the judge's.
+const root = realpathSync.native(mkdtempSync(join(tmpdir(), "nn-b06c-sep-")));
+/** Windows takes `..` in a path by its spelling before it follows a link (`l\..\g` is the `g` beside `l`), as git for Windows does; on POSIX `..` leads up from where the link leads. */
+const posixDots = process.platform !== "win32";
+/** FIFOs and permission bits that stop a read are POSIX: Windows has no FIFO in its file system, and `chmod` there only sets the read-only flag, which does not stop a read. */
+const posixFiles = process.platform !== "win32";
 after(() => rmSync(root, { recursive: true, force: true }));
 const dir = (...parts: string[]): string => { const p = join(root, ...parts); mkdirSync(p, { recursive: true }); return p; };
 const repo = (locator: string, label = "source", write = true): OwnPlace => ({ label, kind: "repository", locator, write });
+/** A folder git takes as a git folder (a HEAD naming a branch, `objects` and `refs`), made at `path`; returns `path`. */
+const gitFolder = (path: string): string => { mkdirSync(join(path, "objects"), { recursive: true }); mkdirSync(join(path, "refs"), { recursive: true }); writeFileSync(join(path, "HEAD"), "ref: refs/heads/main\n"); return path; };
 const install = dir("srv", "nimblenewt");
 const data = dir("var", "nimblenewt-data");
 const guarded: GuardedPlace[] = [{ what: "the running installation's program files", path: install }, { what: "the controller's data directory", path: data }];
@@ -114,21 +122,30 @@ test("on a platform whose file systems fold case, a differently cased spelling o
   const ids = { "/": "1:2", "/Srv": "1:10", "/Srv/NN": "1:11", "/srv": "1:40", "/srv/nn": "1:41", "/srv/nn/x": "1:42" };
   const g: GuardedPlace[] = [{ what: "the running installation's program files", path: "/Srv/NN" }];
   await refusedWith([repo("/srv/nn/x")], g, /inside the running installation's program files/, { fs: fakeFs(ids), platform: "darwin" });
-  await refusedWith([repo("/srv/nn/x")], g, /inside/, { fs: fakeFs(ids), platform: "win32" });
+  // Windows: the same, in Windows spelling (drive letters, either separator).
+  // The checkout's way up is spelled with a lower-case drive letter (two spellings, two identities): drive letters fold too.
+  const winIds = { "C:\\": "1:2", "C:\\Srv": "1:10", "C:\\Srv\\NN": "1:11", "c:\\": "1:3", "c:\\srv": "1:40", "c:\\srv\\nn": "1:41", "c:\\srv\\nn\\x": "1:42" };
+  await refusedWith([repo("c:/srv/nn/x")], [{ what: "the running installation's program files", path: "C:\\Srv\\NN" }], /inside/, { fs: fakeFs(winIds), platform: "win32" });
   assert.deepEqual(await judgeSeparate([repo("/srv/nn/x")], g, { fs: fakeFs(ids), platform: "linux" }), { separate: true }, "Linux file systems keep case: two spellings with two identities are two folders");
 });
 
 test("the guarded folders come from what builds the controller; the program root is the source tree or release the controller runs from", () => {
   const here = programRoot();
   // This test runs from the built package, which lives in the source tree: the root is the folder whose package.json declares the workspaces, above packages/controller.
-  assert.ok(resolve(here, "packages", "controller") === resolve(new URL("../../", import.meta.url).pathname), `${here} holds this package`);
-  assert.deepEqual(installationGuards({ programRoot: "/opt/nn/", dataDirectory: "/var/lib/nn" }), [{ what: "the running installation's program files", path: "/opt/nn" }, { what: "the controller's data directory", path: "/var/lib/nn" }]);
-  const all = installationGuards({ programRoot: "/opt/nn", runtime: "/usr/bin", dataDirectory: "/d", databaseFile: "/e/c.sqlite", stateDirectory: "/s", releaseRoot: "/r", releaseIncoming: "/i", artifactDirectory: "/a", backupDirectory: "/b" });
-  assert.deepEqual(all.map((g) => g.path), ["/opt/nn", "/usr/bin", "/d", "/e/c.sqlite", "/e/c.sqlite-wal", "/e/c.sqlite-shm", "/e/c.sqlite-journal", "/s", "/r", "/i", "/a", "/b"]);
-  assert.ok(all.length <= SEPARATE_LIMITS.guarded, "every guard a controller can be given fits the limit");
+  assert.ok(resolve(here, "packages", "controller") === resolve(fileURLToPath(new URL("../../", import.meta.url))), `${here} holds this package`);
+  // The guarded paths are taken as the controller opens them: resolved by the host's own rules (on Windows a path from the root is on the working directory's drive).
+  assert.deepEqual(installationGuards({ programRoot: "/opt/nn/", dataDirectory: "/var/lib/nn" }), [{ what: "the running installation's program files", path: resolve("/opt/nn"), git: true }, { what: "the controller's data directory", path: resolve("/var/lib/nn") }]);
+  const all = installationGuards({ programRoot: "/opt/nn", runtime: "/usr/bin", dataDirectory: "/d", databaseFile: "/e/c.sqlite", stateDirectory: "/s", releaseRoot: "/r", releaseIncoming: "/i", artifactDirectory: "/a", backupDirectory: "/b",
+    backupKeyring: "/k/keyring.json", backupPasscode: "/k/passcode", backupRecovery: "/k/recovery", recoveryManifests: "/m", watchdogFile: "/w/watchdog.json", heartbeatFile: "/h/beat" });
+  assert.deepEqual(all.map((g) => g.path), ["/opt/nn", "/usr/bin", "/d", "/e/c.sqlite", "/e/c.sqlite-wal", "/e/c.sqlite-shm", "/e/c.sqlite-journal", "/s", "/r", "/i", "/a", "/b", "/k/keyring.json", "/k/passcode", "/k/recovery", "/m", "/w/watchdog.json", "/h/beat"].map((x) => resolve(x)));
+  assert.deepEqual(all.filter((g) => g.git === true).map((g) => g.path), [resolve("/opt/nn")], "only the program root's git folders are followed");
+  // B06 fourth slice: the program root's git folders (at most its git folder and the common one) are added when judged, and still fit the limit.
+  assert.ok(all.length + 2 <= SEPARATE_LIMITS.guarded, "every guard a controller can be given, with the program root's git folders, fits the limit");
+  // First review of the fourth slice: with room to spare (a limit exactly full would refuse every judgement once one more guard is added), as the ASSUMPTION for 32 says.
+  assert.ok(all.length + 2 + 8 <= SEPARATE_LIMITS.guarded, "the limit leaves room for more guards");
   // A package with no workspace root above it is its own root.
   const lone = dir("lone", "pkg", "dist", "owncode");
-  assert.equal(programRoot(`file://${join(lone, "separate.js")}`), join(root, "lone", "pkg"));
+  assert.equal(programRoot(pathToFileURL(join(lone, "separate.js")).href), join(root, "lone", "pkg"));
 });
 
 // First review: the way up by path does not lead from a bind mount back to the folder it shows, so on Linux the mount table is read too.
@@ -258,7 +275,7 @@ test("git's paths are taken as the disk takes them, a long .git file or a .git t
   symlinkSync(join(install, ".git", "worktrees", "x"), join(wt, "l"));
   dir("srv", "nimblenewt", ".git", "worktrees", "x");
   writeFileSync(join(wt, ".git"), "gitdir: l/../g\n");
-  await refusedWith([repo(wt)], guarded, /git folder .* is inside the running installation's program files/);
+  if (posixDots) await refusedWith([repo(wt)], guarded, /git folder .* is inside the running installation's program files/);
   // A .git file longer than the limit is not judged by its start.
   const long = dir("work", "long");
   writeFileSync(join(long, ".git"), `gitdir: ${join(long, "own")}\n${"#".repeat(SEPARATE_LIMITS.gitFileBytes)}`);
@@ -282,7 +299,7 @@ test("git's paths are taken as the disk takes them, a long .git file or a .git t
   writeFileSync(join(root, "srv", "side", "a", "commondir"), `..${sep}..${sep}nimblenewt${sep}.git\n`);
   const viaLink = dir("work", "via-link");
   writeFileSync(join(viaLink, ".git"), `gitdir: ${join(root, "work", "lnk")}\n`);
-  await refusedWith([repo(viaLink)], guarded, /git folder .*nimblenewt.\.git\) is inside the running installation's program files/);
+  if (posixDots) await refusedWith([repo(viaLink)], guarded, /git folder .*nimblenewt.\.git\) is inside the running installation's program files/);
   // gitdir "l/../own" with l a link to a folder apart: the git folder is that folder's sibling own, and its commondir (the installation's .git) is read there, not in the checkout's own "own".
   writeFileSync(join(dir("srv", "side", "own"), "commondir"), `${join(install, ".git")}\n`);
   dir("srv", "side", "b");
@@ -290,8 +307,8 @@ test("git's paths are taken as the disk takes them, a long .git file or a .git t
   dir("work", "dots2", "own");
   symlinkSync(join(root, "srv", "side", "b"), join(dots2, "l"));
   writeFileSync(join(dots2, ".git"), "gitdir: l/../own\n");
-  await refusedWith([repo(dots2)], guarded, /git folder .*\.git\) is inside the running installation's program files/);
-  if (process.platform !== "win32") {
+  if (posixDots) await refusedWith([repo(dots2)], guarded, /git folder .*\.git\) is inside the running installation's program files/);
+  if (posixFiles) {
     // A FIFO named .git is not waited on.
     const { execFileSync } = await import("node:child_process");
     const fifo = dir("work", "fifo");
@@ -326,4 +343,346 @@ test("the limit on mounts compared is for the whole judgement", async () => {
   for (let i = 0; i < 999; i++) lines.push(`${10 + i} 1 8:4 /a${i} /srv/nn/m${i}`, `${5000 + i} 1 8:5 /b${i} /work/dev/m${i}`, `${9000 + i} 1 8:6 /c${i} /srv/other/m${i}`);
   const two = [...g1, { what: "the controller's data directory", path: "/srv/other" }];
   await refusedWith([repo("/work/dev")], two, /hold too many mounts to compare/, { fs: fakeFs({ ...bindTree, "/srv/other": "9:9" }, { mounts: mi(...lines) }), platform: "linux" });
+});
+
+// B06 fourth slice: when the installation itself runs from a checkout or a `git worktree`, its git folders are guarded too, followed as a place's are. Another worktree of the same repository writes the
+// same refs, hooks and configuration (the common git folder), so it is not separate.
+test("the installation's own git folders are guarded: another worktree of its repository is refused, an unrelated repository and a release without .git are not", async () => {
+  const base = dir("b06d");
+  const mk = (...p: string[]): string => { const f = join(base, ...p); mkdirSync(f, { recursive: true }); return f; };
+  // The main checkout (with its .git folder) and two worktrees: the installation and another.
+  const main = mk("repos", "nimblenewt");
+  const instGit = mk("repos", "nimblenewt", ".git", "worktrees", "inst");
+  writeFileSync(join(instGit, "commondir"), "../..\n");
+  const otherGit = mk("repos", "nimblenewt", ".git", "worktrees", "other");
+  writeFileSync(join(otherGit, "commondir"), "../..\n");
+  const inst = mk("ai", "worktrees", "inst");
+  writeFileSync(join(inst, ".git"), `gitdir: ${instGit}\n`);
+  const other = mk("work", "other");
+  writeFileSync(join(other, ".git"), `gitdir: ${otherGit}\n`);
+  const g = installationGuards({ programRoot: inst });
+  await refusedWith([repo(other)], g, /the git folder of the development project's repository "source" .* is inside the git folder of the running installation's program files/);
+  // Without following the installation's .git this was judged separate (the gap the fourth slice closes).
+  assert.deepEqual(await judgeSeparate([repo(other)], g.map((x) => ({ what: x.what, path: x.path }))), { separate: true });
+  // The main checkout holds the common git folder.
+  await refusedWith([repo(main)], g, /holds the git folder of the running installation's program files/);
+  // A checkout inside the common git folder (or the installation's own worktree folder there) is inside it.
+  await refusedWith([repo(mk("repos", "nimblenewt", ".git", "hooks"))], g, /inside the git folder of the running installation's program files/);
+  // An unrelated repository, and a plain folder: separate.
+  const unrelated = mk("work", "unrelated");
+  mk("work", "unrelated", ".git", "refs");
+  assert.deepEqual(await judgeSeparate([repo(unrelated), repo(mk("work", "plain"))], g), { separate: true });
+  // A worktree of an unrelated repository, its common folder elsewhere: separate.
+  const elseGit = mk("repos", "else", ".git", "worktrees", "w");
+  writeFileSync(join(elseGit, "commondir"), "../..\n");
+  const elseWt = mk("work", "else-wt");
+  writeFileSync(join(elseWt, ".git"), `gitdir: ${elseGit}\n`);
+  assert.deepEqual(await judgeSeparate([repo(elseWt)], g), { separate: true });
+  // A release install with no .git: nothing more is guarded, and the same worktree is separate from it.
+  const release = mk("opt", "nimblenewt", "releases", "1.2.3");
+  assert.deepEqual(await judgeSeparate([repo(other), repo(main)], installationGuards({ programRoot: release })), { separate: true });
+  // An installation that is the main checkout (a .git folder): its common folder is inside it already, and a worktree of it is refused through its commondir.
+  await refusedWith([repo(other)], installationGuards({ programRoot: main }), /git folder .* inside the running installation's program files/);
+});
+
+test("the installation's git folders are followed as written and fail closed when they cannot be read", async () => {
+  const base = dir("b06d-fc");
+  const mk = (...p: string[]): string => { const f = join(base, ...p); mkdirSync(f, { recursive: true }); return f; };
+  const commonGit = mk("repos", "nn", ".git");
+  const instGit = mk("repos", "nn", ".git", "worktrees", "inst");
+  writeFileSync(join(instGit, "commondir"), "../..\n");
+  const otherGit = mk("repos", "nn", ".git", "worktrees", "other");
+  writeFileSync(join(otherGit, "commondir"), "../..\n");
+  const other = mk("work", "other");
+  writeFileSync(join(other, ".git"), `gitdir: ${otherGit}\n`);
+  const install = (body: string | undefined): string => {
+    const at = mk("inst", String(Math.random()).slice(2));
+    if (body !== undefined) writeFileSync(join(at, ".git"), body);
+    return at;
+  };
+  // A .git file that names nothing, a git folder that is not there: cannot tell, even for a checkout far away.
+  const far = mk("far", "away");
+  await refusedWith([repo(far)], installationGuards({ programRoot: install("not a pointer\n") }), /program files \(.*\) cannot be checked: its \.git file does not name a git folder/);
+  await refusedWith([repo(far)], installationGuards({ programRoot: install(`gitdir: ${join(base, "nowhere")}\n`) }), /git folder of the running installation's program files \(.*nowhere\) cannot be checked: it could not be read/);
+  // A .git longer than the limit, a FIFO, and (not as root) a .git or commondir that cannot be read: cannot tell.
+  await refusedWith([repo(far)], installationGuards({ programRoot: install(`gitdir: ${instGit}\n${"#".repeat(SEPARATE_LIMITS.gitFileBytes)}`) }), /longer than/);
+  if (posixFiles) {
+    const fifo = install(undefined);
+    const { execFileSync } = await import("node:child_process");
+    execFileSync("mkfifo", [join(fifo, ".git")]);
+    await refusedWith([repo(far)], installationGuards({ programRoot: fifo }), /its \.git could not be read \(ENOTFILE\)/);
+  }
+  if (posixFiles && process.getuid?.() !== 0) {
+    const shut = install(`gitdir: ${instGit}\n`);
+    chmodSync(join(shut, ".git"), 0);
+    try { await refusedWith([repo(far)], installationGuards({ programRoot: shut }), /its \.git could not be read \(EACCES\)/); } finally { chmodSync(join(shut, ".git"), 0o644); }
+    const shutGit = mk("repos", "shut", ".git", "worktrees", "i");
+    writeFileSync(join(shutGit, "commondir"), "../..\n");
+    chmodSync(join(shutGit, "commondir"), 0);
+    try { await refusedWith([repo(far)], installationGuards({ programRoot: install(`gitdir: ${shutGit}\n`) }), /commondir could not be read \(EACCES\)/); } finally { chmodSync(join(shutGit, "commondir"), 0o644); }
+  }
+  // A relative gitdir through a link: `l/../inst` leads where the link leads (the common folder's worktrees), not to a folder of the installation's named `inst`.
+  const viaLink = install("gitdir: l/../inst\n");
+  symlinkSync(join(commonGit, "worktrees", "other"), join(viaLink, "l"));
+  mkdirSync(join(viaLink, "inst"));
+  if (posixDots) await refusedWith([repo(other)], installationGuards({ programRoot: viaLink }), /inside the git folder of the running installation's program files/);
+  // A .git link to the common folder: followed.
+  const linked = install(undefined);
+  symlinkSync(commonGit, join(linked, ".git"));
+  await refusedWith([repo(other)], installationGuards({ programRoot: linked }), /inside the git folder of the running installation's program files/);
+  // A port without `readText` (tests showing identities only) follows nothing, as for places.
+  assert.deepEqual(await judgeSeparate([repo(other)], installationGuards({ programRoot: install(`gitdir: ${instGit}\n`) }), { fs: { realpath: nodeSeparationFs.realpath, stat: nodeSeparationFs.stat } }), { separate: true });
+});
+
+// First review of the fourth slice: like git, the nearest `.git` at a folder or above it is the one git uses there, for the installation and for a place.
+test("the nearest .git above a folder is followed, as git finds it, for the installation and for a place", async () => {
+  const base = dir("b06d-up");
+  const mk = (...p: string[]): string => { const f = join(base, ...p); mkdirSync(f, { recursive: true }); return f; };
+  const esc = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // The installation a worktree of `nn`; a folder with no .git of its own inside nn's main checkout: git there writes to the common folder and works on the main checkout.
+  const main = mk("repos", "nn");
+  gitFolder(join(main, ".git"));
+  const instGit = mk("repos", "nn", ".git", "worktrees", "inst");
+  writeFileSync(join(instGit, "commondir"), "../..\n");
+  const inst = mk("ai", "inst");
+  writeFileSync(join(inst, ".git"), `gitdir: ${instGit}\n`);
+  const sub = mk("repos", "nn", "docs");
+  await refusedWith([repo(sub)], installationGuards({ programRoot: inst }), new RegExp(`the work tree git uses for the development project's repository "source" \\(${esc(main)}\\) holds the git folder of the running installation's program files`));
+  // A folder with no .git inside an unrelated checkout: still separate.
+  gitFolder(mk("work", "else", ".git"));
+  assert.deepEqual(await judgeSeparate([repo(mk("work", "else", "part"))], installationGuards({ programRoot: inst })), { separate: true });
+  // An installation whose .git is above its program root (a workspace inside a larger repository): that repository's git folder is guarded, so a worktree of it is refused.
+  const outerGit = mk("outer", ".git", "worktrees", "w");
+  writeFileSync(join(outerGit, "commondir"), "../..\n");
+  const nested = mk("outer", "tools", "nn");
+  const wt = mk("work", "outer-wt");
+  writeFileSync(join(wt, ".git"), `gitdir: ${outerGit}\n`);
+  await refusedWith([repo(wt)], installationGuards({ programRoot: nested }), /the git folder of the development project's repository "source" .* is inside the git folder of the running installation's program files/);
+  // A release with no .git inside a checkout (a home folder kept in git): a plain folder elsewhere in that checkout is worked on through it, and that checkout holds the installation.
+  gitFolder(mk("home", ".git"));
+  const rel = mk("home", "opt", "nn", "releases", "1");
+  await refusedWith([repo(mk("home", "dev", "plain"))], installationGuards({ programRoot: rel }), new RegExp(`the work tree git uses for .* \\(${esc(join(base, "home"))}\\) holds the running installation's program files`));
+  // A checkout with a .git of its own there is worked on through its own git folder: separate.
+  gitFolder(mk("home", "dev", "own", ".git"));
+  assert.deepEqual(await judgeSeparate([repo(join(base, "home", "dev", "own"))], installationGuards({ programRoot: rel })), { separate: true });
+  // Second review: git passes over a `.git` folder it does not take as a git folder (here an empty one, one whose HEAD names no ref, one without `refs`, and one whose HEAD is a link) and goes on
+  // up to the home folder's repository, whose work tree holds the installation; so the check goes on up too. A real git folder there still stops the walk (above).
+  for (const [name, make] of [["empty", () => {}], ["bad-head", (g: string) => { gitFolder(g); writeFileSync(join(g, "HEAD"), "not a ref\n"); }], ["head-outside-refs", (g: string) => { gitFolder(g); writeFileSync(join(g, "HEAD"), "ref: heads/main\n"); }], ["no-refs", (g: string) => { gitFolder(g); rmSync(join(g, "refs"), { recursive: true }); }], ["no-objects", (g: string) => { gitFolder(g); rmSync(join(g, "objects"), { recursive: true }); }], ["objects-file", (g: string) => { gitFolder(g); rmSync(join(g, "objects"), { recursive: true }); writeFileSync(join(g, "objects"), ""); }], ["link-head", (g: string) => { gitFolder(g); rmSync(join(g, "HEAD")); writeFileSync(join(g, "head-file"), "ref: refs/heads/main\n"); symlinkSync(join(g, "head-file"), join(g, "HEAD")); }]] as const) {
+    const g = mk("home", "dev", name, ".git");
+    make(g);
+    await refusedWith([repo(join(base, "home", "dev", name))], installationGuards({ programRoot: rel }), new RegExp(`the work tree git uses for .* \\(${esc(join(base, "home"))}\\) holds the running installation's program files`));
+  }
+  // An object ID as HEAD (a detached checkout) is a git folder too: separate.
+  const detached = gitFolder(mk("home", "dev", "detached", ".git"));
+  writeFileSync(join(detached, "HEAD"), `${"a".repeat(40)}\n`);
+  assert.deepEqual(await judgeSeparate([repo(join(base, "home", "dev", "detached"))], installationGuards({ programRoot: rel })), { separate: true });
+  // A `.git` file (a worktree of an unrelated repository) is where git stops, as is a `.git` link to such a worktree's git folder, whose objects and refs are in its common folder: separate.
+  const elseGit = mk("repos", "else2", ".git", "worktrees", "w");
+  gitFolder(join(base, "repos", "else2", ".git"));
+  writeFileSync(join(elseGit, "commondir"), "../..\n");
+  writeFileSync(join(elseGit, "HEAD"), "ref: refs/heads/w\n");
+  const homeWt = mk("home", "dev", "wt");
+  writeFileSync(join(homeWt, ".git"), `gitdir: ${elseGit}\n`);
+  const homeLinked = mk("home", "dev", "linked");
+  symlinkSync(elseGit, join(homeLinked, ".git"));
+  if (posixDots) assert.deepEqual(await judgeSeparate([repo(homeWt), repo(homeLinked)], installationGuards({ programRoot: rel })), { separate: true });
+  else {
+    // Windows takes the link's relative commondir (`linked\.git\..\..`) by its spelling, as git for Windows does: it names `home\dev`, which has no objects or refs, so that `.git` is not a git
+    // folder there and git goes on up to the home folder's repository, which holds the installation. The `.git` file is followed by its full path and is separate on every platform.
+    assert.deepEqual(await judgeSeparate([repo(homeWt)], installationGuards({ programRoot: rel })), { separate: true });
+    await refusedWith([repo(homeLinked)], installationGuards({ programRoot: rel }), new RegExp(`the work tree git uses for .* \\(${esc(join(base, "home"))}\\) holds the running installation's program files`));
+  }
+  // A `.git` passed over is still one of the place's folders: a link into the installation that git does not take as a git folder is refused, with no repository above it.
+  const into = mk("work", "into");
+  symlinkSync(mk("home", "opt", "nn", "releases", "1", "sub"), join(into, ".git"));
+  await refusedWith([repo(into)], installationGuards({ programRoot: rel }), /the git folder of the development project's repository "source" .* is inside the running installation's program files/);
+  // The same inside an unrelated repository: the work tree found above is apart, but the `.git` passed over leads into the installation.
+  gitFolder(mk("work", "outer2", ".git"));
+  const inner = mk("work", "outer2", "inner");
+  symlinkSync(mk("home", "opt", "nn", "releases", "1", "sub2"), join(inner, ".git"));
+  await refusedWith([repo(inner)], installationGuards({ programRoot: rel }), /the git folder of the development project's repository "source" .* is inside the running installation's program files/);
+  // A `.git` file whose git folder git does not take (no HEAD): git stops there with an error, so it works on no folder above; the walk stops too.
+  const badWtGit = mk("repos", "else3", "worktrees", "w");
+  const homeBadWt = mk("home", "dev", "bad-wt");
+  writeFileSync(join(homeBadWt, ".git"), `gitdir: ${badWtGit}\n`);
+  assert.deepEqual(await judgeSeparate([repo(homeBadWt)], installationGuards({ programRoot: rel })), { separate: true });
+  // An `objects` that is not a folder (a FIFO) is not a git folder either.
+  if (posixFiles) {
+    const fifoObjects = mk("home", "dev", "objects-fifo", ".git");
+    gitFolder(fifoObjects);
+    rmSync(join(fifoObjects, "objects"), { recursive: true });
+    (await import("node:child_process")).execFileSync("mkfifo", [join(fifoObjects, "objects")]);
+    await refusedWith([repo(join(base, "home", "dev", "objects-fifo"))], installationGuards({ programRoot: rel }), new RegExp(`the work tree git uses for .* \\(${esc(join(base, "home"))}\\) holds the running installation's program files`));
+  }
+  // For the installation too: an empty `.git` at its program root is passed over, and the repository above it is guarded (a worktree of that repository is refused).
+  const upGit = mk("up", ".git", "worktrees", "w");
+  gitFolder(join(base, "up", ".git"));
+  writeFileSync(join(upGit, "commondir"), "../..\n");
+  const upInst = mk("up", "tools", "nn");
+  mk("up", "tools", "nn", ".git");
+  const upWt = mk("work", "up-wt");
+  writeFileSync(join(upWt, ".git"), `gitdir: ${upGit}\n`);
+  await refusedWith([repo(upWt)], installationGuards({ programRoot: upInst }), /the git folder of the development project's repository "source" .* is inside the git folder of the running installation's program files/);
+  // A broken installation git tells the owner that it is the installation's git that blocks every checkout.
+  const broken = mk("broken");
+  writeFileSync(join(broken, ".git"), `gitdir: ${join(base, "nowhere")}\n`);
+  await refusedWith([repo(mk("far"))], installationGuards({ programRoot: broken }), /cannot be checked: it could not be read \(ENOENT\); no checkout can be confirmed separate until the installation's git can be read/);
+  const named = mk("named");
+  writeFileSync(join(named, ".git"), "nothing\n");
+  await refusedWith([repo(mk("far"))], installationGuards({ programRoot: named }), /does not name a git folder; no checkout can be confirmed separate until the installation's git can be read/);
+});
+
+test("the guard limit counts the installation's git folders, and every guard a controller can be given fits it", async () => {
+  const base = dir("b06d-lim");
+  const commonGit = join(base, "repo", ".git"); mkdirSync(join(commonGit, "worktrees", "i"), { recursive: true });
+  writeFileSync(join(commonGit, "worktrees", "i", "commondir"), "../..\n");
+  const inst = join(base, "inst"); mkdirSync(inst);
+  writeFileSync(join(inst, ".git"), `gitdir: ${join(commonGit, "worktrees", "i")}\n`);
+  const own = join(base, "own"); mkdirSync(own);
+  const filler = (n: number): GuardedPlace[] => Array.from({ length: n }, (_, i) => ({ what: `g${i}`, path: join(base, "g", String(i)) }));
+  const ig = installationGuards({ programRoot: inst });
+  // The program root and its two git folders: exactly the limit is judged, one past it is not.
+  assert.deepEqual(await judgeSeparate([repo(own)], [...ig, ...filler(SEPARATE_LIMITS.guarded - 3)]), { separate: true });
+  await refusedWith([repo(own)], [...ig, ...filler(SEPARATE_LIMITS.guarded - 2)], /more guarded folders than it checks/);
+  // Every option a controller can be given, with real folders and the installation a worktree: within the limit and separate from a checkout of its own.
+  const p = (n: string): string => join(base, "all", n);
+  for (const n of ["bin", "d", "e", "s", "r", "i", "a", "b", "k", "m", "w", "h"]) mkdirSync(p(n), { recursive: true });
+  const all = installationGuards({ programRoot: inst, runtime: p("bin"), dataDirectory: p("d"), databaseFile: p("e/c.sqlite"), stateDirectory: p("s"), releaseRoot: p("r"), releaseIncoming: p("i"), artifactDirectory: p("a"), backupDirectory: p("b"),
+    backupKeyring: p("k/keyring"), backupPasscode: p("k/pass"), backupRecovery: p("k/rec"), recoveryManifests: p("m"), watchdogFile: p("w/wd.json"), heartbeatFile: p("h/beat") });
+  assert.deepEqual(await judgeSeparate([repo(own)], all), { separate: true });
+  await refusedWith([repo(join(base, "all"))], all, /holds the Node\.js runtime/);
+  await refusedWith([repo(join(base, "all", "k"))], all, /holds the backup encryption's keyring file/);
+  await refusedWith([repo(join(base, "all", "h"))], all, /holds the launcher's heartbeat file/);
+});
+
+// Windows (simulated: this runs on every host). The judge takes Windows path rules when it judges for win32, so a made-up Windows disk shows what a real one gives the controller there: drive letters,
+// either separator, case kept on disk but not significant, UNC shares, short (8.3) names and junctions that the native realpath resolves to the long folder, `..` taken by its spelling before any link
+// (as Windows does), no mount table, a `.git` file written with forward slashes and CRLF, and a file system that gives no file ID (inode 0, as some network shares and FAT drives may). Only a real Windows
+// run shows the real disk; the CI's windows-latest jobs run the real-disk tests above on NTFS.
+const ENOENT = (): Error => Object.assign(new Error("missing"), { code: "ENOENT" });
+const winFs = (ids: Record<string, string>, o: { readonly real?: Record<string, string>; readonly files?: Record<string, string>; readonly failStat?: string } = {}): SeparationFs => {
+  const low = (p: string): string => p.toLowerCase();
+  // The folder's own spelling on disk, whatever case it is asked in.
+  const onDisk = (p: string): string | undefined => Object.keys(ids).find((k) => low(k) === low(p));
+  // As the native realpath: `..` and `/` by spelling, then a short name or junction to the folder it names.
+  const canon = (p: string): string => {
+    let r = win32.resolve(p);
+    for (const [from, to] of Object.entries(o.real ?? {})) if (low(r) === low(from) || low(r).startsWith(`${low(from)}\\`)) r = to + r.slice(from.length);
+    return r;
+  };
+  return {
+    realpath: async (p) => { const k = onDisk(canon(p)); if (k === undefined) throw ENOENT(); return k; },
+    stat: async (p) => {
+      if (o.failStat !== undefined && low(p) === low(o.failStat)) throw Object.assign(new Error("denied"), { code: "EPERM" });
+      const k = onDisk(p);
+      if (k === undefined) throw ENOENT();
+      const [dev, ino] = ids[k]!.split(":");
+      return { dev: BigInt(dev!), ino: BigInt(ino!) };
+    },
+    readText: async (p, max) => {
+      const c = canon(p);
+      const f = Object.keys(o.files ?? {}).find((k) => low(k) === low(c));
+      if (f !== undefined) return o.files![f]!.slice(0, max);
+      if (onDisk(c) !== undefined) throw Object.assign(new Error("it is a folder"), { code: "EISDIR" });
+      throw ENOENT();
+    },
+  };
+};
+const winIds: Record<string, string> = {
+  "C:\\": "5:1", "C:\\srv": "5:2", "C:\\srv\\nn": "5:3", "C:\\srv\\nn\\pkg": "5:4", "C:\\srv\\nn\\..x": "5:5", "C:\\srv\\nn-dev": "5:6",
+  "C:\\srv\\nn\\.git": "5:20", "C:\\srv\\nn\\.git\\worktrees": "5:21", "C:\\srv\\nn\\.git\\worktrees\\dev": "5:22",
+  "C:\\work": "5:10", "C:\\work\\dev": "5:11", "C:\\work\\wt": "5:12", "C:\\work\\wt2": "5:13", "C:\\work\\git-store": "5:14", "C:\\work\\git-store\\worktrees": "5:15", "C:\\work\\git-store\\worktrees\\dev": "5:16", "C:\\work\\fat": "5:0",
+  "C:\\Program Files": "5:30", "C:\\Program Files\\NimbleNewt": "5:31", "C:\\Users": "5:40", "C:\\Users\\runneradmin": "5:41", "C:\\Users\\runneradmin\\dev": "5:42",
+  "D:\\": "6:1", "D:\\srv": "6:2", "D:\\srv\\nn": "6:3",
+  "\\\\box\\share\\": "7:1", "\\\\box\\share\\nn": "7:2", "\\\\box\\share\\nn\\x": "7:3", "\\\\box\\share\\dev": "7:4",
+};
+const winProgram = (path = "C:\\srv\\nn"): GuardedPlace[] => [{ what: "the running installation's program files", path, git: true }];
+
+test("Windows, simulated: drive letters, either separator, case, UNC shares, short names and junctions are judged by Windows rules; what gives no file ID is refused", async () => {
+  const win = (o: Parameters<typeof winFs>[1] = {}) => ({ fs: winFs(winIds, o), platform: "win32" });
+  // Apart, and a sibling whose name starts with the installation's name.
+  assert.deepEqual(await judgeSeparate([repo("C:\\work\\dev")], winProgram(), win()), { separate: true });
+  assert.deepEqual(await judgeSeparate([repo("C:\\srv\\nn-dev")], winProgram(), win()), { separate: true });
+  // The same folder in another case (drive letter too), with forward slashes, with "." and ".." and a trailing separator.
+  await refusedWith([repo("c:\\SRV\\NN")], winProgram(), /is the same folder as the running installation's program files \(C:\\srv\\nn\)/, win());
+  await refusedWith([repo("C:/srv/nn/pkg")], winProgram(), /inside the running installation's program files/, win());
+  await refusedWith([repo("C:\\srv\\nn\\.\\pkg\\..\\pkg\\")], winProgram(), /inside/, win());
+  await refusedWith([repo("C:\\srv\\nn\\..x")], winProgram(), /inside/, win());
+  await refusedWith([repo("C:\\srv")], winProgram(), /holds the running installation's program files/, win());
+  await refusedWith([repo("C:\\")], winProgram(), /holds/, win());
+  // The same path on another drive is another folder.
+  assert.deepEqual(await judgeSeparate([repo("D:\\srv\\nn")], winProgram(), win()), { separate: true });
+  // A guarded folder given in another case or with forward slashes is the same guard.
+  await refusedWith([repo("C:\\srv\\nn\\pkg")], winProgram("c:/SRV/nn"), /inside/, win());
+  // A path relative to a drive's current folder ("C:srv") or to the working directory is not a full path: refused, never guessed.
+  await refusedWith([repo("C:\\work\\dev"), repo("C:srv\\nn", "drive-relative")], winProgram(), /repository "drive-relative" is at C:srv\\nn, which is not a folder on the controller's machine/, win());
+  await refusedWith([repo("C:\\work\\dev")], winProgram("srv\\nn"), /is not given as a full path/, win());
+  // UNC shares: the share's root ends the way up; inside, the same folder in another case, and a folder beside it.
+  const unc = winProgram("\\\\box\\share\\nn");
+  await refusedWith([repo("\\\\box\\share\\nn\\x")], unc, /inside/, win());
+  await refusedWith([repo("\\\\BOX\\Share\\NN")], unc, /same folder/, win());
+  assert.deepEqual(await judgeSeparate([repo("\\\\box\\share\\dev")], unc, win()), { separate: true });
+  // Short (8.3) names and a junction: the native realpath gives the long folder, so they are the folder they name.
+  const real = { "C:\\PROGRA~1": "C:\\Program Files", "C:\\Users\\RUNNER~1": "C:\\Users\\runneradmin", "C:\\work\\junc": "C:\\srv\\nn" };
+  await refusedWith([repo("C:\\Program Files\\NimbleNewt")], winProgram("C:\\PROGRA~1\\NimbleNewt"), /same folder/, win({ real }));
+  await refusedWith([repo("c:\\progra~1\\nimblenewt")], winProgram("C:\\Program Files\\NimbleNewt"), /same folder/, win({ real }));
+  await refusedWith([repo("C:\\Users\\RUNNER~1\\dev")], winProgram("C:\\Users\\runneradmin"), /inside/, win({ real }));
+  await refusedWith([repo("C:\\work\\junc")], winProgram(), /same folder/, win({ real }));
+  await refusedWith([repo("C:\\work\\junc\\pkg")], winProgram(), /inside/, win({ real }));
+  // A file system that gives no file ID (inode 0) cannot tell a second spelling from another folder: refused, as on Linux (no fallback to paths alone).
+  await refusedWith([repo("C:\\work\\fat")], winProgram(), /at C:\\work\\fat cannot be checked: its file system gives no folder identity/, win());
+  // A folder that cannot be read on the way up: refused.
+  await refusedWith([repo("C:\\work\\dev")], winProgram(), /cannot be checked: it could not be read on the controller's machine \(EPERM\)/, win({ failStat: "C:\\work" }));
+});
+
+test("Windows, simulated: git's .git files with forward slashes and CRLF are followed; a worktree whose git folder is in the installation's is refused, one of its own is not", async () => {
+  const win = (files: Record<string, string>) => ({ fs: winFs(winIds, { files }), platform: "win32" });
+  // As git for Windows writes it: a full path with forward slashes, CRLF line ends.
+  await refusedWith([repo("C:\\work\\wt")], winProgram(), /the git folder of the development project's repository "source" \(C:\/srv\/nn\/\.git\/worktrees\/dev\) is inside the running installation's program files/,
+    win({ "C:\\work\\wt\\.git": "gitdir: C:/srv/nn/.git/worktrees/dev\r\n" }));
+  // A relative gitdir and commondir with forward slashes: its own git store beside it is separate; a commondir naming the installation's .git is refused.
+  const own = { "C:\\work\\wt2\\.git": "gitdir: ../git-store/worktrees/dev\r\n", "C:\\work\\git-store\\worktrees\\dev\\commondir": "../..\r\n" };
+  assert.deepEqual(await judgeSeparate([repo("C:\\work\\wt2")], winProgram(), win(own)), { separate: true });
+  await refusedWith([repo("C:\\work\\wt2")], winProgram(), /git folder .*C:\/srv\/nn\/\.git\) is inside the running installation's program files/,
+    win({ ...own, "C:\\work\\git-store\\worktrees\\dev\\commondir": "C:/srv/nn/.git\r\n" }));
+  // The installation's own .git folder is guarded on Windows too: a checkout inside it is refused as inside its git folder's guard or the program files.
+  await refusedWith([repo("C:\\srv\\nn\\.git\\worktrees\\dev")], winProgram(), /inside the running installation's program files/, win({}));
+  // A .git file in another case of the drive letter and with a trailing CR only: followed the same.
+  await refusedWith([repo("C:\\work\\wt")], winProgram(), /git folder .* is inside the running installation's program files/, win({ "C:\\work\\wt\\.git": "gitdir: c:\\SRV\\nn\\.git\\worktrees\\dev\r" }));
+  // A .git file that names nothing: cannot tell.
+  await refusedWith([repo("C:\\work\\wt")], winProgram(), /does not name a git folder/, win({ "C:\\work\\wt\\.git": "not a pointer\r\n" }));
+});
+
+test("Windows, simulated: a .git link to a worktree's git folder takes its relative commondir by spelling, so git goes on up and the repository above is judged; a .git file is followed", async () => {
+  // A home folder kept in git holds a release; a worktree of an unrelated repository (its git folder in C:\else\.git\worktrees\w, commondir `../..`) is reached from C:\home\dev by a .git file
+  // and, from C:\home\dev\linked, by a .git junction to that git folder.
+  const ids: Record<string, string> = {
+    "C:\\": "8:1", "C:\\home": "8:2", "C:\\home\\.git": "8:3", "C:\\home\\.git\\objects": "8:4", "C:\\home\\.git\\refs": "8:5", "C:\\home\\.git\\HEAD": "8:6",
+    "C:\\home\\opt": "8:7", "C:\\home\\opt\\nn": "8:8", "C:\\home\\opt\\nn\\releases": "8:9", "C:\\home\\opt\\nn\\releases\\1": "8:10",
+    "C:\\home\\dev": "8:11", "C:\\home\\dev\\wt": "8:12", "C:\\home\\dev\\linked": "8:13",
+    "C:\\else": "8:20", "C:\\else\\.git": "8:21", "C:\\else\\.git\\objects": "8:22", "C:\\else\\.git\\refs": "8:23", "C:\\else\\.git\\HEAD": "8:24",
+    "C:\\else\\.git\\worktrees": "8:25", "C:\\else\\.git\\worktrees\\w": "8:26", "C:\\else\\.git\\worktrees\\w\\HEAD": "8:27", "C:\\else\\.git\\worktrees\\w\\commondir": "8:28",
+  };
+  const files = {
+    "C:\\home\\.git\\HEAD": "ref: refs/heads/main\n", "C:\\else\\.git\\HEAD": "ref: refs/heads/main\n",
+    "C:\\else\\.git\\worktrees\\w\\HEAD": "ref: refs/heads/w\n", "C:\\else\\.git\\worktrees\\w\\commondir": "../..\n", "C:\\home\\dev\\wt\\.git": "gitdir: C:/else/.git/worktrees/w\n",
+  };
+  const win = { fs: winFs(ids, { files, real: { "C:\\home\\dev\\linked\\.git": "C:\\else\\.git\\worktrees\\w" } }), platform: "win32" };
+  const rel: GuardedPlace[] = [{ what: "the running installation's program files", path: "C:\\home\\opt\\nn\\releases\\1", git: true }];
+  assert.deepEqual(await judgeSeparate([repo("C:\\home\\dev\\wt")], rel, win), { separate: true });
+  await refusedWith([repo("C:\\home\\dev\\linked")], rel, /the work tree git uses for the development project's repository "source" \(C:\\home\) holds the running installation's program files/, win);
+  // The same git folder with a full commondir: the link's git folder is a git folder (its common folder has objects and refs), so git stops there and the place is separate.
+  const full = { fs: winFs(ids, { files: { ...files, "C:\\else\\.git\\worktrees\\w\\commondir": "C:/else/.git\n" }, real: { "C:\\home\\dev\\linked\\.git": "C:\\else\\.git\\worktrees\\w" } }), platform: "win32" };
+  assert.deepEqual(await judgeSeparate([repo("C:\\home\\dev\\linked")], rel, full), { separate: true });
+});
+
+test("the judge's path rules follow the platform it judges for, so a Linux judgement made on Windows is the Linux one", async () => {
+  // The made-up POSIX disk of the tests above, judged for Linux: the same answer on every host (on Windows the host's own path rules would have put "/srv/nn" on the working directory's drive).
+  const g: GuardedPlace[] = [{ what: "the running installation's program files", path: "/srv/nn" }];
+  assert.deepEqual(await judgeSeparate([repo("/work/dev")], g, { fs: fakeFs(tree), platform: "linux" }), { separate: true });
+  await refusedWith([repo("/mnt/live")], g, /same folder as the running installation's program files \(\/srv\/nn\)/, { fs: fakeFs(tree), platform: "linux" });
+  // A backslash is part of a name on Linux, not a separator: "/srv/nn\\pkg" is a folder beside /srv/nn, not inside it.
+  assert.deepEqual(await judgeSeparate([repo("/srv/nn\\pkg")], g, { fs: fakeFs({ ...tree, "/srv/nn\\pkg": "1:77" }), platform: "linux" }), { separate: true });
+  // The same spelling judged for Windows is inside.
+  await refusedWith([repo("C:\\srv\\nn\\pkg")], winProgram("C:/srv/nn"), /inside/, { fs: winFs(winIds), platform: "win32" });
 });

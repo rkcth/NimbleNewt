@@ -68,7 +68,7 @@ test("the owner's landing_queue view says who lands the queue or why approved wo
 
     // Ivy may land on both: free for both.
     const ivy = await hire("Ivy", ["integrator"], [...both, { action: "integration.lease", project: garden }, { action: "integration.lease", project: orchard }]);
-    assert.match(await view(O, orchard), /No integrator holds this branch's lease now; 1 integrator that may land on this project holds no lease, so one of them takes this queue when it asks the pool \(integrator\.pool\.next\)/);
+    assert.match(await view(O, orchard), /No integrator holds this branch's lease now; 1 integrator that may land on this project holds no lease, so the controller wakes one of them for this queue at its next round \(a landing task assigned to it\), unless one takes it first when it asks the pool \(integrator\.pool\.next\)/);
     // She takes Garden (approved first): Garden is hers until her lease ends; Orchard has no capacity left.
     const took = await call(ivy.token, "integrator.pool.next", { ttlMs: 600_000 }, "i1");
     assert.deepEqual([took.result.outcome, took.result.projectId], ["taken", garden]);
@@ -80,7 +80,7 @@ test("the owner's landing_queue view says who lands the queue or why approved wo
     assert.doesNotMatch(hers, /capacity|this branch's lease|lands its queue/);
     // Max joins for Orchard: capacity again, with Ivy counted as busy.
     await hire("Max", ["integrator"], [{ action: "integration.lease", project: orchard }]);
-    assert.match(await view(O, orchard), /1 integrator that may land on this project holds no lease, .*; 1 other is busy with a lease already\./);
+    assert.match(await view(O, orchard), /1 integrator that may land on this project holds no lease, .*; 1 other is busy with a lease or a landing already\./);
     // Ivy disabled while she holds Garden: her live hold is not capacity in use, and Max may not land on Garden: nobody.
     await s.principals.disable(rob, { commandId: "d-ivy", principalId: ivy.id, expectedRevision: (await s.principals.get(ivy.id))!.revision });
     assert.match(await view(O, garden), /No capacity is left to land this queue: no active agent has the right integration\.lease on this project/);

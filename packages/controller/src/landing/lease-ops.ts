@@ -5,11 +5,13 @@ import { allowsExactly, inTaskScope } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { IntegratorLeaseService, type IntegratorLease } from "./integrator-lease.js";
+import { reachOf, reachServes, takeKeyOf, type LandingReach, type LandingReachOf } from "./landing-reach.js";
 
 /**
  * Who may take, keep, give back and see an integrator lease, and what a landing must show before it writes (card P10). The lease service itself takes no caller; this is the authorised door to it.
  *
- * The right is `integration.lease` on the project (exact: a wildcard grant is not enough, as for `workspace.manage`); the owner always has it and a task credential never does. The holder is always an agent: an agent holds
+ * The right is `integration.lease` on the project (exact: a wildcard grant is not enough, as for `workspace.manage`); the owner always has it. A task credential has it only as a landing task's own credential (card P10b,
+ * `LandingReach`): then exactly the lease of the one branch that landing task lands, in its project, and nothing of any other branch or project (a refusal that says nothing about them). The holder is always an agent: an agent holds
  * the lease as itself (its own agent ID, taken from who it authenticated as, never from what it says), and only the owner may take one for a named agent. Renewing is the holder's alone. Giving it back is the holder's, or the
  * owner's (who may end it without knowing the fence). A task that is not in the project cannot hold the project's lease.
  */
@@ -23,6 +25,8 @@ export interface IntegratorLeaseOpsOptions {
   readonly landingBranch?: (call: { taskId: string; projectId: string }) => Promise<string | undefined>;
   /** Told when a lease was ended against its holder's will (the owner took it away, or its holder was retired and another agent took the branch). Best effort: a failure never undoes the release. */
   readonly onForcedRelease?: (by: Principal, lease: IntegratorLease, why: "owner" | "retired") => Promise<void>;
+  /** Card P10b (second clause): what a landing task's own credential reaches (`IntegratorWake.landingReach`). Absent: every task credential is refused, as before. */
+  readonly landingReach?: LandingReachOf;
 }
 
 export class IntegratorLeaseOps {
@@ -30,14 +34,16 @@ export class IntegratorLeaseOps {
   readonly #options: IntegratorLeaseOpsOptions;
   constructor(leases: IntegratorLeaseService, options: IntegratorLeaseOpsOptions = {}) { this.#leases = leases; this.#options = options; }
 
-  #allowed(by: Principal, projectId: string): boolean {
-    return by.taskScope === undefined && inTaskScope(by, projectId) && allowsExactly(by, "integration.lease", projectId);
+  /** The caller's right on the project's leases (on `branch`, when one is named). An own credential: the exact right. A task credential: only through its landing reach, on that reach's one branch. */
+  async #allowed(by: Principal, projectId: string, branch?: string, reach?: LandingReach): Promise<boolean> {
+    if (by.taskScope === undefined) return inTaskScope(by, projectId) && allowsExactly(by, "integration.lease", projectId);
+    return reachServes(by, reach ?? (await reachOf(this.#options.landingReach, by)), projectId, branch);
   }
 
-  async #ofTask(by: Principal, rawTask: string): Promise<{ taskId: string; projectId: string }> {
+  async #ofTask(by: Principal, rawTask: string, branch?: string): Promise<{ taskId: string; projectId: string }> {
     const taskId = checkTaskId(rawTask);
     const projectId = await this.#leases.projectOfTask(taskId);
-    if (projectId === undefined || !this.#allowed(by, projectId)) throw refused(`task ${taskId}`);
+    if (projectId === undefined || !(await this.#allowed(by, projectId, branch))) throw refused(`task ${taskId}`);
     return { taskId, projectId };
   }
 
@@ -46,14 +52,15 @@ export class IntegratorLeaseOps {
     const leaseId = typeof q.leaseId === "string" ? q.leaseId : typeof q.projectId === "string" && typeof q.branch === "string" ? IntegratorLeaseService.leaseIdOf(q.projectId, q.branch) : undefined;
     if (leaseId === undefined) throw new DomainError("invalid_command", "name the lease by leaseId, or by projectId and branch", { field: "leaseId" });
     const found = await this.#leases.get(leaseId);
-    if (found === undefined || !this.#allowed(by, found.projectId)) throw refused("that lease");
+    if (found === undefined || !(await this.#allowed(by, found.projectId, found.branch))) throw refused("that lease");
     return found;
   }
 
   /** Takes the lease of the task's project on `branch`. `holder` is for the owner only. */
   async acquire(by: Principal, command: NoActor & { taskId: string; branch: string; ttlMs: number; holder?: string }): Promise<IntegratorLease> {
     onlyKnown(command, ["commandId", "taskId", "branch", "ttlMs", "holder"]);
-    const { taskId, projectId } = await this.#ofTask(by, command.taskId);
+    // A landing task's credential: only its own branch (`branch` must be text to be that branch; anything else is refused like another project's task).
+    const { taskId, projectId } = await this.#ofTask(by, command.taskId, by.taskScope === undefined ? undefined : typeof command.branch === "string" ? command.branch : "\0");
     let holder = holderOf(by);
     if (by.kind === "owner") {
       if (command.holder === undefined) throw new DomainError("invalid_command", "holder: the owner names the agent that will hold the lease", { field: "holder" });
@@ -73,15 +80,16 @@ export class IntegratorLeaseOps {
     }
     // A retired holder (P10 second slice): a live lease whose holder is no longer an active agent is ended now, so the next integrator is not kept out until it expires.
     // The release is its own command, named from the taker's (hashed to a fixed length, so it is a valid command ID whatever the length of the taker's own, as long as that one is).
-    const acquireId = scopedCommandId(by.id, command.commandId);
+    const acquireId = scopedCommandId(takeKeyOf(by), command.commandId);
     if (this.#options.activeAgent !== undefined) {
       const current = typeof command.branch === "string" ? await this.#leases.get(IntegratorLeaseService.leaseIdOf(projectId, command.branch)) : undefined;
       if (current !== undefined && current.live && current.holder !== holder && !(await this.#options.activeAgent(current.holder))) {
-        const ended = await this.#leases.release({ commandId: scopedCommandId(by.id, `retired:${createHash("sha256").update(String(command.commandId)).digest("hex")}`), leaseId: current.leaseId, fence: current.fence, note: "its holder is no longer an active agent" }).catch(() => undefined);
+        const ended = await this.#leases.release({ commandId: scopedCommandId(takeKeyOf(by), `retired:${createHash("sha256").update(String(command.commandId)).digest("hex")}`), leaseId: current.leaseId, fence: current.fence, note: "its holder is no longer an active agent" }).catch(() => undefined);
         if (ended !== undefined) await this.#told(by, current, "retired");
       }
     }
-    return this.#leases.acquire({ commandId: acquireId, projectId, branch: command.branch, holder, taskId, ttlMs: command.ttlMs });
+    // A landing task's own credential (the only task credential that gets this far) marks its take, so the wake can tell that hold from one the integrator took or renewed on its own credential (card P10b).
+    return this.#leases.acquire({ commandId: acquireId, projectId, branch: command.branch, holder, taskId, ttlMs: command.ttlMs, ...(by.taskScope === undefined ? {} : { landingTask: by.taskScope.taskId }) });
   }
 
   /** Extends the hold. Only the holder, with its current fence. */
@@ -90,7 +98,7 @@ export class IntegratorLeaseOps {
     const found = await this.#named(by, command);
     const holder = holderOf(by);
     if (holder === undefined || holder !== found.holder) throw new DomainError("fenced", `lease ${found.leaseId} is not held by ${by.id}`);
-    return this.#leases.renew({ commandId: scopedCommandId(by.id, command.commandId), leaseId: found.leaseId, fence: command.fence, holder });
+    return this.#leases.renew({ commandId: scopedCommandId(takeKeyOf(by), command.commandId), leaseId: found.leaseId, fence: command.fence, holder, ...(by.taskScope === undefined ? {} : { landingTask: by.taskScope.taskId }) });
   }
 
   /** Lets the lease go. The holder names its fence; the owner may name the lease by project and branch and omit the fence (it ends whoever holds it now). */
@@ -100,7 +108,7 @@ export class IntegratorLeaseOps {
     if (by.kind !== "owner" && (holderOf(by) === undefined || holderOf(by) !== found.holder)) throw new DomainError("fenced", `lease ${found.leaseId} is not held by ${by.id}`);
     if (command.fence === undefined && by.kind !== "owner") throw new DomainError("invalid_command", "fence: is required", { field: "fence" });
     if (found.state === "released") return found;
-    const ended = await this.#leases.release({ commandId: scopedCommandId(by.id, command.commandId), leaseId: found.leaseId, fence: command.fence ?? found.fence, ...(command.note === undefined ? {} : { note: command.note }) });
+    const ended = await this.#leases.release({ commandId: scopedCommandId(takeKeyOf(by), command.commandId), leaseId: found.leaseId, fence: command.fence ?? found.fence, ...(command.note === undefined ? {} : { note: command.note }) });
     // The owner ending a live hold that is another agent's is a forced release: it is put in the task's activity (P10 second slice).
     if (by.kind === "owner" && found.live) await this.#told(by, found, "owner");
     return ended;
@@ -110,11 +118,13 @@ export class IntegratorLeaseOps {
     try { await this.#options.onForcedRelease?.(by, lease, why); } catch { /* best effort */ }
   }
 
-  /** The leases of a project, live or not (one per branch ever leased). */
+  /** The leases of a project, live or not (one per branch ever leased). A landing task's credential sees only the lease of its own branch. */
   async list(by: Principal, query: { projectId: string; limit?: number }): Promise<IntegratorLease[]> {
     onlyKnown(query, ["projectId", "limit"]);
-    if (typeof query.projectId !== "string" || !this.#allowed(by, query.projectId)) throw refused("that project");
-    return this.#leases.forProject(query.projectId, query.limit);
+    const reach = by.taskScope === undefined ? undefined : await reachOf(this.#options.landingReach, by);
+    if (typeof query.projectId !== "string" || !(await this.#allowed(by, query.projectId, undefined, reach))) throw refused("that project");
+    const all = await this.#leases.forProject(query.projectId, query.limit);
+    return reach === undefined ? all : all.filter((l) => l.branch === reach.branch);
   }
 
   /**
@@ -139,7 +149,7 @@ export class IntegratorLeaseOps {
     if (call.branch === undefined) throw new DomainError("forbidden", "the project has no landing branch, so no lease covers a landing");
     if (found.branch !== call.branch) throw new DomainError("forbidden", `lease ${leaseId} is for branch ${found.branch}, not the landing branch ${call.branch}`);
     // An agent lands only while it still has the right (P10 review): taking the right away stops its landings at once, not when its hold runs out (up to a day later).
-    if (by.kind !== "owner" && !this.#allowed(by, found.projectId)) throw new DomainError("forbidden", `${by.id} no longer has the right integration.lease on this project, so it cannot land under the lease`);
+    if (by.kind !== "owner" && !(await this.#allowed(by, found.projectId, found.branch))) throw new DomainError("forbidden", `${by.id} no longer has the right integration.lease on this project, so it cannot land under the lease`);
     const holder = by.kind === "owner" ? found.holder : holderOf(by);
     // A holder that was retired or disabled lands nothing, even before its hold runs out (P10 second slice).
     if (holder !== undefined && this.#options.activeAgent !== undefined && !(await this.#options.activeAgent(holder))) throw new DomainError("fenced", `${holder} is no longer an active agent, so its lease cannot be used to land`);

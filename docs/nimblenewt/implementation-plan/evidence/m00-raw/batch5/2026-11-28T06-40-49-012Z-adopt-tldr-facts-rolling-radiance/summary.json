@@ -1,0 +1,273 @@
+{
+  "scenario": "Adopt Lintwise as a required pre-merge check (twenty engineers)",
+  "variant": {
+    "name": "tldr-facts-rolling",
+    "firstRound": "open",
+    "rounds": 2,
+    "transcriptMode": "tldr",
+    "fullTail": 1,
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 4,
+    "tldrStyle": "facts",
+    "summaryWords": 60,
+    "summarizeAbove": 70,
+    "chairNotes": "rolling",
+    "chairReminders": 2
+  },
+  "model": "qwen3.8-flash-next-iq4r",
+  "roster": [
+    {
+      "id": "a1",
+      "name": "Priya",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a2",
+      "name": "Marcus",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a3",
+      "name": "Elena",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a4",
+      "name": "Tom",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a5",
+      "name": "Sana",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a6",
+      "name": "Lars",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a7",
+      "name": "Jin",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a8",
+      "name": "Olga",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "b1",
+      "name": "Ravi",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "b2",
+      "name": "Mei",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "b3",
+      "name": "Noah",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "b4",
+      "name": "Zoe",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "b5",
+      "name": "Omar",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "b6",
+      "name": "Hana",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "b7",
+      "name": "Ben",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "b8",
+      "name": "Ida",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "b9",
+      "name": "Kofi",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "b10",
+      "name": "Lena",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "b11",
+      "name": "Theo",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "b12",
+      "name": "Vera",
+      "model": "qwen3.8-flash-next-iq4r"
+    }
+  ],
+  "chairModel": "qwen3.8-flash-next-iq4r",
+  "motion": {
+    "text": "The team adopts Lintwise, an automated code-quality checker, as a required pre-merge check on every repository.",
+    "version": 1
+  },
+  "result": {
+    "yes": 20,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  },
+  "stats": {
+    "objections": [
+      {
+        "attempt": 0,
+        "objectors": []
+      }
+    ],
+    "chairQuestions": [
+      {
+        "to": "a1",
+        "topic": "Whether the ~4-minute CI overhead observed over 6 months was from full-repo scans or changed-files-only scans, and approximate false-positive rate",
+        "experience_sought": "Priya ran Lintwise for 6 months and reported null derefs and async races caught with +≈4 min CI cost. The group needs to know if that 4 min was full-repo or incremental, because Kofi, Marcus, and Mei's queue and timeout calculations assume different scan scopes."
+      },
+      {
+        "to": "b1",
+        "topic": "Rough false-positive rate on decorators and CTEs, and whether FPs were concentrated in a few rules or spread across many",
+        "experience_sought": "Ravi used Lintwise daily for 6 months and called decorator/CTE false positives 'genuinely painful' but did not quantify the rate. Lars's 5% FP budget and Theo's 5% pause trigger need a concrete baseline, and Vera's weekly per-rule hit-rate plan depends on whether FPs come from a small set of rules that can be individually tuned."
+      }
+    ],
+    "rejectedChairQuestions": [],
+    "skippedAbsent": [],
+    "inquiries": [],
+    "ownerReports": [],
+    "deskRead": {
+      "refused": [],
+      "excerpts": [],
+      "rejectedExcerpts": [],
+      "corrections": []
+    },
+    "reminders": [
+      {
+        "step": "before-round-2",
+        "from": "Ben",
+        "quote": "the warning window is exactly two weeks, no extensions, and at day fourteen we vote hard-or-soft per vertical with a simple majority; no indefinite 'still tuning' drift."
+      },
+      {
+        "step": "before-round-2",
+        "from": "Hana",
+        "quote": "Fixtures intentionally carry unused imports for type clarity; error-path tests use broad exception catches by design; snapshot helpers look like dead code."
+      },
+      {
+        "step": "before-ballots",
+        "from": "Kofi",
+        "quote": "If median build plus queue exceeds fourteen minutes, I pull the kill-switch."
+      },
+      {
+        "step": "before-ballots",
+        "from": "Noah",
+        "quote": "That separate scan is non-negotiable regardless of Lintwise's adoption."
+      }
+    ],
+    "inquiryChecks": {
+      "heldAnswers": 0,
+      "leaks": [],
+      "revisionsPerVoter": {},
+      "voterRevisionTurnsOk": true,
+      "clockMs": {
+        "total": 1744774,
+        "paused": 0,
+        "meeting": 1744774
+      }
+    }
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 0.8947368421052632,
+    "membersWhoChangedStanceInRound2": 1,
+    "cacheHitRatio": 0.44859249115864536,
+    "calls": 127,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1": {
+        "calls": 20,
+        "input": 23904,
+        "cached": 0,
+        "output": 35989,
+        "ms": 409676,
+        "costUsd": 0
+      },
+      "chair-notes": {
+        "calls": 42,
+        "input": 60082,
+        "cached": 0,
+        "output": 54326,
+        "ms": 658009,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 1338,
+        "cached": 0,
+        "output": 1009,
+        "ms": 13205,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 2,
+        "input": 4867,
+        "cached": 0,
+        "output": 1629,
+        "ms": 20791,
+        "costUsd": 0
+      },
+      "chair-reminders": {
+        "calls": 2,
+        "input": 22086,
+        "cached": 6144,
+        "output": 4975,
+        "ms": 75450,
+        "costUsd": 0
+      },
+      "round2": {
+        "calls": 20,
+        "input": 78164,
+        "cached": 51200,
+        "output": 22137,
+        "ms": 288837,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 20,
+        "input": 49633,
+        "cached": 0,
+        "output": 8476,
+        "ms": 131441,
+        "costUsd": 0
+      },
+      "ballot": {
+        "calls": 20,
+        "input": 104613,
+        "cached": 97280,
+        "output": 9197,
+        "ms": 147298,
+        "costUsd": 0
+      }
+    }
+  }
+}

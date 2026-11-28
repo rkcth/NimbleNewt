@@ -89,7 +89,7 @@ export interface BalanceView {
 }
 
 const STATE: AggregateRef = { kind: "admission-state", id: "admission" };
-const CLASSES: readonly RequestClass[] = ["productive", "inquiry", "review"];
+const CLASSES: readonly RequestClass[] = ["productive", "inquiry", "review", "landing"];
 const REQUEST_ID = /^req-[a-z2-7]{20}$/;
 const LABEL = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,119}$/;
 const HOST_ID = /^host:[a-z0-9][a-z0-9-]{0,39}$/;
@@ -170,6 +170,8 @@ export class AdmissionService {
       if (!Number.isSafeInteger(priority) || priority < 0 || priority > 9) invalid("priority", "must be a whole number from 0 to 9");
       const host = command.host === undefined ? undefined : (typeof command.host === "string" && HOST_ID.test(command.host) ? command.host : invalid("host", "is not a host ID"));
       if (cls === "productive" && host === undefined) invalid("host", "is required for productive work");
+      // A landing attempt is an integrator's for one project's landing branch (card P10b): the project it lands is named, so what holds the reserved places is known.
+      if (cls === "landing" && project === undefined) invalid("project", "is required for a landing attempt");
       const workClass = command.workClass === undefined ? undefined : command.workClass === "P" || command.workClass === "PC" ? command.workClass : invalid("workClass", "must be P or PC");
       if (workClass !== undefined && cls !== "productive") invalid("workClass", "only productive work is production or improvement work; inquiries and reviews are neither");
       const cpus = command.cpus;
@@ -201,8 +203,9 @@ export class AdmissionService {
           const queued: AdmissionState = { ...state, queue: [...state.queue, entry], nextSeq: state.nextSeq + 1 };
           // A damaged borrow record stops new requests like a damaged caps record (it throws `integrity`).
           const after = this.#admit(queued, caps, balance);
-          // The bound is on what is left waiting: a request that is admitted at once never sat in the queue.
-          if (after.queue.length > state.limits.queue) throw new DomainError("unavailable", `the queue is full (${state.limits.queue} waiting); try again later`);
+          // The bound is on what is left waiting: a request that is admitted at once never sat in the queue. Each lane is bounded on its own (card P10b), so a queue full of productive work never refuses an
+          // inquiry, a review or a landing, which have places of their own.
+          if (after.queue.filter((e) => laneOf(e.class) === laneOf(cls)).length > state.limits.queue) throw new DomainError("unavailable", `the queue is full (${state.limits.queue} waiting); try again later`);
           return this.#built(revision, after, { request: id, class: cls });
         },
       };

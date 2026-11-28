@@ -1,5 +1,6 @@
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
+import { keptWindow } from "../domain/kept-window.js";
 import { onlyKnown, projectId as checkProjectId, revision as checkRevision, type View } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import type { ProjectService } from "../domain/service.js";
@@ -25,6 +26,11 @@ import { SEPARATE_LIMITS, judgeSeparate, type GuardedPlace, type OwnPlace, type 
  * - **Its own checkout** (third slice). The development project works only in a checkout of its own: enabling, approving and every start (so also the stop look) need every local place of the project
  *   (`judgeSeparate`) to be apart from the running installation (its program files, runtime, data directory, database file, transfer state and release folders): not the same folder, not inside one and not
  *   above one, after symbolic links and bind mounts are resolved. When it cannot tell, it refuses. The owner reads why in `settings`; anyone else is told only that the checkout is not confirmed separate.
+ * - **The listed window** (retention slice, K06's recorded gap). At most `OWNCODE_LIMITS.listed` (500) requests are listed. A new request that would make the list longer first moves the oldest ENDED
+ *   requests out of it in the same write (`keptWindow`, as cards B04 and B05 do), and the index counts them as `archived`. Ended is rejected, withdrawn, or approved with its task done or cancelled. A waiting
+ *   request, an approval whose task is open or not yet made, and a record that does not read as one of the four statuses are open and are never moved out (fail closed). A request moved out is kept unchanged:
+ *   it stays readable by its ID with the same rights, its task link stays, and the start gate (which reads the link and the request, never the list) judges it as before. Only when every listed request is
+ *   open is a new one refused. The work is bounded: only a full list is looked at, at most one request and one task read per listed request, oldest first, stopping once enough are found.
  * - **Not here** (later slices): launch proposals and their explanation, review, revision binding and installation (the card's other clauses), chat wording for the owner's controls.
  */
 export const OWNCODE_STATUSES = ["pending", "approved", "rejected", "withdrawn"] as const;
@@ -91,7 +97,9 @@ export interface OwnCodeRequestBody {
   readonly history: readonly { readonly at: string; readonly by: string; readonly to: OwnCodeStatus; readonly cause?: string }[];
 }
 
-interface IndexBody { readonly ids: readonly string[]; readonly pending: Readonly<Record<string, readonly string[]>> }
+interface IndexBody { readonly ids: readonly string[]; readonly pending: Readonly<Record<string, readonly string[]>>; /** How many ended requests the listed window moved out (retention slice). */ readonly archived?: number }
+/** The task states in which an approved request's work is over (its request may then leave the listed window). */
+const TASK_OVER = new Set(["done", "cancelled"]);
 interface TaskLink { readonly requestId: string }
 
 export interface OwnCodeOptions extends RunnerOptions {
@@ -210,12 +218,13 @@ export class OwnCodeService {
       build: async () => {
         await this.#enabledOrRefuse();
         const index = await this.#index();
-        if (index.ids.length >= OWNCODE_LIMITS.listed) throw new DomainError("unavailable", `${OWNCODE_LIMITS.listed} requests to work on NimbleNewt's own code are kept, the most`);
         const mine = index.pending[by.id] ?? [];
         if (mine.length >= OWNCODE_LIMITS.pendingPerAgent) throw new DomainError("unavailable", `${mine.length} of your requests already wait for the owner's decision; at most ${OWNCODE_LIMITS.pendingPerAgent} wait at a time`);
+        const kept = await this.#window(index.ids, id);
+        if (kept === undefined) throw new DomainError("unavailable", `${OWNCODE_LIMITS.listed} requests to work on NimbleNewt's own code are listed and all are waiting or approved with their work open; one is decided, withdrawn or its task finished first`);
         const body: OwnCodeRequestBody = { requestedBy: by.id, request, status: "pending", history: [{ at: this.#runner.now(), by: by.id, to: "pending" }] };
         const ref: AggregateRef = { kind: "owncode-request", id };
-        return { ref, creates: true, changes: [{ type: "create", ref, body: clean(body) }, this.#indexChange(index, [...index.ids, id], { ...index.pending, [by.id]: [...mine, id] })], detail: {} };
+        return { ref, creates: true, changes: [{ type: "create", ref, body: clean(body) }, this.#indexChange(index, kept.ids, { ...index.pending, [by.id]: [...mine, id] }, index.archived + kept.archived.length)], detail: {} };
       },
     })));
     return { id: result.id, replayed: result.replayed };
@@ -273,7 +282,8 @@ export class OwnCodeService {
   }
 
   /**
-   * Withdraws a request: the owner withdraws a waiting or an approved one (an approval is withdrawn: no further attempt starts on its task); the requester withdraws its own waiting one. It stays listed.
+   * Withdraws a request: the owner withdraws a waiting or an approved one (an approval is withdrawn: no further attempt starts on its task); the requester withdraws its own waiting one. It is kept, and stays
+   * listed until newer requests move it out of the listed window (archived, still readable by its ID).
    */
   async withdraw(by: Principal, command: NoActor & { requestId: string; expectedRevision: number; reason: string }): Promise<{ revision: number }> {
     onlyKnown(command, ["commandId", "requestId", "expectedRevision", "reason"]);
@@ -307,8 +317,8 @@ export class OwnCodeService {
     return this.#isOwner(viewer) || body.requestedBy === viewer.id ? view<OwnCodeRequestBody>(found) : undefined;
   }
 
-  /** The requests, oldest first, paged: the owner sees all, an agent its own. `status` keeps one status. */
-  async list(viewer: Principal, page: { afterId?: string; limit?: number; status?: string } = {}): Promise<{ items: View<OwnCodeRequestBody>[]; next?: string }> {
+  /** The requests, oldest first, paged: the owner sees all, an agent its own. `status` keeps one status. `archived` (the owner only, when above 0) counts the ended requests the listed window moved out. */
+  async list(viewer: Principal, page: { afterId?: string; limit?: number; status?: string } = {}): Promise<{ items: View<OwnCodeRequestBody>[]; next?: string; archived?: number }> {
     const limit = page.limit === undefined ? 20 : whole(page.limit, "limit", 1, OWNCODE_LIMITS.page);
     const status = page.status === undefined ? undefined : (OWNCODE_STATUSES as readonly string[]).includes(page.status) ? page.status : invalid("status", `must be one of ${OWNCODE_STATUSES.join(", ")}`);
     const index = await this.#index();
@@ -322,7 +332,7 @@ export class OwnCodeService {
       const b = found?.body as unknown as OwnCodeRequestBody | undefined;
       if (found !== undefined && b !== undefined && (owner || b.requestedBy === viewer.id) && (status === undefined || b.status === status)) items.push(view<OwnCodeRequestBody>(found));
     }
-    return { items, ...(pos < index.ids.length ? { next: index.ids[pos - 1]! } : {}) };
+    return { items, ...(pos < index.ids.length ? { next: index.ids[pos - 1]! } : {}), ...(owner && index.archived > 0 ? { archived: index.archived } : {}) };
   }
 
   // ---- the start gate --------------------------------------------------------------------------------------------------------
@@ -483,10 +493,45 @@ export class OwnCodeService {
     return found === undefined ? undefined : { revision: found.revision, body: found.body as unknown as OwnCodeRequestBody };
   }
 
-  async #index(): Promise<IndexBody & { revision: number }> {
+  async #index(): Promise<{ ids: readonly string[]; pending: Readonly<Record<string, readonly string[]>>; archived: number; revision: number }> {
     const found = await this.#runner.get(INDEX.kind, INDEX.id);
     const b = found?.body as unknown as IndexBody | undefined;
-    return found === undefined || b === undefined ? { ids: [], pending: {}, revision: 0 } : { ids: b.ids, pending: b.pending, revision: found.revision };
+    if (found === undefined || b === undefined) return { ids: [], pending: {}, archived: 0, revision: 0 };
+    const archived = typeof b.archived === "number" && Number.isSafeInteger(b.archived) && b.archived >= 0 ? b.archived : 0;
+    return { ids: b.ids, pending: b.pending, archived, revision: found.revision };
+  }
+
+  /**
+   * The listed window for a new request `add` (retention slice): the list with `add` at its end, after the oldest ended requests left it when it is full; `undefined` when every listed request is open.
+   * Only a full list is looked at: oldest first, one request read (and, for an approval, one task read) per entry, stopping once enough ended ones are found. A list that is not a list of strings is an
+   * integrity failure (nothing is written). A list longer than the window (no controller writes one; only a damaged store): the IDs before its last `OWNCODE_LIMITS.listed` are not read and count as open, so
+   * none of them leaves and the reads stay at most one request and one task per window place (as card B05's experiment index does; first review of the retention slice). Such a list comes back under the
+   * cap only when its window holds enough ended requests; otherwise (from 1000 entries always) a new request is refused, as every full list was before this slice.
+   */
+  async #window(ids: readonly string[], add: string): Promise<{ ids: string[]; archived: string[] } | undefined> {
+    if (!Array.isArray(ids) || !ids.every((x) => typeof x === "string")) throw new DomainError("integrity", "the list of requests to work on NimbleNewt's own code cannot be read, so no request is added");
+    const need = ids.length - OWNCODE_LIMITS.listed + 1;
+    const ended = new Set<string>();
+    for (const x of ids.slice(Math.max(0, ids.length - OWNCODE_LIMITS.listed))) { if (ended.size >= need) break; if (!(await this.#open(x))) ended.add(x); }
+    return keptWindow(ids, (x) => !ended.has(x), OWNCODE_LIMITS.listed, add);
+  }
+
+  /**
+   * Whether a listed request is still open, so it keeps its place in the list: waiting, or approved with its task open or not yet made (the owner may still finish the approval), or a record that does not
+   * read as one of the four statuses (fail closed). Rejected, withdrawn, and approved with its task done or cancelled are ended. An entry that is not a request ID, or names no record, holds nothing and is ended.
+   */
+  async #open(id: string): Promise<boolean> {
+    if (!REQUEST_ID.test(id)) return false;
+    const found = await this.#runner.get("owncode-request", id);
+    if (found === undefined) return false;
+    const b = found.body as unknown as Partial<OwnCodeRequestBody> | null;
+    const status = typeof b === "object" && b !== null ? b.status : undefined;
+    if (status === "rejected" || status === "withdrawn") return false;
+    if (status !== "approved") return true;
+    if (typeof b!.taskId !== "string" || b!.taskId === "") return true;
+    const task = await this.#runner.get("task", b!.taskId);
+    const state = (task?.body as { state?: unknown } | undefined)?.state;
+    return !(typeof state === "string" && TASK_OVER.has(state));
   }
 
   #withoutPending(index: IndexBody, agent: string, id: string): Record<string, readonly string[]> {
@@ -496,8 +541,8 @@ export class OwnCodeService {
     return out;
   }
 
-  #indexChange(index: { revision: number }, ids: readonly string[], pending: Readonly<Record<string, readonly string[]>>): Change {
-    const body = { ids: [...ids], pending: Object.fromEntries(Object.entries(pending).map(([k, v]) => [k, [...v]])) } as unknown as JsonObject;
+  #indexChange(index: { revision: number; archived: number }, ids: readonly string[], pending: Readonly<Record<string, readonly string[]>>, archived: number = index.archived): Change {
+    const body = { ids: [...ids], pending: Object.fromEntries(Object.entries(pending).map(([k, v]) => [k, [...v]])), ...(archived > 0 ? { archived } : {}) } as unknown as JsonObject;
     return index.revision === 0 ? { type: "create", ref: INDEX, body } : { type: "update", ref: INDEX, expectedRevision: index.revision, body };
   }
 

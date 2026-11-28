@@ -312,7 +312,7 @@ export class AdoptionService {
   async lookAtAffected(adoptionId: string, pages?: number): Promise<LookBody | undefined> { return this.#looks.run(this.#id(adoptionId), pages); }
 
   /** The dispatcher's tick: carries on looks that were cut short or interrupted (a bounded number per tick). Writes nothing when none is pending. */
-  async sweepAffected(): Promise<{ looked: number; failed: number }> { return this.#looks.sweep(); }
+  async sweepAffected(): Promise<{ looked: number; failed: number; stopped?: number }> { return this.#looks.sweep(); }
 
   /** One adoption: the owner, a reader or manager of the project's meetings, or its asker. Anyone else gets `undefined`. */
   async get(viewer: Principal, adoptionId: string): Promise<View<AdoptionBody> | undefined> {

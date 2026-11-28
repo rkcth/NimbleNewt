@@ -1,0 +1,16 @@
+{
+  "ballots": [],
+  "ballotHistory": [],
+  "result": {
+    "outcome": "tabled",
+    "research": [
+      "Priya: Pull old suppress-comment count from six-month Lintwise usage to produce a concrete false-positive percentage per rule category.",
+      "Marcus: Run a one-week shadow pass on the monorepo to measure (a) Lintwise wall-clock time on changed files, (b) whether existing CI runners have spare capacity to launch it as a parallel job at the 2 PM peak queue, and (c) resulting queue-depth impact.",
+      "Elena: Pull Lintwise's published ruleset and confirm it ships secret-detection patterns (API keys, tokens, private keys) and a dependency-vulnerability check; report coverage gaps.",
+      "Sana: Run a timed shadow check on one SQL-heavy pipeline repo to confirm Lintwise parses .sql files without dialect false positives and measure added latency against her specific workload.",
+      "Lars: Review the shadow-run output for measured false-positive rate per rule category; flag any rule emitting noise above ~5%.",
+      "Jin: Aggregate shadow-run wall-clock and FP data; confirm the lint step stays under 15 s in parallel before endorsing a hard merge gate.",
+      "Olga: Review shadow-run findings on a sample PR to judge whether the feedback is clear and actionable for a junior dev, or noisy enough to cause confusion."
+    ]
+  }
+}

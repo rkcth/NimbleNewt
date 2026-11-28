@@ -1,0 +1,11 @@
+{
+  "ballots": [],
+  "ballotHistory": [],
+  "result": {
+    "outcome": "tabled",
+    "research": [
+      "Marcus: Run Lintwise in parallel with the existing CI build on a representative branch set of our monorepo (including a 40+ file PR); record median wall-clock delta, worst-case tail latency, and queue-depth impact at peak merge windows. Bring the numbers to the next meeting.",
+      "Sana: Check Lintwise's supported-language list for SQL; run it against a sample of our pipeline .sql files to confirm it actually parses them (not silently skips) and measure false-positive rate on stored-procedure patterns. Bring coverage and noise numbers to the next meeting."
+    ]
+  }
+}

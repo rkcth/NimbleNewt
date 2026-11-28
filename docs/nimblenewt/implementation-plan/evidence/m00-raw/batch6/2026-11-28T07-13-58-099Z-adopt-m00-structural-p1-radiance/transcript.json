@@ -1,0 +1,203 @@
+[
+ {
+  "seq": 1,
+  "who": "Chair",
+  "kind": "motion",
+  "text": "Motion (version 1): The team adopts Lintwise, an automated code-quality checker, as a required pre-merge check on every repository.",
+  "label": "opening"
+ },
+ {
+  "seq": 2,
+  "who": "Priya",
+  "kind": "statement",
+  "text": "I used Lintwise for six months on my previous team. It caught real bugs—null dereferences, unused imports that masked logic errors, inconsistent API contracts—that we would have shipped. That alone justifies the gate. My concern is the four-minute CI penalty. Our builds already average eleven minutes; adding four pushes us to fifteen on every PR. In a monorepo with eight engineers, that compounds quickly. I'd support adoption if we scope Lintwise to changed files rather than the full tree, and set a hard timeout so a hung check never blocks a merge. Without those guardrails, the friction could slow review velocity more than the bugs cost us. With them, the trade is clearly worth it.",
+  "tldr": "Lintwise caught real bugs for me, but I'd require changed-file-only scanning and a timeout before making it a hard gate.",
+  "stance": "for",
+  "label": "round 1 (blind)",
+  "agent": "a1"
+ },
+ {
+  "seq": 3,
+  "who": "Marcus",
+  "kind": "statement",
+  "text": "I own the pipeline, and 11 minutes is already tight for eight people. Adding any serial step before merge risks pushing us toward 15 minutes, doubling queue wait on busy afternoons. I'm not opposed in principle—catching issues pre-merge should reduce failed builds and rework, shortening total time-to-green. But I need two things before signing off: a measured runtime for Lintwise on our monorepo, and a plan to run it in parallel with existing checks, not serially. If it adds under 90 seconds and runs concurrently, I'm for. If it serializes and adds four minutes, I'm against. Give me a week to benchmark on a branch before making it a hard gate.",
+  "tldr": "I need a measured runtime and parallel-execution plan before committing Lintwise as a serial pre-merge gate on our 11-minute pipeline.",
+  "stance": "undecided",
+  "label": "round 1 (blind)",
+  "agent": "a2"
+ },
+ {
+  "seq": 4,
+  "who": "Elena",
+  "kind": "statement",
+  "text": "I support this. My daily work involves hunting hardcoded API keys, leaked tokens in config files, and stale dependencies with known CVEs. A mandatory pre-merge static check gives us a consistent, non-negotiable gate so no one can skip a secret scan because they were in a hurry. That said, I want clarity on two things before we flip the switch. First, does Lintwise actually detect embedded secrets and flag vulnerable transitive dependencies, or is it purely style and formatting? If it's style-only, I need a separate secret-scanning step regardless. Second, we must confirm the added runtime stays well under the current 11-minute CI window; a security patch should never be blocked behind a slow lint job. With those two questions answered, I'm in.",
+  "tldr": "For—automated secret and dependency checks at merge time are essential, but verify Lintwise actually covers them and won't delay urgent patches.",
+  "stance": "for",
+  "label": "round 1 (blind)",
+  "agent": "a3"
+ },
+ {
+  "seq": 5,
+  "who": "Tom",
+  "kind": "statement",
+  "text": "I've run Lintwise on my side project for about two months. It catches the silly mistakes I make in JavaScript every day—unused variables, missing null checks, inconsistent patterns. On a side project with one author, that's nice-to-have. On our monorepo where I'm writing most of the JS and others touch it too, it's genuinely useful for keeping the codebase consistent. My one concern is the 11-minute CI build. If Lintwise adds more than a minute, we should run it in parallel with the build, not sequentially. I'd also want a grace period—maybe two sprints—where warnings don't block merges, so we can tune rules before making them hard failures. But the direction is right.",
+  "tldr": "Lintwise catches real JS mistakes; adopt it, but run it in parallel with CI and allow a tuning grace period.",
+  "stance": "for",
+  "label": "round 1 (blind)",
+  "agent": "a4"
+ },
+ {
+  "seq": 6,
+  "who": "Sana",
+  "kind": "statement",
+  "text": "I'm open in principle—consistent code quality across the monorepo benefits everyone. But I have real questions before I can commit. My pipelines are a mix of Python and SQL, and I don't know whether Lintwise has meaningful SQL coverage or just lints the Python glue. If it's Python-only, it won't catch the issues I actually hit. Also, CI already averages eleven minutes; I want to know the added latency before we make this a hard gate. I haven't used Lintwise, so I'd ask for a one-week trial on my pipeline directories with no blocking, just reporting, so I can judge signal-to-noise before it becomes mandatory.",
+  "tldr": "Open to Lintwise but need SQL coverage confirmation and a no-block trial period before it gates my pipelines.",
+  "stance": "undecided",
+  "label": "round 1 (blind)",
+  "agent": "a5"
+ },
+ {
+  "seq": 7,
+  "who": "Lars",
+  "kind": "statement",
+  "text": "I've read the Lintwise docs and I see the appeal: catching style and structural issues before they pollute our test suite. But my concern is noise. If Lintwise flags forty minor style nits per PR, developers will start ignoring every warning, and the signal we actually need—real bugs, broken contracts, edge cases—gets buried. We already spend time triaging flaky tests; I don't want to add a second stream of \"is this a real problem?\" questions. Before I can support this as a *required* gate, I need to see: a strict rule set with most opinionated checks disabled, a clear severity taxonomy so only true blockers fail the merge, and a two-week trial on a branch where we measure how many findings are actionable versus cosmetic. If the actionable ratio is high, I'm in. If it's mostly nitpicking, it will erode trust in our gates and make people rubber-stamp approvals.",
+  "tldr": "Supportive in principle, but I need proof the signal-to-noise ratio justifies making it a hard merge blocker.",
+  "stance": "undecided",
+  "label": "round 1 (blind)",
+  "agent": "a6"
+ },
+ {
+  "seq": 8,
+  "who": "Jin",
+  "kind": "statement",
+  "text": "I'm in favor, but with conditions. As the person who owns our merge policy, I've watched inconsistency creep in across the monorepo—different naming, inconsistent error handling, drifting patterns. A required pre-merge check gives us a shared floor without turning every PR into a style debate. That said, I won't rubber-stamp a tool that adds another five minutes to an already 11-minute CI cycle. Before this becomes mandatory, I want a two-week trial where Lintwise runs in advisory mode so we can measure its runtime impact and tune the rule set. We should also agree on a fast-path: if Lintwise flags only warnings, the PR can still merge with a maintainer override. Eight developers in one repo means one bad merge poisons everyone's branch; a lightweight gate protects us all.",
+  "tldr": "Support Lintwise as a merge gate, but require a two-week advisory trial and a maintainer override path first.",
+  "stance": "for",
+  "label": "round 1 (blind)",
+  "agent": "a7"
+ },
+ {
+  "seq": 9,
+  "who": "Olga",
+  "kind": "statement",
+  "text": "I'm for this. As someone still learning our conventions, I often get review comments that feel like \"well, that's just how we do it here,\" and I have to ask around to figure out the actual rule. If Lintwise can tell me mechanically what's wrong before I even open a PR, that's a huge relief. I haven't used it yet, so I'd want a quick onboarding doc and a grace period where violations are warnings, not hard blocks, so I can learn the rules without feeling punished. But the direction is right: consistent, automated style guidance beats tribal knowledge. I just ask that the error messages be specific enough that I can fix things without pinging a senior every time.",
+  "tldr": "Clear automated style feedback would help me learn conventions faster than relying on tribal knowledge and review comments.",
+  "stance": "for",
+  "label": "round 1 (blind)",
+  "agent": "a8"
+ },
+ {
+  "seq": 10,
+  "who": "Chair",
+  "kind": "chair-question",
+  "text": "To Priya: Observed runtime and scope of Lintwise checks (Over your six months using Lintwise, what was the typical wall-clock time for a single run, and did you configure it to scan only changed files or the full tree? Any experience with timeouts or hung runs?)",
+  "label": "fact-finding question"
+ },
+ {
+  "seq": 11,
+  "who": "Priya",
+  "kind": "answer",
+  "text": "Default full-tree run added roughly four minutes to CI. With the result cache enabled, that dropped to about one minute. I don't have a note on whether we configured changed-files-only scanning—I recall it ran against the full tree by default. I can't speak to timeouts or hung runs from my six months; I never hit one, but I didn't configure a hard timeout either. The cache is the key lever.",
+  "tldr": "Default run costs four minutes; enabling the result cache cuts it to one, so cache config matters more than scope.",
+  "stance": "for",
+  "label": "answer to chair",
+  "agent": "a1"
+ },
+ {
+  "seq": 12,
+  "who": "Chair",
+  "kind": "chair-question",
+  "text": "To Tom: Actionable-finding ratio and false-positive rate (In your two months running Lintwise on your side project, roughly what fraction of findings were genuine bugs or contract issues versus purely cosmetic style nits? Did you end up disabling any rule categories?)",
+  "label": "fact-finding question"
+ },
+ {
+  "seq": 13,
+  "who": "Tom",
+  "kind": "answer",
+  "text": "On my side project, default rules flagged roughly 30 percent noise in JavaScript files—mostly cosmetic style nits rather than real bugs. I did not try tuning or disabling rule categories, so I can't speak to how much that ratio improves with a stricter config. I kept the defaults and just fixed what it flagged. I can't give you a precise actionable-versus-cosmetic split beyond that 30 percent noise figure.",
+  "tldr": "About 30 percent of default-rule findings were noise; I never tuned rules, so I can't confirm how tuning changes the ratio.",
+  "stance": "for",
+  "label": "answer to chair",
+  "agent": "a4"
+ },
+ {
+  "seq": 14,
+  "who": "Priya",
+  "kind": "statement",
+  "text": "The cache result I shared—four minutes down to one—is the key lever Marcus and Elena need. One minute is well within tolerance. On noise: in my six months, Lintwise caught three null-handling bugs in month one; I didn't experience the thirty-percent cosmetic noise Tom saw, but his side project had no tuning, so I'd back Lars's ask for a strict rule set before enforcement. I support the two-week advisory trial Jin and Sana want. One gap: Elena asked whether Lintwise scans for secrets and CVEs. I can't confirm that from my experience—it caught logic and contract bugs, not embedded tokens. If it's style-and-logic only, we still need a separate secret-scan gate regardless.",
+  "tldr": "Cache cuts runtime to one minute; I support adoption with a tuned rule set and two-week advisory trial.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "a1"
+ },
+ {
+  "seq": 15,
+  "who": "Marcus",
+  "kind": "statement",
+  "text": "Priya's cached figure of one minute clears my ninety-second threshold, so I'm shifting from \"need a week to benchmark\" to \"I'll support this with conditions.\" But I haven't measured it on our monorepo, and cache hit rate is the unknown variable—eight engineers touching one repo means frequent invalidations. I still want Lintwise running in parallel with the build, not serially. My queue already sits at six minutes at peak; even one extra serial minute per PR compounds across twenty-plus merges a day. I'll back the two-week advisory trial Jin and Sana proposed, but I need to instrument cache hit/miss rates during that window before we flip to hard-gate. If cache hits drop below eighty percent, we're back to four minutes and I pull support.",
+  "tldr": "Cached one-minute runtime clears my threshold; I support adoption if parallel execution and measured cache hit rate hold.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "a2"
+ },
+ {
+  "seq": 16,
+  "who": "Elena",
+  "kind": "statement",
+  "text": "Priya couldn't confirm secret detection, so let me close that gap. I checked Lintwise's rule catalog: it includes a secret-detection rule set. Last quarter a hard-coded test key reached main and required rotation; that rule set would have flagged it. That alone justifies the gate for me. The cached one-minute runtime clears my latency concern—well under tolerance. However, I need one firm commitment: when Lars and the group tune the rule set during the two-week advisory trial, the secret-detection rules must stay enabled as hard failures from day one. I won't accept a grace period on token leaks. Style nits can be advisory; a leaked credential cannot. With that carve-out and the parallel-execution plan Marcus outlined, I'm in.",
+  "tldr": "Lintwise detects secrets—confirmed; support adoption if secret rules stay hard-fail during any advisory trial.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "a3"
+ },
+ {
+  "seq": 17,
+  "who": "Tom",
+  "kind": "statement",
+  "text": "The cached one-minute runtime clears my parallel-execution concern—no need to sequence it behind the build. My two-sprint grace period is effectively covered by Jin's two-week advisory trial, so I'll drop that ask. On noise: I saw roughly thirty percent cosmetic findings on my side project with default rules and never tuned them. That's exactly why I back Lars's strict rule set before enforcement. During the advisory window, I'll tune the JavaScript rule categories on my own PRs and report the actionable ratio back. One practical note for Olga: I'll help draft the onboarding doc so error messages map to concrete fixes, not just rule IDs. With parallel execution, tuned rules, and Elena's secret-detection carve-out, I'm in.",
+  "tldr": "One-minute cached runtime and advisory trial resolve my concerns; I'll tune JS rules during the trial and support enforcement after.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "a4"
+ },
+ {
+  "seq": 18,
+  "who": "Sana",
+  "kind": "statement",
+  "text": "The cached one-minute runtime and parallel execution clear my latency concern, and Jin's two-week advisory trial covers my request for a no-blocking pilot on my pipeline directories. I'm now in favor. My remaining gap is coverage: nobody has addressed whether Lintwise lints SQL beyond the Python glue. Two outages last year traced to typos in config keys inside SQL files—exactly the kind of thing a static check should catch before merge. If Lintwise only parses Python, my pipelines get no protection and I'd need a separate SQL linter anyway. During the advisory window I'll run it against my pipeline directories and report the actionable ratio, as Tom is doing for JavaScript. I back Elena's secret-detection carve-out and Lars's strict rule set. One condition: the trial must include my SQL-heavy directories, not just application code.",
+  "tldr": "Latency resolved; I support adoption but need proof Lintwise catches SQL config-key typos like the two outages we had.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "a5"
+ },
+ {
+  "seq": 19,
+  "who": "Lars",
+  "kind": "statement",
+  "text": "My noise fear is addressed. My notes: Lintwise has a baseline mode ignoring pre-existing findings, reporting only new ones—no \"forty nits per PR.\" A trial I read hit 8 percent false positives with tuned rules versus Tom's 30 percent on defaults. That clears my bar. I support the advisory window, Elena's secret carve-out, and Marcus's parallel-execution plan. One condition: report actionable findings per language, not aggregate. Sana's SQL gap matters—if Lintwise skips SQL, the 8 percent figure doesn't apply there.",
+  "tldr": "Baseline mode and tuned rules cut false positives to eight percent, clearing my noise objection; I'm for with per-language reporting.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "a6"
+ },
+ {
+  "seq": 20,
+  "who": "Jin",
+  "kind": "statement",
+  "text": "I'm in, with my merge-policy conditions locked in. First: the trial must be phased, not repo-wide. We reversed two policy changes in the past because they hit everything at once. Advisory mode for two weeks, then promote rules one at a time—Lars's strict set first, Elena's secret rules immediately as hard failures, style nits promoted individually. Second: publish the false-positive rate weekly during the trial; if actionable findings per language drop below a threshold we set, we roll back that rule. Third: a written rollback path—any rule can be demoted to advisory by one maintainer without a full vote. Sana's SQL coverage is unresolved; if Lintwise doesn't parse SQL, her directories need a separate linter and that's not a blocker for the rest. I'll draft the merge-policy amendment this week.",
+  "tldr": "Support adoption with phased rollout, weekly false-positive reporting, and a one-maintainer rollback path per rule.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "a7"
+ },
+ {
+  "seq": 21,
+  "who": "Olga",
+  "kind": "statement",
+  "text": "I'm in. The two-week advisory trial gives me the grace period I asked for—I can learn the rules without a hard block. Tom's offer to draft the onboarding doc with concrete fixes, not just rule IDs, directly addresses my biggest worry: getting a cryptic message and still needing to ping a senior. Lars's baseline mode means I won't be blamed for pre-existing style debt, which removes the fear of inheriting someone else's cleanup. Jin's phased rule promotion feels safer than a repo-wide flip. My one ask: during the trial, can the error messages include a one-line \"why\" and a suggested fix? That's what turns a gate from punishment into a teacher. I'll use the advisory window to learn the conventions rather than just pass a check.",
+  "tldr": "Advisory trial, baseline mode, and Tom's onboarding doc address my concerns; I want error messages with a \"why\" and suggested fix.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "a8"
+ }
+]
