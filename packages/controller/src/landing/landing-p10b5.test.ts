@@ -424,4 +424,63 @@ for (const backend of backends) {
       assert.deepEqual([other.woken.filter((x) => x.projectId === b), other.unreadable], [[], 1], JSON.stringify(other));
     } finally { await r.close(); }
   });
+
+  test(`${backend.name}: second review: a landed end leaves a hold marked with another task; a renew on another landing task's credential drops the mark; the done pass is bounded and lets only domain refusals pass; the earlier text is tried only after a command conflict (card P10b)`, async () => {
+    const r = await rig();
+    try {
+      // The landed end: the woken integrator's hold, but marked with another task (it is not this take's), is left as it is.
+      const a = await r.project("Apple");
+      const frontA = await r.queued(a);
+      await r.person("ivy", integrates([a]));
+      const tA = (await r.wake.round()).woken[0]!.taskId;
+      const cA = await r.credential(tA, "ivy");
+      const took = await r.leaseOps.acquire(cA.as, { commandId: "take", taskId: frontA, branch: "main", ttlMs: 30 * MIN });
+      const stored = (await r.w.storage.getAggregate({ kind: "integrator-lease", id: took.leaseId }))!.body as Record<string, unknown>;
+      await r.raw("integrator-lease", took.leaseId, { ...stored, landingTask: frontA });
+      await r.queue.remove({ commandId: "landed-a", actor: "controller", projectId: a, branch: "main", taskId: frontA, reason: "landed" });
+      r.w.clock.advance(MIN);
+      const landed = await r.wake.round();
+      assert.deepEqual(landed.ended?.map((e) => [e.taskId, e.why, e.lease]), [[tA, "landed", undefined]], JSON.stringify(landed));
+      assert.equal((await r.leaseOf(a))!.state, "held");
+      // A renew that names another landing task than the hold's mark drops the mark (the hold is no longer provably the first take's).
+      await r.raw("integrator-lease", took.leaseId, stored);
+      const renewed = await r.leases.renew({ commandId: "renew-other", leaseId: took.leaseId, fence: took.fence, holder: "ivy", landingTask: frontA });
+      assert.equal(renewed.landingTask, undefined);
+
+      // A done pass over more marked holds than its bound: it stops at the bound and says the round is partial. Marked holds whose task has no landing record are never given back.
+      const until = new Date(Date.parse(r.w.clock.now()) + 60 * MIN).toISOString();
+      for (let i = 0; i < 101; i++) {
+        const leaseId = IntegratorLeaseService.leaseIdOf(`prj-bulk${i}`, "main");
+        await r.raw("integrator-lease", leaseId, { projectId: `prj-bulk${i}`, branch: "main", holder: "ivy", taskId: frontA, fence: 1, ttlMs: 60 * MIN, acquiredAt: r.w.clock.now(), expiresAt: until, state: "held", epoch: r.w.epoch, landingTask: `tsk-bulk${i}` });
+      }
+      const bounded = await r.wake.round();
+      assert.deepEqual([bounded.partial, bounded.freed], [true, undefined], JSON.stringify({ ...bounded, woken: undefined }));
+
+      // A failure that is not a domain refusal (a broken task store) fails the round, never counted as unreadable and passed over.
+      const b = await r.project("Birch");
+      const x = (await r.w.projects.createTask({ commandId: "t-x", actor: r.w.owner.id, projectId: b, title: "marked" })).id;
+      await r.raw(LANDING_TASK_KIND, x, { projectId: b, branch: "main", frontTaskId: x, agentId: "max", wakeId: IntegratorWake.wakeIdOf(b, "main"), at: r.w.clock.now() });
+      await r.raw("integrator-lease", IntegratorLeaseService.leaseIdOf(b, "main"), { projectId: b, branch: "main", holder: "max", taskId: x, fence: 1, ttlMs: 60 * MIN, acquiredAt: r.w.clock.now(), expiresAt: until, state: "held", epoch: r.w.epoch, landingTask: x });
+      for (let i = 0; i < 101; i++) await r.raw("integrator-lease", IntegratorLeaseService.leaseIdOf(`prj-bulk${i}`, "main"), { projectId: `prj-bulk${i}`, branch: "main", holder: "ivy", taskId: frontA, fence: 1, ttlMs: 60 * MIN, acquiredAt: r.w.clock.now(), expiresAt: until, state: "released", epoch: r.w.epoch });
+      const projects = (broken: { getTask?: string; createTask?: () => boolean }) => ({
+        createTask: async (c: Parameters<typeof r.w.projects.createTask>[0]) => { if (broken.createTask?.() === true) throw new DomainError("unavailable", "the task store is busy"); return r.w.projects.createTask(c); },
+        getTask: async (id: string) => { if (id === broken.getTask) throw new TypeError("the task store broke"); return r.w.projects.getTask(id); },
+        transitionTask: (c: Parameters<typeof r.w.projects.transitionTask>[0]) => r.w.projects.transitionTask(c),
+      });
+      await assert.rejects(r.wakeWith({}, { projects: projects({ getTask: x }) as never }).round(), /the task store broke/);
+
+      // The earlier text is tried only after a command conflict: a wake whose task could not be made now (another domain error) is counted unreadable and made with the new text at the next round.
+      const c = await r.project("Cedar");
+      await r.queued(c);
+      await r.person("cy", integrates([c]));
+      let fail = true;
+      const flaky = r.wakeWith({}, { projects: projects({ createTask: () => { const f = fail; fail = false; return f; } }) as never });
+      const first = await flaky.round();
+      assert.deepEqual([first.woken.filter((w) => w.projectId === c), first.unreadable >= 1], [[], true], JSON.stringify(first));
+      const second = await flaky.round();
+      const tC = second.woken.find((w) => w.projectId === c)?.taskId;
+      assert.ok(tC !== undefined, JSON.stringify(second));
+      assert.match((await r.w.projects.getTask(tC))!.description, /release the lease first and then finish this task/);
+    } finally { await r.close(); }
+  });
 }

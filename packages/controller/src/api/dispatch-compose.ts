@@ -499,6 +499,17 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   }, i.onError);
   // A charge the ledger could not take is kept and tried again by a loop (card R05g); one given up on is reported.
   const chargeRetry = ChargeRetryService.withEpoch(storage, epoch, { budgets }, { ...ro, onDropped: (e) => i.onError?.(new Error(`charge ${e.commandId} was given up on: ${e.reason}`)) });
+  // The task a review or job charge is booked to (card P10b). A pin that cannot be read or written (card P10b fifth slice, second review) does not lose the charge: the task is resolved before the charge reaches the
+  // retry store, so a thrown pin would cost the spending for good (an under-charge). It is charged where `chargeTaskOf` says now, kept and tried again like any charge, and the failure is reported. The budget
+  // books a command ID once and refuses it with another task, so this never books a charge twice; at worst a later try of the same command is refused and reported.
+  const chargeTaskOfUse = async (u: { commandId: string; taskId: string }): Promise<string> => {
+    if (i.chargeTaskFor !== undefined) {
+      try { return await i.chargeTaskFor(u.commandId, u.taskId); } catch (error) {
+        i.onError?.(new Error(`the budget task of charge ${u.commandId} could not be fixed (${(error instanceof Error ? error.message : String(error)).slice(0, 200)}); it is charged to the task named now`));
+      }
+    }
+    return (await i.chargeTaskOf?.(u.taskId)) ?? u.taskId;
+  };
   const meetings = MeetingService.withEpoch(storage, epoch, { inquiries: i.inquiries }, { ...ro, availability: pauses.availability, invitations, ...(i.leadMinutes === undefined ? {} : { leadMinutes: i.leadMinutes }) });
   const messages = AgentMessageService.withEpoch(storage, epoch, {
     ...ro, availability: pauses.availability, taskPaused: (t) => pauses.isPaused(t), guard: (t) => pauses.guard(t), waits: i.waits, assignments: i.assignments, meetings, inquiries: i.inquiries, notifications,
@@ -993,7 +1004,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       attemptControl: { live: (taskId) => dispatcher.liveAttemptsOf(principal, { taskId }), frozenReason: async (id) => (await dispatcher.get(principal, id))?.frozen?.reason, release: (id) => dispatcher.release(principal, id), tell: (id, text) => dispatcher.tell(principal, id, text), stop: (id, reason) => dispatcher.stop(principal, id, { reason }) },
       attendance, standups, watches,
       unsettledCharges: (by) => chargeRetry.unsettled(by),
-      chargeUse: async (u) => chargeRetry.submit(principal, { commandId: u.commandId, activity: u.activity, taskId: (await (i.chargeTaskFor !== undefined ? i.chargeTaskFor(u.commandId, u.taskId) : i.chargeTaskOf?.(u.taskId))) ?? u.taskId, computeMs: u.computeMs, ...(u.agentId === undefined ? {} : { agentId: u.agentId }) }).then(() => undefined),
+      chargeUse: async (u) => chargeRetry.submit(principal, { commandId: u.commandId, activity: u.activity, taskId: await chargeTaskOfUse(u), computeMs: u.computeMs, ...(u.agentId === undefined ? {} : { agentId: u.agentId }) }).then(() => undefined),
       // An outside server's text is framed as data on every page, with the injection check over the page itself (the visible head was checked when it was cut).
       readSpill: async (by, spillId, index, size) => {
         const found = await context.readSpill(by, spillId, index, size);

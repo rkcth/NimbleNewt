@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +7,7 @@ import { test } from "node:test";
 import { AdmissionService } from "../admission/service.js";
 import type { HostLocalWork, WorkerHost, WorkOrder } from "../dispatch/index.js";
 import { ManualTimer } from "../dispatch/testing/timer.js";
+import { CommandRunner } from "../domain/runner.js";
 import { PI, ScriptedWorker, workGrants } from "../dispatch/testing/world.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { HostService } from "../hosts/hosts.js";
@@ -24,6 +26,7 @@ test("the woken integrator's attempt reaches its own project's lease and landing
   const d = mkdtempSync(join(tmpdir(), "nn-p10b-reach-"));
   const orders: WorkOrder[] = [];
   const held = { cost: 0, attemptId: "" };
+  const internal: string[] = [];
   // A local host whose agents run until they are stopped and which reports what a sandbox still holds (the cleanup cost a stop charges).
   const host = new ScriptedWorker("host:w1", async ({ order, worker }) => {
     orders.push(order);
@@ -32,7 +35,7 @@ test("the woken integrator's attempt reaches its own project's lease and landing
   });
   (host as unknown as WorkerHost).localWork = async (): Promise<HostLocalWork> => ({ processes: [], costs: held.attemptId === "" ? [] : [{ attemptId: held.attemptId, costMicros: held.cost, computeMs: held.cost / 10 }] }) as never;
   const c = await startController({
-    storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+    storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI], onInternalError: (error: unknown) => { internal.push(error instanceof Error ? error.message : String(error)); },
     dispatch: { timer: new ManualTimer(), manual: true, route: async () => ({ route: "cloud/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: true } }), local: { acceptUnenforcedLimits: true, window: () => 8192, build: () => host } },
   } as never);
   const call = async (token: string, op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
@@ -117,6 +120,15 @@ test("the woken integrator's attempt reaches its own project's lease and landing
     assert.deepEqual([usage["review"]?.computeMs, usage["stop-cleanup"]?.costMicros], [25, 7000], JSON.stringify(usage));
     const entries = (await c.storage.listAggregates("budget-entry", { limit: 1000 })).map((e) => e.body as { taskId?: string });
     assert.ok(entries.every((e) => e.taskId !== landingTask), "nothing is charged to the landing task");
+    // Second review: a review charge whose pin is damaged is not lost (the retry store keeps only a charge that reached it). It is booked where the landing task's costs go now (the queued work's task), and the
+    // damage is reported; the damaged pin is left as it is, never read as some task.
+    const pinId = `icp-${createHash("sha256").update(`${landingTask}\0rv-2`).digest("hex").slice(0, 32)}`;
+    const damaged = { taskId: landingTask, commandId: "rv-2", budgetTaskId: "../x" };
+    await new CommandRunner(c.storage, c.epoch, {}).command("test.raw", { commandId: "raw-pin", actor: "test" }, async () => ({ payload: {}, build: async () => ({ ref: { kind: "landing-charge-pin", id: pinId }, creates: true, changes: [{ type: "create" as const, ref: { kind: "landing-charge-pin", id: pinId }, body: damaged }], detail: {} }) }));
+    await c.dispatch.chargeUse({ commandId: "rv-2", activity: "review", taskId: landingTask, agentId: `agent:${ivy}`, computeMs: 5 });
+    assert.equal((await call(O, "budget.usage", { taskId: beans })).result.item.byActivity["review"]?.computeMs, 30);
+    assert.ok(internal.some((m) => m.includes("rv-2") && m.includes("damaged")), JSON.stringify(internal));
+    assert.deepEqual((await c.storage.getAggregate({ kind: "landing-charge-pin", id: pinId }))?.body, damaged);
 
     // The owner's view after the landing task was released: said as it is.
     await call(O, "integrator.lease.release", { projectId: garden, branch: "main" }, "rel-lease");
@@ -124,9 +136,9 @@ test("the woken integrator's attempt reaches its own project's lease and landing
     await s.assignments.releaseTask({ commandId: "rel-1", actor: rob.id, taskId: landingTask, expectedRevision: now.revision, reason: "the owner's choice" } as never);
     // Card P10b, fifth slice: each charge's task was fixed at its first try (one pin per charge: the review's and the stop's), so the review charge made again under its command ID after the release still names
     // the queued work's task and settles as the same charge (no second entry, nothing kept to retry), though the landing task is no longer the integrator's.
-    assert.equal((await c.storage.listAggregates("landing-charge-pin", { limit: 10 })).length, 2);
+    assert.equal((await c.storage.listAggregates("landing-charge-pin", { limit: 10 })).length, 3, "the review's, the stop's and the damaged one");
     await c.dispatch.chargeUse({ commandId: "rv-1", activity: "review", taskId: landingTask, agentId: `agent:${ivy}`, computeMs: 25 });
-    assert.deepEqual([(await call(O, "budget.usage", { taskId: beans })).result.item.byActivity["review"]?.computeMs, (await c.storage.listAggregates("charge-retry", { limit: 10 })).length], [25, 0]);
+    assert.deepEqual([(await call(O, "budget.usage", { taskId: beans })).result.item.byActivity["review"]?.computeMs, (await c.storage.listAggregates("charge-retry", { limit: 10 })).length], [30, 0]);
     const view = await call(O, "status.ask", { request: { kind: "landing_queue", projectId: garden } });
     const text = (view.result.item.lines as { text: string }[]).map((l) => l.text).join("\n");
     assert.match(text, new RegExp(`landing task ${landingTask}, but that task was released and is assigned to nobody now`), text);
