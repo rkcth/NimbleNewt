@@ -1682,7 +1682,7 @@ Result: `{ item }`.
 
 #### `adoption.affected`
 
-The look at the work that used a withdrawn adoption (card B05): for a tool, the tasks that ran exactly the withdrawn version (from the catalog's run records), each as paused, open, finished or missing when first seen; unfinished ones were told in their activity and keep the version, finished ones are left as they are. A practice's use by tasks is not recorded, so its look finds none. `state` is looking or done; `partial` when the page limit was reached. The same readers as adoption.get.
+The look at the work that used a withdrawn adoption (card B05): for a tool, the tasks that ran exactly the withdrawn version (from the catalog's run records), each as paused, open, finished or missing when first seen; unfinished ones were told in their activity and keep the version, finished ones are left as they are. A practice's use by tasks is not recorded, so its look finds none. `state` is looking or done; `partial` when the page limit was reached; `counts` per state. The same readers as adoption.get; the task IDs only for the owner or history.read in the project (the right that reads the run records), anyone else gets the counts with `tasksHidden`.
 
 Arguments:
 

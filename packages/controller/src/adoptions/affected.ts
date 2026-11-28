@@ -165,7 +165,7 @@ export class AffectedWorkLook {
         if (Object.keys(tasks).length >= LOOK_LIMITS.tasks) { untracked++; continue; }
         const state = await this.#stateOf(ports, u.taskId, look.projectId);
         // The task is told before the step's write; its command ID is the adoption's and the task's, so a step repeated after a restart or a lost race tells it nothing new.
-        if (state === "paused" || state === "open") { await ports.tell(u.taskId, `adp-look-${id}-${u.taskId}`, tellText(look, state), id); told++; }
+        if (state === "paused" || state === "open") { await tellOnce(ports, u.taskId, `adp-look-${id}-${u.taskId}`, tellText(look, state), id); told++; }
         tasks[u.taskId] = state;
       }
       const pages = look.pages + 1;
@@ -229,6 +229,22 @@ export class AffectedWorkLook {
   }
 }
 
+/**
+ * Tells a task once. The step's command ID belongs to this adoption and this task, and activity reports a lost race on the task's steps as `stale_revision`, so `command_conflict` here means the ID was
+ * already used: the task was told by an earlier step whose look write was lost (a restart, or a race), when it was judged differently (paused then, open now). It is told, so the look goes on; without
+ * this the same page would be read again at every tick and the look would never finish (first review).
+ */
+async function tellOnce(ports: AdoptionLookPorts, taskId: string, commandId: string, summary: string, adoptionId: string): Promise<void> {
+  try { await ports.tell(taskId, commandId, summary, adoptionId); } catch (error) { if (!(error instanceof DomainError && error.code === "command_conflict")) throw error; }
+}
+
+/** How many tasks were in each state when first seen. */
+export function affectedCounts(tasks: Readonly<Record<string, AffectedState>>): Record<AffectedState, number> {
+  const out: Record<AffectedState, number> = { paused: 0, open: 0, finished: 0, missing: 0 };
+  for (const v of Object.values(tasks)) if (Object.hasOwn(out, v)) out[v]++;
+  return out;
+}
+
 const shortName = (s: string, n: number): string => (s.length <= n ? s : `${s.slice(0, n - 1)}…`);
 const whyText = (look: LookBody): string => (look.why === "regression" ? "monitoring showed a regression" : "by a decision");
 
@@ -253,11 +269,12 @@ export function noticeText(look: LookBody): string {
 }
 
 /** The status view's words for a withdrawn adoption's look (read-only, no prompt text). */
-export function affectedLine(look: Pick<LookBody, "state" | "scope" | "runs" | "tasks" | "untracked" | "partial" | "notified" | "told">): string {
+export function affectedLine(look: Pick<LookBody, "state" | "scope" | "runs" | "tasks" | "untracked" | "partial" | "notified" | "told"> & { readonly counts?: Readonly<Record<AffectedState, number>> }): string {
   if (look.scope === "not-recorded") return "Which tasks applied the practice is not recorded, so no task was found or told.";
-  const states = Object.values(look.tasks);
-  const count = (s: AffectedState) => states.filter((v) => v === s).length;
-  if (look.state === "looking") return `The look at the work that ran this version is not finished yet (${look.runs} run(s) and ${states.length} task(s) found so far; it goes on at the next tick).`;
+  // A viewer who may not read the project's run records gets the counts without the task IDs (`AdoptionService.affected`).
+  const counts = look.counts ?? affectedCounts(look.tasks);
+  const total = counts.paused + counts.open + counts.finished + counts.missing;
+  if (look.state === "looking") return `The look at the work that ran this version is not finished yet (${look.runs} run(s) and ${total} task(s) found so far; it goes on at the next tick).`;
   const limit = look.partial === true || look.untracked > 0 ? " Not every run record was read or recorded (the look's limit), so there may be more." : "";
-  return `Affected work, from the tool's run records: ${states.length} task(s) ran this version; ${count("paused")} paused and ${count("open")} open were told in their activity and keep the version, ${count("finished") + count("missing")} finished or gone were left as they are.${limit}${look.notified === true ? "" : " The owner has not been told yet."}`;
+  return `Affected work, from the tool's run records: ${total} task(s) ran this version; ${counts.paused} paused and ${counts.open} open were told in their activity and keep the version, ${counts.finished + counts.missing} finished or gone were left as they are.${limit}${look.notified === true ? "" : " The owner has not been told yet."}`;
 }

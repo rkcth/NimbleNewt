@@ -10,7 +10,7 @@ import type { CatalogService } from "../catalog/catalog.js";
 import { METRICS, betterPct, sealOf, type ExperimentBody, type Metric } from "../experiments/experiments.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import { clean, invalid, plain, whole } from "../standups/shared.js";
-import { AffectedWorkLook, lookStartChanges, type AdoptionLookPorts, type LookBody } from "./affected.js";
+import { AffectedWorkLook, affectedCounts, lookStartChanges, type AdoptionLookPorts, type AffectedState, type LookBody } from "./affected.js";
 
 /**
  * Scoped adoption and monitored withdrawal (card B05, first slice). An experiment (B04) the controller judged `improved` may be adopted in its project: the practice it tried, or one exact, already published
@@ -295,11 +295,15 @@ export class AdoptionService {
    * The look at the work that used a withdrawn adoption (the affected-work slice): the tasks that ran exactly the withdrawn tool version, what each was when first seen, how many runs were read and
    * whether the look is done. The same readers as `get`; an adoption with no look (not withdrawn, or withdrawn before looks existed), one the viewer may not read and an unknown ID all answer `undefined`.
    */
-  async affected(viewer: Principal, adoptionId: string): Promise<(LookBody & { revision: number }) | undefined> {
+  async affected(viewer: Principal, adoptionId: string): Promise<(LookBody & { revision: number; counts: Record<AffectedState, number>; tasksHidden?: true }) | undefined> {
     const got = await this.get(viewer, adoptionId);
     if (got === undefined) return undefined;
     const look = await this.#looks.read(got.id);
-    return look === undefined ? undefined : { ...look.body, revision: look.revision };
+    if (look === undefined) return undefined;
+    // Which tasks ran a tool is read from the run records, which need `history.read` in the project (`catalog.usage`); a reader of the adoption without it gets the counts, not the task IDs (first review).
+    const counts = affectedCounts(look.body.tasks ?? {});
+    const mayTasks = viewer.kind === "owner" || allows(viewer, "history.read", got.projectId);
+    return { ...look.body, ...(mayTasks ? {} : { tasks: {}, tasksHidden: true as const }), counts, revision: look.revision };
   }
 
   /**

@@ -12,7 +12,7 @@ import { ExperimentService } from "../experiments/index.js";
 import { PrincipalService, type Grant, type Principal } from "../security/index.js";
 import { StatusService } from "../status/index.js";
 import type { ControllerStorage, OperationInput } from "../storage/types.js";
-import { AdoptionService, LOOK_LIMITS, noticeText, type AdoptionLookPorts, type LookBody } from "./index.js";
+import { AdoptionService, LOOK_LIMITS, noticeText, tellText, type AdoptionLookPorts, type LookBody } from "./index.js";
 
 // Card B05, affected-work slice: when an adoption in force is withdrawn (by a decision or a regression), the same write starts a look at the work that used it. The look reads the catalog's run records
 // of the project in bounded pages, tells each unfinished task that ran exactly the withdrawn version (one step in its activity; it keeps the version), leaves finished ones as they are, and then tells the
@@ -44,7 +44,7 @@ const SERVICE = { id: "service:adoption-looks", kind: "service", name: "adoption
 interface Run { taskId: string; name?: string; version?: string; digest?: string; projectId?: string }
 interface Ports { told: string[]; notices: { commandId: string; detail: string; adoptionId: string; projectId: string }[]; paused: Set<string>; ports: (over?: Partial<AdoptionLookPorts>) => AdoptionLookPorts }
 interface Ctx {
-  owner: Principal; mgr: Principal; dev: Principal; reader: Principal; eve: Principal; maint: Principal;
+  owner: Principal; mgr: Principal; dev: Principal; reader: Principal; eve: Principal; maint: Principal; hist: Principal;
   a: string; b: string; storage: ControllerStorage; epoch: number; cat: CatalogService; exps: ExperimentService; projects: ProjectService; activity: ActivityService; p: Ports;
   make(o?: { looks?: AdoptionLookPorts | undefined; storage?: ControllerStorage }): AdoptionService;
   experiment(): Promise<string>;
@@ -56,7 +56,7 @@ interface Ctx {
   runs(runs: readonly Run[], projectId?: string): Promise<void>;
   op(operationId: string, over: Partial<OperationInput>): OperationInput;
   steps(taskId: string): Promise<string[]>;
-  view(adoptions: unknown): Promise<string[]>;
+  view(adoptions: unknown, by?: Principal): Promise<string[]>;
 }
 
 for (const backend of backends) {
@@ -95,6 +95,7 @@ for (const backend of backends) {
         const mgr = await enroll("mgr", [{ action: "meeting.manage", project: a }]);
         const dev = await enroll("dev", [{ action: "meeting.agenda", project: a }]);
         const reader = await enroll("reader", [{ action: "meeting.read", project: a }]);
+        const hist = await enroll("hist", [{ action: "meeting.read", project: a }, { action: "history.read", project: a }]);
         const eve = await enroll("eve", [{ action: "meeting.manage", project: b }, { action: "meeting.read", project: b }, { action: "catalog.read", project: "*" }]);
         const maint = await enroll("maint", [{ action: "meeting.manage", project: a }, { action: "toolbox.manage", project: "*" }, { action: "catalog.read", project: "*" }]);
         const author = await enroll("author", [{ action: "desk.write", project: a }, { action: "desk.read", project: a }]);
@@ -102,7 +103,7 @@ for (const backend of backends) {
         const note = (await desks.write(author, { commandId: cid("w"), projectId: a, kind: "note", title: "fetch", body: "Use fetch to read a page.", visibility: "shared", status: "accepted" } as never)).id;
         const op = (operationId: string, over: Partial<OperationInput>): OperationInput => ({ operationId, epoch, actor: owner.id, correlationId: `c-${operationId}`, at: new Date(now).toISOString(), changes: [], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [], ...over });
         const ctx: Ctx = {
-          owner, mgr, dev, reader, eve, maint, a, b, storage: world.storage, epoch, cat, exps, projects, activity, p, make, op,
+          owner, mgr, dev, reader, eve, maint, hist, a, b, storage: world.storage, epoch, cat, exps, projects, activity, p, make, op,
           register: async (nm, v) => { await cat.register(owner, { commandId: cid("r"), name: nm, kind: "skill", version: v, manifest: SKILL, instructionsRecordId: note } as never); return (await cat.get(owner, nm, v))!.digest; },
           experiment: async () => {
             const id = (await exps.propose(dev, { commandId: cid("x"), projectId: a, title: "Checklist prompt", proposal: PROPOSAL, affectedKey: `reviews ${n}` } as never)).id;
@@ -127,7 +128,7 @@ for (const backend of backends) {
             for (let i = 0; i < runs.length; i += 100) await world.storage.applyOperation(op(cid("use"), { changes: runs.slice(i, i + 100).map((r) => ({ type: "create", ref: { kind: `catalog-usage-${projectId}`, id: derivedId("use", cid("u")) }, body: { versionId: "cav-aaaaaaaaaaaaaaaaaaaa", name: r.name ?? name, version: r.version ?? version, digest: r.digest ?? digest, usedBy: dev.id, taskId: r.taskId, projectId: r.projectId ?? projectId, at: new Date(now).toISOString() } as never })) }));
           },
           steps: async (taskId) => (await activity.steps(owner, taskId)).steps.map((s) => (s as { summary?: string }).summary ?? ""),
-          view: async (adoptions) => (await StatusService.withEpoch(world.storage, epoch, { assignments: {} as never, waits: {} as never, blockers: {} as never, contracts: {} as never, experiments: exps, adoptions: adoptions as never }, options).ask(owner, { kind: "experiments", projectId: a }))!.lines.map((l) => l.text),
+          view: async (adoptions, by = owner) => (await StatusService.withEpoch(world.storage, epoch, { assignments: {} as never, waits: {} as never, blockers: {} as never, contracts: {} as never, experiments: exps, adoptions: adoptions as never }, options).ask(by, { kind: "experiments", projectId: a }))!.lines.map((l) => l.text),
         };
         await body(ctx);
       } finally { await world.close(); }
@@ -234,6 +235,52 @@ for (const backend of backends) {
     assert.equal(seen.length, 0, "an idle tick writes nothing");
   });
 
+  suite("a task told while it was paused, whose look write was then lost, is not told again when it is open at the retry, and the look finishes (first review)", async (c) => {
+    await c.register("toolbox.fetch", "1.0.0");
+    const t = await c.task();
+    await c.runs([{ taskId: t }]);
+    const exp = await c.experiment();
+    const t1 = await c.ask(exp, tool("toolbox.fetch"), c.reader);
+    await c.approve(t1);
+    // Withdrawn where nothing carries the look on: it is recorded and waits.
+    await c.make({ looks: undefined }).withdraw(c.owner, { commandId: cid("w"), adoptionId: t1, expectedRevision: await c.rev(t1), reason: "stop" });
+    const waiting = (await c.make().affected(c.owner, t1))!;
+    assert.equal(waiting.state, "looking");
+    // An earlier step told the task while it was paused, then its look write was lost: the step is there under the adoption's and the task's command ID, with the paused words.
+    await c.activity.record(SERVICE, { commandId: `adp-look-${t1}-${t}`, taskId: t, kind: "lifecycle", summary: tellText(waiting as LookBody, "paused"), manifest: { refs: [{ kind: "adoption", id: t1 }] }, outcome: "confirmed" });
+    // Now the task is open: the same command ID with other words is refused as a conflict, which means it was told. The look goes on and finishes; the task has its one step.
+    assert.deepEqual(await c.make().sweepAffected(), { looked: 1, failed: 0 });
+    const look = (await c.make().affected(c.owner, t1))!;
+    assert.deepEqual([look.state, look.notified, look.tasks, look.told], ["done", true, { [t]: "open" }, 1]);
+    assert.deepEqual(await c.steps(t), [tellText(waiting as LookBody, "paused")]);
+    assert.equal(c.p.notices.length, 1);
+    // A tell that fails for another reason is not taken as told: the look waits for the next tick.
+    const t2 = await c.task();
+    await c.runs([{ taskId: t2 }]);
+    const exp2 = await c.experiment();
+    const a2 = await c.ask(exp2, tool("toolbox.fetch"), c.reader);
+    await c.approve(a2);
+    const failing = c.p.ports({ tell: async () => { throw new DomainError("unavailable", "the store is busy"); } });
+    await c.make({ looks: failing }).withdraw(c.owner, { commandId: cid("w"), adoptionId: a2, expectedRevision: await c.rev(a2), reason: "stop" });
+    assert.equal((await c.make().affected(c.owner, a2))?.state, "looking");
+    assert.equal((await c.make().affected(c.owner, a2))?.told, 0);
+  });
+
+  suite("the tick goes round the pending list: a look that keeps failing does not hold up the ones after it (first review)", async (c) => {
+    const ids: string[] = [];
+    for (let i = 0; i < 4; i++) { const exp = await c.experiment(); const id = await c.ask(exp); await c.approve(id); ids.push(id); }
+    for (const id of ids) await c.make({ looks: undefined }).withdraw(c.owner, { commandId: cid("w"), adoptionId: id, expectedRevision: await c.rev(id), reason: "stop" });
+    const [stuck, , , last] = ids as [string, string, string, string];
+    // The owner's notice for the first look always fails; the others go through.
+    const ports = c.p.ports({ notify: async (x) => { if (x.adoptionId === stuck) throw new DomainError("unavailable", "the inbox is full"); c.p.notices.push({ ...x }); } });
+    const svc = c.make({ looks: ports });
+    assert.deepEqual(await svc.sweepAffected(), { looked: 1, failed: 1 });
+    // The next tick begins where this one stopped, not again at the failing look: the last look is finished by the second tick.
+    await svc.sweepAffected();
+    assert.equal((await c.make().affected(c.owner, last))?.notified, true);
+    assert.equal((await c.make().affected(c.owner, stuck))?.notified, undefined);
+  });
+
   suite("a regression withdraws and starts the look in the same write; a practice's look tells nobody and says why; declining or taking back starts none; without ports the look waits", async (c) => {
     await c.register("toolbox.fetch", "1.0.0");
     const t = await c.task();
@@ -299,6 +346,17 @@ for (const backend of backends) {
     const look = (await c.make().affected(c.owner, t1))!;
     assert.deepEqual([look.runs, look.tasks, look.told], [1, { [t]: "open" }, 1]);
     for (const by of [c.owner, c.mgr, c.reader]) assert.equal((await c.make().affected(by, t1))?.adoptionId, t1, by.id);
+    // First review: the task IDs come from the run records, which need history.read in the project; a reader of the adoption without it gets the counts only. The status view's words are the same for both.
+    for (const by of [c.mgr, c.reader]) {
+      const seen = (await c.make().affected(by, t1))!;
+      assert.deepEqual([seen.tasks, seen.tasksHidden, seen.counts], [{}, true, { paused: 0, open: 1, finished: 0, missing: 0 }], by.id);
+    }
+    for (const by of [c.owner, c.hist]) {
+      const seen = (await c.make().affected(by, t1))!;
+      assert.deepEqual([seen.tasks, seen.tasksHidden, seen.counts.open], [{ [t]: "open" }, undefined, 1], by.id);
+    }
+    // The status view gives a reader without history.read the same counts as the owner.
+    for (const by of [c.owner, c.reader]) assert.match((await c.view(c.make(), by)).join("\n"), /Affected work, from the tool's run records: 1 task\(s\) ran this version; 0 paused and 1 open were told/, by.id);
     for (const id of [t1, "adp-aaaaaaaaaaaaaaaaaaaa", "nope", 3 as unknown as string]) assert.equal(await c.make().affected(c.eve, id), undefined, String(id));
     assert.equal(await c.make().affected(c.dev, t1), undefined, "neither a reader of the project nor the asker");
     assert.equal(await c.make().affected(c.owner, "adp-aaaaaaaaaaaaaaaaaaaa"), undefined);
@@ -361,4 +419,8 @@ test("the owner's notice stays within the notification detail limit and names a 
   assert.match(text, /9 task\(s\) ran it: 3 paused, 3 open \(told\), 3 finished\. E\.g\. task-6+, task-7+, task-8+$/);
   assert.equal(noticeText({ ...base, tasks, partial: true }).includes("(more not read)"), true);
   assert.ok(noticeText({ ...base, adoptionId: "adp-" + "b".repeat(20), why: "regression", tasks: Object.fromEntries(ids.map((id) => [id, "paused"])) }).length <= 200);
+  // First review: IDs that do not all fit are left out whole, never cut part-way.
+  const long = Object.fromEntries(Array.from({ length: 3 }, (_, i) => [`task-${String(i).repeat(40)}`, "paused"] as const));
+  const cut = noticeText({ ...base, tasks: long });
+  assert.match(cut, /3 task\(s\) ran it: 3 paused, 0 open \(told\), 0 finished\.$/, cut);
 });
