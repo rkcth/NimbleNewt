@@ -376,4 +376,48 @@ for (const backend of backends) {
     const w = (await c.index("experiment-index")).body["waiting"] as Record<string, string>;
     assert.equal(Object.values(w).filter((x) => x === c.dev2.id).length, 2);
   });
+
+  suite("damaged archived counts read as 0; a null waiting map is rebuilt; an approval keeps the archived count; a pin on an older index keeps every open experiment counted; a page after an archived ID is refused", async (c) => {
+    const exp = await c.improved();
+    // A fractional archived count (damaged) is read as 0, not carried on.
+    await c.setIndex("adoption-index", { ids: [], open: {}, waiting: {}, archived: 1.5 });
+    const first = await c.ask(exp);
+    assert.equal((await c.index("adoption-index")).body["archived"], 0);
+    // Approving takes the adoption out of the waiting map and keeps the archived count.
+    await c.setIndex("adoption-index", { ...(await c.index("adoption-index")).body, archived: 4 });
+    await c.adoptions().approve(c.mgr2, { commandId: cid("ap"), adoptionId: first, expectedRevision: (await c.adoptions().get(c.owner, first))!.revision, review: "the runs agree" });
+    let ix = (await c.index("adoption-index")).body;
+    assert.deepEqual([ix["archived"], (ix["waiting"] as Record<string, string>)[first], Object.values(ix["open"] as Record<string, string>).includes(first)], [4, undefined, true]);
+    // A waiting map stored as null is rebuilt from the records: the asker's limit still holds.
+    const asked: string[] = [];
+    for (const t of ["toolbox.a", "toolbox.b", "toolbox.c", "toolbox.d", "toolbox.e"]) asked.push(await c.ask(exp, tool(t)));
+    await c.setIndex("adoption-index", { ...(await c.index("adoption-index")).body, waiting: null });
+    await refuses("unavailable", () => c.ask(exp, tool("toolbox.f")), /5 adoption requests waiting/);
+    // A page continued after an ID that was archived in between is refused with a clear field error; the archived adoption stays readable by its ID.
+    await c.takeBack(asked[0]!);
+    const cur = (await c.index("adoption-index")).body;
+    const rest = (cur["ids"] as string[]).filter((x) => x !== asked[0]);
+    await c.setIndex("adoption-index", { ...cur, ids: [asked[0]!, ...fakeIds("adp", 300 - 1 - rest.length), ...rest] });
+    const page = (await c.adoptions().list(c.reader, c.a, { limit: 1 }))!;
+    assert.deepEqual([page.items[0]?.id, page.next], [asked[0], asked[0]]);
+    await c.ask(exp, tool("toolbox.f"));
+    ix = (await c.index("adoption-index")).body;
+    assert.deepEqual([(ix["ids"] as string[]).includes(asked[0]!), (ix["ids"] as string[]).length, ix["archived"]], [false, 300, 5]);
+    await refuses("invalid_command", () => c.adoptions().list(c.reader, c.a, { afterId: asked[0]! }), /afterId: is not in the list/);
+    assert.equal((await c.adoptions().get(c.reader, asked[0]!))?.status, "declined");
+
+    // Experiments: an older index (no open or waiting map, a fractional archived count). A pin rebuilds it from the records before it writes: the other proposal stays open and waiting,
+    // the pinned one stays open, and a withdrawn one is ended (not open, so it may leave a full list).
+    const p1 = await c.propose();
+    const p2 = await c.propose();
+    const gone = await c.propose();
+    await c.exps().withdraw(c.dev, { commandId: cid("w"), experimentId: gone, expectedRevision: (await c.exps().get(c.owner, gone))!.revision, reason: "not needed" });
+    const old = (await c.index("experiment-index")).body;
+    await c.setIndex("experiment-index", { ids: old["ids"], claims: old["claims"], archived: 2.5 });
+    await c.exps().pin(c.mgr, { commandId: cid("p"), experimentId: p1, expectedRevision: (await c.exps().get(c.owner, p1))!.revision, criteria: CRITERIA } as never);
+    const ex = (await c.index("experiment-index")).body;
+    const open = ex["open"] as Record<string, string>;
+    const waiting = ex["waiting"] as Record<string, string>;
+    assert.deepEqual([open[p1], open[p2], open[gone], open[exp], waiting[p1], waiting[p2], waiting[gone], ex["archived"]], [c.dev.id, c.dev.id, undefined, undefined, undefined, c.dev.id, undefined, 0]);
+  });
 }

@@ -21899,3 +21899,30 @@ Deliberate breakages of my own (22, each applied alone to the built JS of `adopt
 Runs (Linux, `/tmp/nn-slot.sh`, `NIMBLENEWT_REQUIRE_SANDBOX=1`, offline guard, TMPDIR `/tmp/claude-1000/b05r-r1/`): `tsc --build --force`; `api:docs:write` (the 8 summary lines above, then no further diff); `check:deps`, `licenses:check`, `roadmap:check` pass. Node 22 and Node 24.21.0: 391 of 391 each for `adoptions/*`, `experiments/*`, `chat/experiments-chat`, `api/start-adoptions`, `api/start-experiments`, `status/status`, `chat/prompt-room`, `scripts/d02-docs.test.mjs` and `scripts/plan.test.mjs`. Product code changed (two small fail-closed fixes), so a second clean review follows.
 
 Cards B04 and B05 not flipped.
+
+### B05/B04 retention slice, second review (clean-context Claude agent, Opus 5.5, 2026-11-27 EST; tests and notes only; cards not flipped; not pushed)
+
+Plain words first. No product problem was found, and no product code changed. Every transition was checked again. Asking adds the adoption to the open and waiting maps. Approving takes it out of waiting and leaves it open. Declining, taking back, withdrawal by a manager and withdrawal after a regression all go through the same release, which takes the adoption out of both maps in the same revision-guarded write. Proposing adds the experiment to open and waiting. Pinning takes it out of waiting. A budget pause or raise writes no index change, so the experiment stays open. Concluding (only from running or paused) and withdrawing (only from proposed) take it out of both maps. Archiving consults only the open map, so an adoption in force or a running or paused experiment never leaves the list. An archived record's accounting is kept: savings claims stay in the index, the record is unchanged, and it is still read, monitored, concluded or adopted by its ID.
+
+Judged sound with no change:
+- Rebuilds are bounded. Adoptions read at most 300 open records, experiments at most 300 listed records. They fail toward stricter: an unreadable, unknown-status or out-of-window experiment counts as open. A damaged index can therefore hold a phantom open entry that never clears (one place of the 300). That only happens in a store no controller wrote; accepted.
+- An index with well-typed but inconsistent maps (an open record missing from the open map) is not detected. Same-write maintenance makes this unreachable without a damaged store; noted, not changed.
+- The waiting limit counts the durable principal ID. A task credential acts as the same principal (`taskScope` is extra), so it cannot be used to get round the limit. Separate principals are created only by the owner.
+- Archiving takes the oldest ended record first, in list order.
+- Races (two requests at the limit, an approval or withdrawal racing a new request) all write the one guarded index, and the loser retries on a fresh read. `archived` only grows; a damaged value is read as 0.
+- Rights are checked before limits (no existence oracle). The refusal texts are neutral.
+- The API summaries match the behaviour. The interpreter prompt, CHAT_OPS and STATUS_KINDS are byte-identical to the base (156,553 characters).
+- Pagination: an `afterId` archived between pages is refused as `afterId: is not in the list`. This is acceptable, because the caller lists again from the start. It is now tested.
+
+Tests added (`adoptions/retention.test.ts`, 1 suite x 4 backends):
+- a fractional `archived` count is read as 0, for adoptions and for experiments;
+- an approval keeps the archived count;
+- a `waiting: null` map is rebuilt and the limit still holds;
+- a pin on an older experiment index rebuilds before it writes: the other proposal stays open and waiting, and a withdrawn one is ended;
+- a page continued after an archived ID is refused, and the archived adoption is still readable.
+
+Deliberate breakages of my own: 22 (`/tmp/claude-1000/b05r-r2/breakages.py`), new and not on the earlier lists. Each was applied alone to the built JS of `kept-window.js`, `adoptions.js` and `experiments.js`, run against `adoptions/retention.test`, `adoptions/adoptions.test` and `experiments/experiments.test` on Node 22, then restored and checked by SHA-256. 16 of 22 were caught before the new tests and 22 of 22 after.
+
+Runs (Linux, `/tmp/nn-slot.sh`, `NIMBLENEWT_REQUIRE_SANDBOX=1`, offline guard, TMPDIR `/tmp/claude-1000/b05r-r2/`): `tsc --build --force`; `api:docs:write` (no diff); `check:deps`, `licenses:check` and `roadmap:check` pass; `plan.test` 6 of 6. Node 22 and Node 24.21.0: 395 of 395 each for `adoptions/*`, `experiments/*`, `chat/experiments-chat`, `api/start-adoptions`, `api/start-experiments`, `status/status`, `chat/prompt-room`, `scripts/d02-docs.test.mjs` and `scripts/plan.test.mjs`.
+
+Cards B04 and B05 not flipped.
