@@ -52,6 +52,20 @@ for (const backend of backends) {
       assert.equal(await capacityLine(), "No integrator holds this branch's lease now; 1 integrator that may land on this project holds no lease, but the controller already woke an integrator 3 times for the work first in this queue and wakes nobody more for it, so it waits until an integrator asks the pool (integrator.pool.next) or other work comes first.");
       answer = { state: "woken", agentId: "ivy", taskId: `tsk-${"c".repeat(20)}`, at: "2026-10-23T09:05:00.000Z" };
       assert.equal(await capacityLine(), `No integrator holds this branch's lease yet; the controller woke integrator ivy at 2026-10-23T09:05:00.000Z to land this queue with landing task tsk-${"c".repeat(20)}: its attempt starts in a place kept for landing, inquiries and reviews (author attempts never take one), with its budget held on the queued work's own task, and its admission and budget waits show on that task.`);
+      // Card P10b (fourth slice): who the landing task is with now. With the integrator: the landing line as before; given to someone else, released, or not assigned yet: what that means, in words.
+      const woke = `No integrator holds this branch's lease yet; the controller woke integrator ivy at 2026-10-23T09:05:00.000Z to land this queue with landing task tsk-${"c".repeat(20)}`;
+      const stuck = "; the integrator stays counted as busy and nobody else is woken for this branch until that task ends: cancel it to have the controller wake an integrator again.";
+      answer = { state: "woken", agentId: "ivy", taskId: `tsk-${"c".repeat(20)}`, at: "2026-10-23T09:05:00.000Z", with: "integrator" };
+      assert.equal(await capacityLine(), `${woke}: its attempt starts in a place kept for landing, inquiries and reviews (author attempts never take one), with its budget held on the queued work's own task, and its admission and budget waits show on that task.`);
+      answer = { state: "woken", agentId: "ivy", taskId: `tsk-${"c".repeat(20)}`, at: "2026-10-23T09:05:00.000Z", with: "other", other: "zed" };
+      assert.equal(await capacityLine(), `${woke}, but that task is now assigned to someone else (zed), so it is that holder's ordinary work: it takes no place kept for landing and spends nothing of the queued work's budget${stuck}`);
+      answer = { state: "woken", agentId: "ivy", taskId: `tsk-${"c".repeat(20)}`, at: "2026-10-23T09:05:00.000Z", with: "released" };
+      assert.equal(await capacityLine(), `${woke}, but that task was released and is assigned to nobody now, so nothing runs on it and the controller does not assign it again${stuck}`);
+      answer = { state: "woken", agentId: "ivy", taskId: `tsk-${"c".repeat(20)}`, at: "2026-10-23T09:05:00.000Z", with: "unassigned" };
+      assert.equal(await capacityLine(), `${woke}; the task is not assigned yet, and the controller assigns it to that integrator at its next round.`);
+      answer = { state: "woken", agentId: "ivy", taskId: `tsk-${"c".repeat(20)}`, at: "2026-10-23T09:05:00.000Z", with: "other", other: `q\nr\u202e${"s".repeat(300)}` };
+      const hostileOther = (await capacityLine())!;
+      assert.ok(!hostileOther.includes("\n") && !hostileOther.includes("\u202e") && hostileOther.length < 700, hostileOther);
       answer = { state: "woken", agentId: `x\ny\u202e${"z".repeat(300)}`, taskId: "t\u0007", at: "2026-10-23T09:05:00.000Z" };
       const hostileWake = (await capacityLine())!;
       assert.ok(!hostileWake.includes("\n") && !hostileWake.includes("\u202e") && !hostileWake.includes("\u0007") && hostileWake.length < 520, hostileWake);

@@ -1,3 +1,4 @@
+import { DomainError } from "../domain/errors.js";
 import type { Principal } from "../security/principals.js";
 import type { ControllerStorage } from "../storage/types.js";
 import { IntegratorLeaseService, type IntegratorLease } from "./integrator-lease.js";
@@ -29,7 +30,15 @@ export const CAPACITY_LIMITS = { principalPages: 10, agents: 500, grantPages: 50
 export type CapacityAnswer =
   | { readonly state: "held"; readonly holder: string; readonly expiresAt: string; readonly lands: boolean }
   /** Card P10b (wake): nobody active holds the branch, and the controller woke an integrator for it (a landing task assigned to it that has not ended). */
-  | { readonly state: "woken"; readonly agentId: string; readonly taskId: string; readonly at: string }
+  | {
+    readonly state: "woken"; readonly agentId: string; readonly taskId: string; readonly at: string;
+    /**
+     * Who the landing task is with now (`IntegratorCapacityOptions.assignmentOf`): `integrator` (assigned to the woken integrator: its landing), `other` (assigned to someone else, named in `other`: that holder's
+     * ordinary work), `released` (released, assigned to nobody: nothing runs on it and the controller does not assign it again) or `unassigned` (not assigned yet: the controller assigns it at its next round).
+     * Absent when it is not known (no reader given, or the read was refused).
+     */
+    readonly with?: "integrator" | "other" | "released" | "unassigned"; readonly other?: string;
+  }
   /** `wakesSpent`: the controller already woke an integrator this many times for the work now first in the queue and wakes nobody more for it (`INTEGRATOR_WAKE_LIMITS.perFront`). */
   | { readonly state: "free"; readonly free: number; readonly busy: number; readonly partial: boolean; readonly wakesSpent?: number }
   | { readonly state: "busy"; readonly busy: number; readonly partial: boolean }
@@ -46,11 +55,14 @@ export interface IntegratorCapacityOptions {
    * wakes are kept. A list that could not all be read makes the answer `unknown` (nobody is said to be free).
    */
   readonly wakes?: () => Promise<WakesNow>;
+  /** Card P10b: the landing task's assignment as it is now (`AssignmentService.getAssignment`), so the `woken` answer says who the task is with. Absent: not said. */
+  readonly assignmentOf?: (taskId: string) => Promise<{ readonly state: string; readonly owner?: { readonly kind: string; readonly id: string } } | undefined>;
 }
 
 /** What the wakes say now (see `IntegratorCapacityOptions.wakes`). */
 export interface WakesNow {
-  readonly open: readonly { readonly projectId: string; readonly branch: string; readonly agentId: string; readonly taskId: string; readonly at: string }[];
+  /** `frontTaskId`: the work first in the queue when the wake was made (absent where a caller does not know it). */
+  readonly open: readonly { readonly projectId: string; readonly branch: string; readonly agentId: string; readonly taskId: string; readonly at: string; readonly frontTaskId?: string }[];
   readonly spent: readonly { readonly projectId: string; readonly branch: string; readonly frontTaskId: string; readonly wakes: number }[];
   readonly partial: boolean;
 }
@@ -121,7 +133,7 @@ export class IntegratorCapacity {
       if (holder !== undefined && holder.kind === "agent") return { state: "held", holder: own.holder, expiresAt: own.expiresAt, lands: holder.id === `agent:${own.holder}` && servesProject(holder, projectId) };
     }
     const woken = wakes.open.find((w) => w.projectId === projectId && w.branch === branch);
-    if (woken !== undefined) return { state: "woken", agentId: woken.agentId, taskId: woken.taskId, at: woken.at };
+    if (woken !== undefined) return { state: "woken", agentId: woken.agentId, taskId: woken.taskId, at: woken.at, ...(await this.#withWhom(woken.taskId, woken.agentId)) };
     const judged = await this.#judge(projectId, leases, wakes);
     const free = judged.free.length, busy = judged.busy;
     const spent = frontTaskId === undefined ? undefined : wakes.spent.find((x) => x.projectId === projectId && x.branch === branch && x.frontTaskId === frontTaskId);
@@ -142,6 +154,17 @@ export class IntegratorCapacity {
     const wakes = await this.#wakes();
     if (wakes === undefined) return undefined;
     return this.#judge(projectId, leases, wakes, alsoBusy);
+  }
+
+  /** Who a woken integrator's landing task is with now (see `CapacityAnswer` `woken`). A refused read says nothing; any other failure is thrown. */
+  async #withWhom(taskId: string, agentId: string): Promise<{ with?: "integrator" | "other" | "released" | "unassigned"; other?: string }> {
+    if (this.#options.assignmentOf === undefined) return {};
+    let a: Awaited<ReturnType<NonNullable<IntegratorCapacityOptions["assignmentOf"]>>>;
+    try { a = await this.#options.assignmentOf(taskId); } catch (error) { if (error instanceof DomainError) return {}; throw error; }
+    if (a === undefined) return { with: "unassigned" };
+    if (a.state !== "assigned" || a.owner === undefined) return { with: "released" };
+    if (a.owner.kind === "agent" && a.owner.id === agentId) return { with: "integrator" };
+    return { with: "other", other: a.owner.kind === "agent" ? a.owner.id : `${a.owner.kind}:${a.owner.id}` };
   }
 
   async #wakes(): Promise<WakesNow | undefined> {

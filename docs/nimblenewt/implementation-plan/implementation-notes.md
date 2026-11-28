@@ -22894,3 +22894,79 @@ In plain words: exhaustive run 46117578707 (main `20aaf62e`) failed only on Wind
 **Runs** (Linux, `/tmp/nn-slot.sh` one at a time, `NIMBLENEWT_REQUIRE_SANDBOX=1`, offline guard, TMPDIR `/tmp/claude-1000/b06win/t`, `NIMBLENEWT_TIER=typical NIMBLENEWT_FAST=1`): `tsc --build --force`; `check:deps`, `licenses:check` and `roadmap:check` pass; `api:docs:write` gives no diff; `plan.test.mjs` 6 of 6. Node 22: 695 of 695 for `owncode/*`, `swarm/*` and every `api/start*.test.js` (233 files), and 111 of 111 for the focused set (`owncode/*`, `api/start-owncode*`, `swarm/*`, 7 files). Node 24.21.0: 111 of 111 for the focused set.
 
 **Deliberate breakages** (13, each applied alone to the built `separate.js` in a scratch copy and run against `separate.test`, with the location-bound program root test skipped there; script `/tmp/claude-1000/b06win/scripts/breakages.py`): 11 of 13 caught on Node 22 and on Node 24, and the 2 not caught are the equivalent ones above. The breakages: POSIX rules for win32; win32 rules for every platform; no fold; `..\` not refused; a cross-drive relative taken as inside; a guard or a place resolved by the host's rules; a guard or a place checked as a full path by the host's rules; a gitdir checked as absolute by the host's rules; inode 0 accepted; the way up walked with POSIX `dirname`; a trailing CR kept.
+
+## P10b fourth slice: a woken integrator lands on its own landing task's credential, fresh per project and take; the woken line says who has the task; landing costs on the queued work; a wake ends by itself (Claude agent, Sonnet 5.5, 2026-11-28 EST; branch `card-p10b4` from main 9c016318; card P10b NOT flipped and stays planned; task-plan files unchanged; not pushed; no workflow dispatched; no model or network call made)
+
+Blockers P10, H03, A10b and R05 are implemented, so no build-ahead was needed. On main before this slice: the pool (first slice), the owner's capacity line (second) and the wake (third, with two reviews and a re-check).
+
+**Slice boundary: the card's second clause, and the third slice's open follow-ups.** "Credentials and context are fresh per project (no data crosses between projects, test)." Also: the owner's `woken` line when the landing task is with someone else or released; the landing costs that still went to the landing task; and a wake that ends by itself.
+
+In plain words: the woken integrator's attempt can now do its job. Its task credential (the one the dispatcher gives each attempt, A10b) can take the integrator lease of the one branch its landing task lands, and land under it. It can do nothing like that anywhere else. Each wake is its own landing task, so each take has its own credential and starts afresh. The owner's view says truthfully when the landing task was given to someone else or released. All of a landing's costs now go to the approved work's own task. A landing task is cancelled by the controller when its work is no longer queued, or when another integrator took the branch, but never while an attempt runs on it.
+
+- **What a landing task's credential reaches** (`landing/landing-reach.ts`, `IntegratorWake.landingReach`). It is decided from the records on every call. All of these must hold:
+  - the caller is an agent's task credential, and its task has a sound `landing-task` record that names this agent;
+  - the task is assigned to that agent now (`landingOf`);
+  - the record's project is the credential's project;
+  - the branch's current wake record names this very task and agent (a landing task of an earlier wake reaches nothing);
+  - the task is open.
+  Anything else is no reach, and the credential is refused as before. A damaged landing record is an integrity error, which the doors read as no reach (fail closed). `reachServes` also needs the agent's own exact right `integration.lease` on the project. The task credential keeps the agent's grants as they are now, so taking the right away stops it at once.
+- **The lease door** (`IntegratorLeaseOps`).
+  - With a reach, a task credential may acquire, renew, release and list. It reaches only the lease of its one branch in its project: another branch, another project's lease or task, and a branch that is not text are all refused. They get the same `not_found` answer, which says nothing about the other project.
+  - `list` shows only that branch's lease.
+  - Renew and release stay the holder's own, so another agent's lease is refused. `checkLanding` checks the lease's branch against the reach too.
+- **The pool** (`IntegratorPool.next`). On a landing credential, it judges only the one branch. Its holds elsewhere and other projects' queues are neither read into the answer nor counted. With the lease right gone, it serves nothing and answers "none" with zero counts.
+- **The landing** (`WorkspaceOpService`). A task credential may ask for a `landing`, and nothing else. It must be in its landing task's project, and the agent must have the exact project-wide `workspace.manage` and `integration.lease` there. A grant for one task does not count here. The lease and the queue are then checked as for every landing. Reading a request back follows the same rule.
+- **No data crosses between takes** (`takeKeyOf`). The lease door, the pool and the workspace service scope a task credential's command IDs by its principal *and* its task. So the same command ID in a later take (the same project or another) is a new command, never a replay of an earlier take's recorded lease or landing. An own credential is scoped as before. The key is at most 72 characters, so scoped IDs stay within 120.
+- **API guards** (`api/operations.ts`). `integrator.lease.acquire`, `.renew`, `.release`, `.list` and `integrator.pool.next` now let an agent's task credential through to the services, which decide. `workspace.request` lets one through only for `operation: landing`. The summaries say so in one sentence each, and `docs/nimblenewt/api-v1.md` is regenerated. These summaries are not interpreter text: the prompt stays at 156,553 of 156,560, and the prompt-room test passes.
+- **Fresh per project and per take.** Each wake makes its own landing task (the third slice), and A10b issues one credential per task and agent. The dispatcher issues it for that task's attempt and ends it with the attempt. A credential whose task ended is refused outright. A take's attempt starts on its own task, so nothing is resumed from another take.
+- **The owner's `woken` line** (`IntegratorCapacity`, option `assignmentOf`, wired to `assignments.getAssignment`; `status.ts`). The `woken` answer now says who has the landing task (`with`):
+  - with the woken integrator: the line as before;
+  - assigned to someone else (named): "…, but that task is now assigned to someone else (Z), so it is that holder's ordinary work: it takes no place kept for landing and spends nothing of the queued work's budget; the integrator stays counted as busy and nobody else is woken for this branch until that task ends: cancel it to have the controller wake an integrator again.";
+  - released: "…, but that task was released and is assigned to nobody now, so nothing runs on it and the controller does not assign it again; …(the same ending)";
+  - not assigned yet: "…; the task is not assigned yet, and the controller assigns it to that integrator at its next round."
+  A refused read says nothing more; any other failure is thrown. Words only, no prompt text, no new status kind.
+- **Landing costs on the queued work's task** (`IntegratorWake.chargeTaskOf`). Three kinds of cost now use the same budget task as the claim, the hold, tool calls and usage: stop-cleanup charges (`api/start.ts`, the stop service's `charge`), review and background-job compute (`chargeUse` in `dispatch-compose.ts`), and the continuation's budget line. A landing record that cannot be read as sound charges the task itself. The cost is recorded rather than lost, and a claim of that task is refused anyway.
+- **A wake ends by itself** (`IntegratorWake.round`, `#end`). Each round looks at the open wakes first, at most `policyReads` (100) ends tried per round, and cancels the landing task when either holds:
+  - its work (the wake's first task) is no longer queued on the branch (`landed`: it landed, or was taken out or returned). A queue missing from a partial read of the queues is never taken as landed;
+  - another active integrator holds the branch's live lease (`taken`).
+  It never ends a task that has an attempt admitted or running. That attempt ends as usual, and a later round ends the task. The cancellation carries a check of the assignment's revision, so an attempt admitted between the look and the write makes the write fail (counted unreadable). A task with no assignment yet is assigned by the round first and ended later. The command ID is `iwk-end:<task>:<why>`. The round reports `ended`.
+
+**Owner controls and chat.** No new operation, no new owner control, no chat op, no status kind and no interpreter prompt text. The prompt is still 156,553 of 156,560 characters. The owner sees the new words in the existing `landing_queue` view, which free-form chat already reaches.
+
+**ASSUMPTION lines.**
+- ASSUMPTION: "no productive-work rights" is read as follows. The reach adds the lease and the landing to a landing task's credential and nothing else. Within its project the credential still holds what every A10b task credential holds: the agent's own grants for that project and task. It is not cut down further. Reversible: a later slice could narrow a landing task's credential to the lease and landing actions.
+- ASSUMPTION: a landing task's credential may take the lease under any task of its project (the pool uses the queue's first task, as before). Only the project and the branch are fixed.
+- ASSUMPTION: landing on a task credential needs the agent's project-wide exact `workspace.manage`. A grant for one task does not count, so this is stricter than the own credential's rule.
+- ASSUMPTION: a landing task is ended by cancelling it, for either reason. `done` needs `in_progress`, and the controller did not do the work.
+- ASSUMPTION: a cost charged after the fact on a landing task whose record is damaged is charged to the landing task itself (recorded, never lost), not refused.
+
+**Tests.**
+- `landing/landing-reach-p10b.test.ts` (6 tests on each backend). They cover the reach of a landing credential and its bounds, the isolation between projects and takes, the automatic end, the `with` answer and `chargeTaskOf`, and, through the dispatcher world, each take's attempt starting afresh on its own credential.
+- `status/status-landing-capacity.test.ts`: the four `woken` lines word for word, and a hostile assignee name.
+- `api/start-p10b-reach.test.ts` (composed controller). The woken attempt runs on its work order's `tcr-` credential through the real API. It takes, lists and pool-holds its own lease, and its landing reaches the queue's own judgement (`review_invalid`). Another project's lease, list or landing is `not_found`, and a `refresh` is `forbidden`. Review compute from `chargeUse` and a real Stop's cleanup charge land on the queued work's task, and nothing is charged to the landing task. After a release, the owner's view says it, and the credential reaches nothing.
+- `landing/landing-reach-p10b.test.ts` also has a seventh test. It covers: a principal presented before its landing task ended, which reaches nothing after; the reach rule on its own (another task, agent or branch, none, an own credential); a woken integrator that holds the lease itself, whose task is not ended; and an attempt admitted between the end's look and its write, which the write's assignment check refuses (the task stays open, counted unreadable). In all, 7 tests on each backend.
+- 38 deliberate breakages, each applied alone to the built `dist`, run against nine slice files at the typical tier, then restored and checked by sha256 (script `/tmp/claude-1000/p10b4/brk/breakages.py`).
+  - First run: 24 of 36 caught (one breakage's text did not match the build and was fixed).
+  - Tests added for the real gaps: the reach rule on its own (task, agent), a principal held past its task's end, the integrator's own lease, the end's race, and another branch's lease in the list and the pool. Final: 32 of 38.
+  - Five not caught are equivalent:
+    - `reachServes` without its project check: `allowsExactly` under a task scope already refuses any other project;
+    - `landingReach` without the landing record's agent and project checks: the wake record must name this task and agent, and a record of another project points at another project's wake;
+    - the end's first look at an active attempt: the transition's assignment check refuses the same case, and each covers the other;
+    - `checkLanding` without the reach's branch: its earlier check that the lease is on the landing branch already refuses;
+    - the pool judging a task credential as an own one: A10b already cuts a task credential's grants to its own project, so it serves no other.
+  - One is not covered: the continuation's budget line reading the landing task. It changes only the budget figures written into a captured continuation; no test captures a landing attempt's continuation.
+- Runs (`/tmp/nn-slot.sh` one at a time, `NIMBLENEWT_REQUIRE_SANDBOX=1`, offline guard, TMPDIR `/tmp/claude-1000/p10b4/tmp`): `tsc --build --force`, `check:deps`, `licenses:check` and `roadmap:check` pass; `plan.test.mjs` 6 of 6; `api:docs:write` regenerated `docs/nimblenewt/api-v1.md` for the three changed summaries (committed), and gives no diff after that.
+  - Focused suites, 73 files with all four backends: 2,166 of 2,166 on Node 22 and on Node 24.21.0. They are every `landing/*`, `admission/*`, `status-landing-*`, `dispatcher*`, `workspace-ops/*` and `security/*` test, plus `chat/capacity`, `api/chat-gaps`, `chat/gaps1`, `chat/prompt-room` and `retirement/retirement`.
+  - All `api/start*.test.js` at the typical tier (`NIMBLENEWT_TIER=typical NIMBLENEWT_FAST=1`): 235 files, 593 of 593 on Node 22 and on Node 24.
+- Windows: the new tests use no POSIX path, mode or link assumption. The composed test's folder is made with `mkdtempSync(join(tmpdir(), ...))` and removed with retries.
+
+**Limits stated (follow-ups, not hidden).**
+- A woken integrator that still holds the branch's lease when its landing task is ended (its work landed) keeps the lease until it releases it or the lease runs out. Its landing credential no longer works, and while that lease is live the branch counts as held, so no new wake is made. The task's text tells it to release the lease. An end that also releases the lease, or a wake that does not count the integrator's own idle hold, is a follow-up.
+- `landingOf` answers only while the task is assigned to the integrator. A cost charged after the landing task was released or transferred (a late stop-cleanup, say) goes to the landing task itself. It is recorded, not lost.
+- Each lease-door, pool or workspace call on a task credential reads the landing record, the assignment, the wake record and the task (four reads). Own credentials are unchanged.
+- The author's own refresh (`reapply`, `work.refresh`) still scopes its command IDs by principal only. It was not part of this slice.
+
+**What remains of P10b, in the card's order.**
+1. (Third clause) What may remain is unchanged from the third slice: once inquiries and reviews are admitted in production, they share the two control places with landing. Whether landing then needs a share of its own is still open.
+2. OPEN chat wording, unchanged: "inquiries and reviews" in STATUS_KINDS `capacity.about` and in the `capacity.quotas` summaries (see the third slice). Still no room in the prompt.
+3. The follow-ups above: an ended wake's idle lease, and a cost charged after a transfer.

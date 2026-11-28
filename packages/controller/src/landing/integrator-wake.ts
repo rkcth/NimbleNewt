@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
+import { assignmentIdOf } from "../domain/assignment-model.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import type { ProjectService } from "../domain/service.js";
@@ -7,6 +8,8 @@ import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../sto
 import type { IntegratorCapacity, WakesNow } from "./integrator-capacity.js";
 import type { IntegratorLeaseService } from "./integrator-lease.js";
 import { frontOf, type LandingQueueService } from "./landing-queue.js";
+import type { LandingReach } from "./landing-reach.js";
+import type { Principal } from "../security/principals.js";
 
 /**
  * Waking a free integrator for queued work (card P10b, second part of the first clause: "another is woken through admission and budget, with reserved capacity").
@@ -54,6 +57,11 @@ export interface WakeRound {
   readonly held: number; readonly open: number; readonly noneFree: number; readonly spent: number;
   /** Queues that could not be judged (landing settings unreadable, a record that does not match its task, a wake that could not be made). */
   readonly unreadable: number;
+  /**
+   * Landing tasks this round ended (cancelled) because their wake's work is no longer queued (it landed, or was taken out or returned) or because another active integrator holds the branch's live lease now. Never one
+   * with an attempt admitted or running: that one ends through its attempt as usual, and a later round ends the task once the attempt is over.
+   */
+  readonly ended?: readonly { readonly projectId: string; readonly branch: string; readonly taskId: string; readonly why: "landed" | "taken" }[];
   /** Not every queue was looked at, or the round stopped at one of its bounds. */
   readonly partial: boolean;
   /** Set when the round woke nobody because the leases or the wake records could not all be read. */
@@ -122,11 +130,38 @@ export class IntegratorWake {
   }
 
   /**
+   * What a landing task's own credential reaches (card P10b, second clause; see `LandingReach`): the lease and landing of its one branch, or nothing. Decided from the records on every call: an agent's task credential
+   * whose task is a sound landing task of this agent now (`landingOf`, which reads the current assignment), of the credential's project, open, and the task of the branch's current wake by the same agent. A damaged
+   * landing record is thrown (`integrity`); the doors read that as no reach (`reachOf`), so it fails closed.
+   */
+  async landingReach(by: Principal): Promise<LandingReach | undefined> {
+    const scope = by.taskScope;
+    if (by.kind !== "agent" || scope === undefined || !by.id.startsWith("agent:")) return undefined;
+    const agentId = by.id.slice("agent:".length);
+    const l = await this.landingOf(scope.taskId);
+    if (l === undefined || l.agentId !== agentId || l.projectId !== scope.projectId) return undefined;
+    // The branch's current wake must be this very take: a landing task of an earlier wake (its record replaced by a later one) reaches nothing, even before its task is ended.
+    const found = await this.#runner.get(WAKE_KIND, IntegratorWake.wakeIdOf(l.projectId, l.branch));
+    const w = found === undefined ? undefined : wakeBodyOf(found.body);
+    if (w === undefined || w.taskId !== scope.taskId || w.agentId !== agentId || w.projectId !== l.projectId || w.branch !== l.branch) return undefined;
+    if (!(await this.#taskOpen(scope.taskId))) return undefined;
+    return { taskId: scope.taskId, projectId: l.projectId, branch: l.branch, agentId };
+  }
+
+  /**
+   * The task a cost of `taskId` is charged to after the fact (card P10b: stop cleanup, background jobs, reviews, the continuation's budget line): the queued work's own task for a landing task (`landingOf`), the task itself
+   * otherwise. A landing record that cannot be read as sound charges the task itself: the cost is recorded on the task where it was spent rather than lost (a claim of that task is refused anyway, so nothing runs on it).
+   */
+  async chargeTaskOf(taskId: string): Promise<string> {
+    try { return (await this.landingOf(taskId))?.budgetTaskId ?? taskId; } catch (error) { if (error instanceof DomainError) return taskId; throw error; }
+  }
+
+  /**
    * The wakes now, for `IntegratorCapacity` (`wakes`): those whose landing task has not ended (a task that is done, cancelled or gone ends its wake) and the branches whose first work used up its wakes. `partial` when the
    * records could not all be read or one is damaged.
    */
   async now(): Promise<WakesNow> {
-    const open: { projectId: string; branch: string; agentId: string; taskId: string; at: string }[] = [];
+    const open: { projectId: string; branch: string; agentId: string; taskId: string; at: string; frontTaskId: string }[] = [];
     const spent: { projectId: string; branch: string; frontTaskId: string; wakes: number }[] = [];
     let after: string | undefined;
     for (let page = 0; page < INTEGRATOR_WAKE_LIMITS.pages; page++) {
@@ -134,7 +169,7 @@ export class IntegratorWake {
       for (const a of batch) {
         const w = wakeBodyOf(a.body);
         if (w === undefined || a.id !== IntegratorWake.wakeIdOf(w.projectId, w.branch)) return { open: [], spent: [], partial: true };
-        if (w.state === "open" && (await this.#taskOpen(w.taskId))) open.push({ projectId: w.projectId, branch: w.branch, agentId: w.agentId, taskId: w.taskId, at: w.at });
+        if (w.state === "open" && (await this.#taskOpen(w.taskId))) open.push({ projectId: w.projectId, branch: w.branch, agentId: w.agentId, taskId: w.taskId, at: w.at, frontTaskId: w.frontTaskId });
         else if (w.frontWakes >= INTEGRATOR_WAKE_LIMITS.perFront) spent.push({ projectId: w.projectId, branch: w.branch, frontTaskId: w.frontTaskId, wakes: w.frontWakes });
       }
       if (batch.length < 200) return { open, spent, partial: false };
@@ -177,6 +212,26 @@ export class IntegratorWake {
 
     let reads = 0, judgedCount = 0, stopped = false;
     let finishes = 0;
+    // A wake whose work is done ends with its task (card P10b): its work is no longer queued on the branch (it landed, or was taken out or returned), or another active integrator took the branch. Judged on this
+    // round's picture: a queue missing from a partial read of the queues is not taken as landed. At most `policyReads` such ends tried per round.
+    const ended: { projectId: string; branch: string; taskId: string; why: "landed" | "taken" }[] = [];
+    let ends = 0;
+    for (const w of wakes.open) {
+      const lease = leases.find((l) => l.projectId === w.projectId && l.branch === w.branch);
+      const taken = lease !== undefined && lease.holder !== w.agentId && (await this.#deps.activeAgent(lease.holder));
+      const q = queues.find((x) => x.projectId === w.projectId && x.branch === w.branch);
+      const landed = w.frontTaskId !== undefined && (q === undefined ? !queuesPartial : !q.entries.some((e) => e.taskId === w.frontTaskId));
+      if (!taken && !landed) continue;
+      if (ends >= INTEGRATOR_WAKE_LIMITS.policyReads) { stopped = true; break; }
+      ends++;
+      const why = taken ? "taken" as const : "landed" as const;
+      try {
+        if (await this.#end(w.taskId, why)) { ended.push({ projectId: w.projectId, branch: w.branch, taskId: w.taskId, why }); openOn.delete(`${w.projectId}\0${w.branch}`); }
+      } catch (error) {
+        if (!(error instanceof DomainError)) throw error;
+        unreadable++;
+      }
+    }
     for (const c of candidates) {
       const { projectId, branch } = c.q;
       if (openOn.has(`${projectId}\0${branch}`)) {
@@ -225,7 +280,29 @@ export class IntegratorWake {
         unreadable++;
       }
     }
-    return { woken, held, open, noneFree, spent, unreadable, partial: queuesPartial || stopped };
+    return { woken, held, open, noneFree, spent, unreadable, ...(ended.length === 0 ? {} : { ended }), partial: queuesPartial || stopped };
+  }
+
+  /**
+   * Ends a wake's landing task (cancelled) when nothing runs on it: true when this call ended it. A task with an attempt admitted or running is left alone (the attempt ends as usual; a later round ends the task). The
+   * transition carries a check of the assignment's revision, so an attempt admitted between the look and the write makes the write fail rather than end a task under a running attempt. A task with no assignment yet
+   * (the round assigns it first) is not ended here. The command ID derives from the task and the reason, so a repeat after a crash is the same command.
+   */
+  async #end(taskId: string, why: "landed" | "taken"): Promise<boolean> {
+    const ref: AggregateRef = { kind: "assignment", id: assignmentIdOf(taskId) };
+    const asg = await this.#runner.get("assignment", ref.id);
+    if (asg === undefined || (asg.body as { activeAttemptId?: unknown }).activeAttemptId !== undefined) return false;
+    const task = await this.#deps.projects.getTask(taskId);
+    if (task === undefined || task.state === "done" || task.state === "cancelled") return false;
+    await this.#deps.projects.transitionTask({ commandId: `iwk-end:${taskId}:${why}`, actor: WAKE_ACTOR, taskId, expectedRevision: task.revision, to: "cancelled" }, {
+      payload: { landingEnd: why },
+      check: async () => {
+        const now = await this.#runner.get("assignment", ref.id);
+        if (now === undefined || now.revision !== asg.revision || (now.body as { activeAttemptId?: unknown }).activeAttemptId !== undefined) throw new DomainError("invalid_transition", `landing task ${taskId} has an attempt now; it ends through that attempt`);
+        return { changes: [{ type: "check", ref, expectedRevision: now.revision }], detail: { landingEnd: why } };
+      },
+    });
+    return true;
   }
 
   /**

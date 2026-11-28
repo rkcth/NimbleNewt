@@ -6,6 +6,7 @@ import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import type { QuiesceCoordinator } from "../dispatch/quiesce.js";
 import { QuiesceRefused } from "../dispatch/quiesce.js";
 import { landingChecksText, type LandingCheckEntry, type LandingCheckHost, type LandingChecksRecord } from "../landing/landing-gate.js";
+import { reachOf, reachServes, takeKeyOf, type LandingReachOf } from "../landing/landing-reach.js";
 import { allowsExactly, inTaskScope } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
@@ -14,7 +15,8 @@ import type { Aggregate, AggregateRef, Change, JsonObject } from "../storage/typ
 
 /**
  * Integration, checkout refresh and quarantine of an agent's work as controller operations (cards H12l and H12d), and the author's own refresh (`reapply`, card H12p: the agent asks for it itself through `work.refresh`, with no quiesce, and the record counts the refresh rounds of the task). The file work lives on the host that holds the checkout (the worker's workspace code), so the controller asks
- * the host through a `WorkspacePort`; this service is what makes that safe and answerable: the caller needs `workspace.manage` on the task's project (the owner always has it; a task credential never does), the request is
+ * the host through a `WorkspacePort`; this service is what makes that safe and answerable: the caller needs `workspace.manage` on the task's project (the owner always has it; a task credential never does, except that a
+ * landing task's own credential may ask for a `landing`, and nothing else, in its landing task's project: card P10b, `landingReach`), the request is
  * recorded before anything runs, and the host is asked only while every live attempt of the task is quiet (`QuiesceCoordinator.around`: new calls refused, calls in flight settled, a checkpoint taken). If an attempt cannot be made
  * quiet the operation does not run and the answer says which blocker. One operation runs per task at a time (a second is `unavailable` until the first ends). The attempts this operation may freeze are written into its record before it starts, and each freeze carries the request's ID, so a
  * controller that crashed can release exactly those (`recover`, or the next request for the task). A repeat of a command returns the recorded answer; a request that was recorded but whose outcome was never written is answered `uncertain` and is not run
@@ -197,6 +199,12 @@ export interface WorkspaceDeps {
    */
   readonly landingLease?: (by: Principal, call: { taskId: string; projectId: string; leaseId: unknown; fence: unknown }) => Promise<{ readonly leaseId: string; readonly fence: number } | void>;
   /**
+   * Card P10b (second clause): what a landing task's own credential reaches (`IntegratorWake.landingReach`). With it, a woken integrator's attempt may ask for a `landing` on its task credential, of a task in its landing
+   * task's project, when the agent itself has the exact rights `workspace.manage` (project-wide: a grant for one task does not count here) and `integration.lease` there; the lease and the queue are then checked as for
+   * every landing (its lease must be its own live hold on its one branch). No other operation, and no other project. Absent: every task credential is refused, as before.
+   */
+  readonly landingReach?: LandingReachOf;
+  /**
    * Card P10 (sixth slice): the gate of an `integration`, which writes the checkout's uncommitted work into the shared tree the landing branch's work lands in. Answers `undefined` when the project names no landing
    * branch (nothing is leased or queued there: the integration runs as before); otherwise the integration is made only under the landing branch's integrator lease (the caller's live hold; the owner may leave it out
    * and the live holder's is used) and only by the owner while that branch's landing queue is empty, and the branch and lease used are answered. Throws when refused (settings that cannot be read included). Asked when
@@ -287,7 +295,7 @@ export class WorkspaceOpService {
     const taskId = checkTaskId(command.taskId);
     const reason = text(command.reason, "reason", { min: 1, max: WORKSPACE_LIMITS.reason, multiline: false });
     if (redactText(reason) !== reason) invalid("reason", "looks like a credential or key; those are not recorded");
-    const projectId = await this.#authorize(by, taskId);
+    const projectId = await this.#authorize(by, taskId, operation);
     return this.#request(by, command, operation, taskId, reason, projectId);
   }
 
@@ -318,7 +326,8 @@ export class WorkspaceOpService {
   }
 
   async #request(by: Principal, command: NoActor & { operation: WorkspaceOperation; taskId: string; reason: string; leaseId?: string; fence?: number; submissionId?: string }, operation: WorkspaceOperation, taskId: string, reason: string, projectId: string): Promise<WorkspaceAnswer> {
-    const scoped = scopedCommandId(by.id, command.commandId);
+    // A landing task's credential: scoped by its take too, so a later take's command ID never replays an earlier take's request (card P10b).
+    const scoped = scopedCommandId(takeKeyOf(by), command.commandId);
     const id = derivedId("wsr", scoped);
 
     const replay = await this.#replayOf(by, id, scoped, taskId);
@@ -544,7 +553,7 @@ export class WorkspaceOpService {
     if (typeof requestId !== "string" || !WORKSPACE_ID.test(requestId)) return undefined;
     const found = await this.#get(requestId);
     if (found === undefined) return undefined;
-    try { await this.#authorize(by, found.body.taskId); } catch { return undefined; }
+    try { await this.#authorize(by, found.body.taskId, found.body.operation); } catch { return undefined; }
     return { ...found.body, id: requestId, replayed: false };
   }
 
@@ -947,10 +956,16 @@ export class WorkspaceOpService {
     return [current === undefined ? { type: "create", ref, body: json({ requestId }) } : { type: "update", ref, expectedRevision: current.revision, body: json({ requestId }) }];
   }
 
-  async #authorize(by: Principal, taskId: string): Promise<string> {
+  async #authorize(by: Principal, taskId: string, operation?: string): Promise<string> {
     const found = await this.#runner.get("task", taskId);
     const projectId = (found?.body as unknown as TaskBody | undefined)?.projectId;
     const refused = (): DomainError => new DomainError("not_found", `task ${taskId} does not exist or is not yours to manage`);
+    // A landing task's own credential (card P10b): a landing only, in its project, with the agent's exact project-wide workspace.manage and its lease right there. The same refusal as any other, so it says nothing more.
+    if (by.taskScope !== undefined && operation === "landing" && projectId !== undefined) {
+      const reach = await reachOf(this.#deps.landingReach, by);
+      if (!reachServes(by, reach, projectId) || !allowsExactly(by, "workspace.manage", projectId)) throw refused();
+      return projectId;
+    }
     // Exact: a wildcard grant is not enough to change another's checkout.
     if (projectId === undefined || by.taskScope !== undefined || !inTaskScope(by, projectId) || !allowsExactly(by, "workspace.manage", projectId, { resource: { kind: "task", id: taskId } })) throw refused();
     return projectId;

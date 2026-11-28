@@ -6,6 +6,7 @@ import type { NoActor, Principal } from "../security/principals.js";
 import { IntegratorLeaseService, LEASE_LIMITS, type IntegratorLease } from "./integrator-lease.js";
 import { frontOf, type LandingQueue, type LandingQueueService } from "./landing-queue.js";
 import type { IntegratorLeaseOps } from "./lease-ops.js";
+import { reachOf, reachServes, type LandingReachOf } from "./landing-reach.js";
 
 /**
  * Integrators shared across projects as a pool (card P10b, first slice: "free integrators take the next project with queued work").
@@ -29,6 +30,11 @@ export interface IntegratorPoolOptions {
   readonly landingBranch: (call: { taskId: string; projectId: string }) => Promise<string | undefined>;
   /** Whether an agent ID names an active agent: a live hold of an agent that is not active is not passed over (the lease door ends it when the caller takes the branch). Absent (unit rigs): every holder counts as active. */
   readonly activeAgent?: (agentId: string) => Promise<boolean>;
+  /**
+   * Card P10b (second clause): what a landing task's own credential reaches (`IntegratorWake.landingReach`). With it, a woken integrator's attempt may ask the pool on its task credential: it is answered about, and
+   * takes, only the one branch of its landing task's project (its holds elsewhere and other projects' queues are not looked at or counted). Absent: every task credential is refused, as before.
+   */
+  readonly landingReach?: LandingReachOf;
 }
 
 export type PoolAnswer =
@@ -65,7 +71,10 @@ export class IntegratorPool {
     onlyKnown(command, ["commandId", "ttlMs"]);
     const holder = holderOf(by);
     if (holder === undefined) throw new DomainError("forbidden", "only an integrator agent takes work from the pool; the owner takes a lease for a named agent with integrator.lease.acquire");
-    if (by.taskScope !== undefined) throw new DomainError("forbidden", "a task credential reaches one task's project only; ask the pool with the agent's own credential");
+    const reach = await reachOf(this.#options.landingReach, by);
+    if (by.taskScope !== undefined && reach === undefined) throw new DomainError("forbidden", "a task credential reaches one task's project only; ask the pool with the agent's own credential");
+    // What the caller is judged on: its own credential, every project it serves; a landing task's credential, its one branch (no other project's holds or queues are read into the answer).
+    const serves = (projectId: string, branch: string): boolean => (by.taskScope === undefined ? this.#serves(by, projectId) : reachServes(by, reach, projectId, branch));
     if (typeof command.commandId !== "string" || command.commandId.length === 0 || command.commandId.length > 120) throw new DomainError("invalid_command", "commandId: must be 1 to 120 characters", { field: "commandId" });
     const ttl = command.ttlMs;
     if (typeof ttl !== "number" || !Number.isInteger(ttl) || ttl < LEASE_LIMITS.ttlMinMs || ttl > LEASE_LIMITS.ttlMaxMs) throw new DomainError("invalid_command", `ttlMs: must be a whole number of milliseconds from ${LEASE_LIMITS.ttlMinMs} to ${LEASE_LIMITS.ttlMaxMs}`, { field: "ttlMs" });
@@ -73,14 +82,14 @@ export class IntegratorPool {
     // Free? A hold on a project the caller can no longer land on does not count (its landing is refused anyway, and it runs out by itself).
     const held = await this.#leases.heldBy(holder);
     if (held.partial) throw new DomainError("unavailable", "the integrator leases could not all be read, so it is not known whether you already hold one; nothing was taken");
-    const own = held.leases.filter((l) => this.#serves(by, l.projectId));
+    const own = held.leases.filter((l) => serves(l.projectId, l.branch));
     if (own.length > 0) return this.#holding(own[0]!, own.length);
 
     const { queues, partial: queuesPartial } = await this.#queue.queuesWithEntries();
     let awaitingWork = 0, heldByOthers = 0, unreadable = 0;
     const candidates: { q: LandingQueue; taskId: string; submissionId: string; since: string }[] = [];
     for (const q of queues) {
-      if (!this.#serves(by, q.projectId)) continue;
+      if (!serves(q.projectId, q.branch)) continue;
       const first = frontOf(q);
       if (first === undefined) continue;
       if (first.entry === undefined) { awaitingWork++; continue; }
