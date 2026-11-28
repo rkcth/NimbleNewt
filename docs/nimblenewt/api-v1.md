@@ -1660,7 +1660,7 @@ Result: `{ item: { items, next?, archived? } }`.
 
 #### `adoption.in-force`
 
-The adoption of a target now in force in a project, if any (what a later use consults); a withdrawn, declined or only asked one is not. A practice is named with its experiment; a tool version is one target per project, whichever experiment adopted it. Needs meeting.read or meeting.manage.
+The adoption of a target now in force in a project, if any (what a later use consults); a withdrawn, declined or only asked one is not. A practice is named with its experiment; a tool version is one target per project, whichever experiment adopted it, and is not in force while the catalog no longer offers that exact version (revoked, set aside or gone). Needs meeting.read or meeting.manage.
 
 Arguments:
 
@@ -6051,7 +6051,7 @@ Result: `{ id, replayed }`.
 
 #### `adoption.approve`
 
-Approves an asked adoption with the review in words (card B05): the owner, or a manager of the project's meetings who neither proposed the experiment nor asked. A tool also needs the reviewer's own toolbox.manage for the project, and a shared, published, unrevoked version the reviewer can read and did not register or write. Nothing is published, installed or granted.
+Approves an asked adoption with the review in words (card B05): the owner, or a manager of the project's meetings who neither proposed the experiment nor asked. A tool also needs the reviewer's own toolbox.manage for the project, and a shared, published version that is neither revoked nor set aside, that the reviewer can read and did not register or write. Nothing is published, installed or granted.
 
 Arguments:
 
@@ -6077,7 +6077,7 @@ Result: `{ revision }`.
 
 #### `adoption.withdraw`
 
-Withdraws an adoption in force with a reason (the owner, a manager of the project's meetings, or its asker): it is no longer in force, nothing is deleted or undone. Final; adopting again is a new request.
+Withdraws an adoption in force with a reason (the owner, a manager of the project's meetings, or its asker): it is no longer in force; only the adoption and its index are written, so nothing else (no task, effect or catalog record) is deleted or undone. Final; adopting again is a new request.
 
 Arguments:
 

@@ -216,12 +216,12 @@ for (const backend of backends) {
     // A catalog that cannot answer is no answer: refused, not adopted.
     await c.make().decline(c.owner, { commandId: cid("d"), adoptionId: t2, expectedRevision: await c.rev(t2), reason: "make room" });
     const t3 = await c.ask(await c.experiment(), tool(), c.reader);
-    await refuses("not_found", async () => c.make({ tools: { get: async () => { throw new DomainError("forbidden", "no"); } } }).approve(c.maint, { commandId: cid("ap"), adoptionId: t3, expectedRevision: await c.rev(t3), review: "r" }));
-    await assert.rejects(() => c.make({ tools: { get: async () => { throw new Error("disk gone"); } } }).approve(c.maint, { commandId: cid("ap"), adoptionId: t3, expectedRevision: 1, review: "r" }), /disk gone/);
+    await refuses("not_found", async () => c.make({ tools: { standingOf: (nm, v) => c.cat.standingOf(nm, v), get: async () => { throw new DomainError("forbidden", "no"); } } }).approve(c.maint, { commandId: cid("ap"), adoptionId: t3, expectedRevision: await c.rev(t3), review: "r" }));
+    await assert.rejects(() => c.make({ tools: { standingOf: (nm, v) => c.cat.standingOf(nm, v), get: async () => { throw new Error("disk gone"); } } }).approve(c.maint, { commandId: cid("ap"), adoptionId: t3, expectedRevision: 1, review: "r" }), /disk gone/);
     // A catalog answering another name or version than asked is not that version.
     const real = (await c.cat.get(c.owner, "toolbox.fetch", "1.0.0"))!;
-    await refuses("not_found", () => c.make({ tools: { get: async () => ({ ...real, version: "0.9.0" }) as never } }).approve(c.maint, { commandId: cid("ap"), adoptionId: t3, expectedRevision: 1, review: "r" }));
-    await refuses("not_found", () => c.make({ tools: { get: async () => ({ ...real, name: "toolbox.other" }) as never } }).approve(c.maint, { commandId: cid("ap"), adoptionId: t3, expectedRevision: 1, review: "r" }));
+    await refuses("not_found", () => c.make({ tools: { standingOf: (nm, v) => c.cat.standingOf(nm, v), get: async () => ({ ...real, version: "0.9.0" }) as never } }).approve(c.maint, { commandId: cid("ap"), adoptionId: t3, expectedRevision: 1, review: "r" }));
+    await refuses("not_found", () => c.make({ tools: { standingOf: (nm, v) => c.cat.standingOf(nm, v), get: async () => ({ ...real, name: "toolbox.other" }) as never } }).approve(c.maint, { commandId: cid("ap"), adoptionId: t3, expectedRevision: 1, review: "r" }));
     assert.equal((await c.body(t3)).status, "requested");
   });
 
@@ -396,7 +396,7 @@ for (const backend of backends) {
     // A reviewer who registered the version, or wrote its executable, is not independent (the owner always is).
     const real = (await c.cat.get(c.owner, "toolbox.fetch", "1.0.0"))!;
     const t = await c.ask(await c.experiment(), tool());
-    const as = (over: Record<string, unknown>) => c.make({ tools: { get: async () => ({ ...real, ...over }) as never } });
+    const as = (over: Record<string, unknown>) => c.make({ tools: { standingOf: (nm, v) => c.cat.standingOf(nm, v), get: async () => ({ ...real, ...over }) as never } });
     await refuses("forbidden", async () => as({ registeredBy: c.maint.id }).approve(c.maint, { commandId: cid("ap"), adoptionId: t, expectedRevision: await c.rev(t), review: "r" }), /not independent/);
     await refuses("forbidden", async () => as({ executable: { ...real.instructional, author: c.maint.id } }).approve(c.maint, { commandId: cid("ap"), adoptionId: t, expectedRevision: await c.rev(t), review: "r" }), /not independent/);
     assert.equal((await c.body(t)).status, "requested");

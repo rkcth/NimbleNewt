@@ -754,7 +754,7 @@ export interface StatusDeps {
   /** Bounded baseline experiments of the project (card B04). Absent: the view is not offered. */
   readonly experiments?: Pick<ExperimentService, "list">;
   /** Adoptions of improved experiments and their monitoring (card B05), shown in the experiments view. Absent: no adoption lines. */
-  readonly adoptions?: Pick<AdoptionService, "list">;
+  readonly adoptions?: Pick<AdoptionService, "list" | "standing">;
   /** What retention holds back and why, and its values (card T02c). Absent: the views are not offered. */
   readonly retention?: {
     check(by: Principal, ref: { kind: string; id: string }): Promise<{ readonly retained: boolean; readonly reasons: readonly string[] }>;
@@ -1457,7 +1457,11 @@ export class StatusService {
       out.push(line(`${adopted.items.length}${adopted.next === undefined ? "" : " (and more)"} adoption(s) of improved experiments, oldest first; one is in force only after an independent review, and a monitoring report worse than the pinned baseline withdraws it.`, cite("adoption-index", projectId)));
       for (const d of adopted.items) {
         const what = d.target.kind === "practice" ? "the practice it tried" : `tool ${shown(d.target.name, 120)} ${shown(d.target.version, 60)}`;
-        const state = d.status === "requested" ? `asked by ${shown(d.requestedBy, 80)}, waiting for an independent review` : d.status === "active" ? `in force, approved by ${shown(d.approvedBy ?? "", 80)} (grant: ${(d.grantBasis ?? []).map((g) => shown(g, 40)).join(", ")})` : d.status === "declined" ? "declined" : d.withdrawnWhy === "regression" ? "withdrawn: monitoring showed a regression, so it is no longer used" : `withdrawn by ${shown(d.withdrawnBy ?? "", 80)}, no longer used`;
+        // An approved tool adoption whose exact version the catalog no longer offers is not in force (the standing slice): said so, with why, instead of "in force".
+        const standing = d.status === "active" && d.target.kind === "tool" ? await this.#deps.adoptions!.standing(by, d.id) : "live";
+        const approved = `approved by ${shown(d.approvedBy ?? "", 80)} (grant: ${(d.grantBasis ?? []).map((g) => shown(g, 40)).join(", ")})`;
+        const notUsed = standing === "revoked" ? "the version was revoked" : standing === "set-aside" ? "the version was set aside in the catalog" : standing === "unavailable" ? "the catalog cannot be consulted here" : "the catalog no longer offers that exact version";
+        const state = d.status === "requested" ? `asked by ${shown(d.requestedBy, 80)}, waiting for an independent review` : d.status === "active" ? (standing === "live" ? `in force, ${approved}` : `${approved}, but not in force now: ${notUsed}, so it is not used`) : d.status === "declined" ? "declined" : d.withdrawnWhy === "regression" ? "withdrawn: monitoring showed a regression, so it is no longer used" : `withdrawn by ${shown(d.withdrawnBy ?? "", 80)}, no longer used`;
         const last = d.reports.at(-1);
         const report = last === undefined ? " No monitoring report yet." : ` ${d.reportCount} monitoring report(s); the last (${last.at}): ${Object.entries(last.betterPct).sort(([x], [y]) => (x < y ? -1 : 1)).map(([m, v]) => `${shown(m, 30)} ${Math.abs(v as number)}% ${(v as number) < 0 ? "worse" : "better"}`).join(", ") || "no metric"} than the baseline${last.regressed.length > 0 ? `; regressed: ${last.regressed.map((m) => shown(m, 30)).join(", ")}` : ""}.`;
         out.push(line(`Adoption of ${what} from experiment ${d.experimentId}: ${state}.${report} [${d.id}, revision ${d.revision}]`, cite("adoption", d.id, d.revision), cite("experiment", d.experimentId)));
