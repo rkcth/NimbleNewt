@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **320 of 367 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **321 of 367 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -109,7 +109,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Foundation: storage, configuration and builds | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 19 of 19 |
 | Pi runtime and inference caching | `▓▓▓▓▓▓▓▓▓▓░░` 88% | 22 of 25 |
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
-| Pause, suspend and resume | `▓▓▓▓▓▓▓▓▓▓▓░` 96% | 29 of 30 |
+| Pause, suspend and resume | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 30 of 30 |
 | Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓▓░░` 86% | 19 of 22 |
 | Context and memory | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 33 of 33 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 3 of 3 |
@@ -222,7 +222,7 @@ Project and task records, assignments, durable delivery, the effect ledger and a
 </details>
 
 <details>
-<summary><strong>Pause, suspend and resume</strong> — ▓▓▓▓▓▓▓▓▓▓▓░ 29 of 30</summary>
+<summary><strong>Pause, suspend and resume</strong> — ▓▓▓▓▓▓▓▓▓▓▓▓ 30 of 30</summary>
 
 Pause, suspend, stop, release and checked resume, interrupting a model mid-generation, the remote watchdog, and shutdown and reboot handling.
 
@@ -255,7 +255,7 @@ Pause, suspend, stop, release and checked resume, interrupting a model mid-gener
 - [x] **L03g** · P38 · Finish hand-off: locks, drafts, responsibilities in the package _(needs L03f)_
 - [x] **L03h** · P39 · Hand-off locks source from open workspace operations and held resource claims _(needs L03g)_
 - [x] **L03i** · P40 · Finish hand-off: offering to reassign responsibilities with the hand-off package _(needs L03h)_
-- [ ] **L03j** · P41 · Hand-off lock sources for the integrator lease and workspace holds _(needs L03i, P10, H12m)_
+- [x] **L03j** · P41 · Hand-off lock sources for the integrator lease and workspace holds _(needs L03i, P10, H12m)_
 
 </details>
 
