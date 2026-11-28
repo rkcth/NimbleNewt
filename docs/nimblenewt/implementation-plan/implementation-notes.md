@@ -21990,3 +21990,12 @@ Deliberate breakages of my own: 22 (`/tmp/claude-1000/b05r-r2/breakages.py`), ne
 Runs (Linux, `/tmp/nn-slot.sh`, `NIMBLENEWT_REQUIRE_SANDBOX=1`, offline guard, TMPDIR `/tmp/claude-1000/b05r-r2/`): `tsc --build --force`; `api:docs:write` (no diff); `check:deps`, `licenses:check` and `roadmap:check` pass; `plan.test` 6 of 6. Node 22 and Node 24.21.0: 395 of 395 each for `adoptions/*`, `experiments/*`, `chat/experiments-chat`, `api/start-adoptions`, `api/start-experiments`, `status/status`, `chat/prompt-room`, `scripts/d02-docs.test.mjs` and `scripts/plan.test.mjs`.
 
 Cards B04 and B05 not flipped.
+
+## CI fix: two typical-tier failures on main after K05 third slice (tests only)
+
+The typical tier (`.github/workflows/ci.yml`, five parts via `scripts/test-changed.mjs --shard=i/5`, which runs `scripts/run-package-tests.mjs` with `NIMBLENEWT_TIER=typical NIMBLENEWT_FAST=1`) failed on Linux Node 22 in two controller test files. Both reproduce locally only with that environment set; neither is a product regression.
+
+- `api/start-dispatch.test` ("the tick runs the reconciler and stall detection ..."): the test lists the tick's loops whose names start with `recovery.` and expected exactly reconcile, stall-scan and auto-step. K05 third slice (`6b2039c0`) added the sweep `recovery.workers-hold` to every tick in `api/start.ts` (it reviews the workers hold; with no promotion there is no hold and it reports ok, and it needs no grant). The new entry is intended. The expected lists now include `["recovery.workers-hold", true]`, with a comment. The test's intent is kept: every recovery loop passes without the stall-scan right, the owner is told once, and the narrow right is not the broad one. It fails on every tier, not only the typical one; the merge checks of K05 did not run this file.
+- `recovery/recovery.test` ("the same writes give the same manifest on ... PostgreSQL"): it collects one manifest digest per backend from the preceding per-backend tests and asserted exactly 4. `domain/testing/backends.ts` gives only the reference store and SQLite when `NIMBLENEWT_TIER=typical`, so the typical tier has 2. This dates from K04 (`343b86d1`), not from K05. The test now expects `backends.length` digests (4 on the exhaustive tier, 2 on the typical tier), requires at least 2, and still requires all of them to be equal. A backend whose test failed pushes no digest, so the count still catches it.
+
+No product code changed. Runs are listed in the commit message.
