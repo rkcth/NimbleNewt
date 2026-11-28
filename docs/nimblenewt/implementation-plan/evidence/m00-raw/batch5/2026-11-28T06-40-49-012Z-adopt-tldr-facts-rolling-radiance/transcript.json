@@ -1,0 +1,460 @@
+[
+ {
+  "seq": 1,
+  "who": "Chair",
+  "kind": "motion",
+  "text": "Motion (version 1): The team adopts Lintwise, an automated code-quality checker, as a required pre-merge check on every repository.",
+  "label": "opening"
+ },
+ {
+  "seq": 2,
+  "who": "Priya",
+  "kind": "statement",
+  "text": "I used Lintwise for six months on my previous team. It caught real bugs—null dereferences, race conditions in async handlers—that would've shipped to production otherwise. That's genuine value. But I'll be honest: it added about 4 minutes to our CI pipeline. On this team, where builds already average 11 minutes, that pushes us to roughly 15 minutes per merge check. For twenty people on one monorepo, that's a noticeable tax on iteration speed. I'm for adopting it, but I'd want us to configure it to run only on changed files rather than the full repo, and we should set a hard timeout so a misconfigured rule doesn't block everyone. The bug-catching benefit justifies the cost if we keep the overhead manageable.",
+  "tldr": "Lintwise's real bug-catching value outweighs the ~4-minute CI hit, but only if we scope it to changed files and enforce a timeout so a bad rule doesn't stall twenty engineers on an 11-minute build.",
+  "stance": "for",
+  "label": "round 1",
+  "agent": "a1"
+ },
+ {
+  "seq": 3,
+  "who": "Marcus",
+  "kind": "statement",
+  "text": "I'm for this, but I need to own the integration details. Priya's 4-minute estimate concerns me at the queue level, not just per-build. With twenty people pushing to one monorepo, every additional minute multiplies across concurrent checks. If Lintwise runs on the full repo, I'll see queue stalls during peak hours—people waiting 20-25 minutes just to see a green check. I'll adopt it, but on my terms: incremental scanning on changed files only, results cached per commit, and a hard 3-minute timeout that fails open rather than blocking the pipeline. I also need a kill-switch in the CI config so I can disable it without a team vote if it's degrading throughput during a release crunch. The bug-catching value is real. I just need to guarantee the queue doesn't become the bottleneck.",
+  "tldr": "I support Lintwise but require incremental-only scanning, per-commit caching, a 3-minute fail-open timeout, and a CI-level kill-switch I can toggle without a team vote. My concern is queue throughput across twenty concurrent checks on one monorepo, not the tool's quality value.",
+  "stance": "for",
+  "label": "round 1",
+  "agent": "a2"
+ },
+ {
+  "seq": 4,
+  "who": "Elena",
+  "kind": "statement",
+  "text": "I support this, but Lintwise must catch secrets and dependency risks before I'll call it a required gate. As a static checker, it's the natural place to block hardcoded API keys, tokens, and private keys before they land in our monorepo history—once committed, rotation is a multi-day incident. I also want dependency-pattern flags: known-vulnerable package versions, unsafe deserialization, eval on user input. Marcus's fail-open timeout worries me. If Lintwise times out on a file with a leaked credential, fail-open means that secret merges. I need secrets checks to fail closed—block the merge, alert me—while style checks can fail open. Scope to changed files as proposed, but give secret and dependency-pattern scanning its own non-timeout-limited pass on the diff.",
+  "tldr": "Support the gate, but secrets and dependency checks must fail closed and get their own timeout-exempt pass so a leaked key can't slip through Marcus's fail-open rule.",
+  "stance": "for",
+  "label": "round 1",
+  "agent": "a3"
+ },
+ {
+  "seq": 5,
+  "who": "Tom",
+  "kind": "statement",
+  "text": "I tried Lintwise on a small side project—maybe two thousand lines of React—and it caught a couple of real issues: a missing dependency in a useEffect and an unused variable that would've been a subtle bug. So I'm for this. But my side project had zero other engineers touching the same files. In a twenty-person monorepo, I worry about false positives on frontend patterns—JSX fragments, conditional rendering, the way we handle refs. I'd want a two-week tuning window where Lintwise runs as a warning, not a blocker, so we can suppress rules that fight our React conventions before it gates merges. Priya's changed-files scoping is essential; I don't want a legacy file I didn't touch failing my PR. Marcus's kill-switch I support. Elena's fail-closed for secrets makes sense to me too—I've seen hardcoded keys sneak into staging configs.",
+  "tldr": "Support Lintwise based on positive side-project experience catching real React bugs, but insist on a two-week warning-only tuning period to suppress false positives on JSX and ref patterns, changed-files-only scanning so untouched legacy code doesn't block my PRs, Marcus's kill-switch, and Elena's fail-closed secrets pass.",
+  "stance": "for",
+  "label": "round 1",
+  "agent": "a4"
+ },
+ {
+  "seq": 6,
+  "who": "Sana",
+  "kind": "statement",
+  "text": "I haven't run Lintwise, so I can't vouch for its rules on Python ETL scripts or raw SQL. My pipelines are mostly dbt models and Python orchestration—CTEs, window functions, dynamic query construction—patterns frontend-focused linters often misfire on. Tom's two-week warning window is exactly what I need before this becomes a hard gate. I also need confirmation Lintwise's SQL parsing handles our dialect; a false-positive on a window function or misread CTE would block a 2 AM deploy. Priya's changed-files scoping is critical—my SQL files run hundreds of lines and I won't have a style nit in an untouched file block my merge. Marcus's kill-switch is non-negotiable for me. I'm not against Lintwise; I just need evidence it won't mangle pipeline code before I accept it as a blocker.",
+  "tldr": "No hands-on Lintwise experience with SQL/dbt. Supportive in principle but need a warning-only trial period, verified SQL-dialect handling, changed-files-only scanning, and a kill-switch before it gates my pipeline merges.",
+  "stance": "undecided",
+  "label": "round 1",
+  "agent": "a5"
+ },
+ {
+  "seq": 7,
+  "who": "Lars",
+  "kind": "statement",
+  "text": "I've read Lintwise's docs. Its static-analysis rules complement our test suite—they catch type mismatches, dead branches, and unused imports that unit tests won't flag. That's real signal. But I've seen what happens when a gate produces noise: engineers add blanket disables, and the gate becomes theater. My condition: we set a false-positive budget. If Lintwise flags more than 5% of changed lines as warnings a human would dismiss, we pause that rule category, not the whole tool. I support Tom's two-week warning window and Sana's dialect-verification step before the gate goes hard. I also want Lintwise's output integrated into our existing test-report dashboard so QA sees lint findings alongside test results in one place—no separate tool sprawl. Marcus's kill-switch and Elena's fail-closed secrets pass are non-negotiable for me too.",
+  "tldr": "Support the gate for its complementary signal to tests, but insist on a 5% false-positive budget per rule category, a two-week warning period, SQL/Python dialect verification, dashboard integration with existing test reports, Marcus's kill-switch, and Elena's fail-closed secrets pass. Noise kills trust in any gate; we must protect signal.",
+  "stance": "for",
+  "label": "round 1",
+  "agent": "a6"
+ },
+ {
+  "seq": 8,
+  "who": "Jin",
+  "kind": "statement",
+  "text": "I support the gate. As merge-policy owner, I'll write the policy, but I need operational clarity, not a wish list. I'll adopt: changed-files-only scanning, 3-minute timeout with fail-open for lint rules, fail-closed for secrets and dependency checks per Elena, Marcus's kill-switch under my authority, and Tom and Sana's two-week warning period. Lars's 5% false-positive budget becomes a rule-category pause trigger I monitor weekly. The dashboard integration is a nice-to-have, not a gate prerequisite—I'll file it as a backlog item. What I need before I flip the gate hard: one named engineer per language vertical signs off that their patterns are clean after the warning window. Without that sign-off, the gate stays warning-only. I own the policy; I need one accountable person per domain to own the exceptions.",
+  "tldr": "Jin supports the gate and will own the merge policy. Adopts all prior conditions (incremental scan, timeouts, kill-switch, fail-closed secrets, warning period, false-positive budget) but demotes dashboard integration to backlog. Requires one named engineer per language vertical to sign off after the warning window before the gate goes hard; without sign-off it stays warning-only.",
+  "stance": "for",
+  "label": "round 1",
+  "agent": "a7"
+ },
+ {
+  "seq": 9,
+  "who": "Olga",
+  "kind": "statement",
+  "text": "I'm newer here and still learning our conventions, so an automated style guide feels genuinely helpful rather than threatening. But I haven't used Lintwise, so I can't speak to its output quality. My ask is small: make the warnings educational. When Lintwise flags something in my PR, I want a clear message explaining *why* a pattern is discouraged, not just a red X. Otherwise I'll spend hours guessing instead of learning. I also want Tom and Sana's two-week warning period to apply fully to me—please don't let a false positive on a JSX or SQL pattern block my first few merges while I'm still finding my footing. I trust Jin's policy structure. I just need the tool to feel like a patient senior reviewer, not a gatekeeper that punishes me for not knowing tribal knowledge yet.",
+  "stance": "for",
+  "label": "round 1",
+  "agent": "a8"
+ },
+ {
+  "seq": 10,
+  "who": "Ravi",
+  "kind": "statement",
+  "text": "Six months of daily Lintwise use on my old team: it caught real backend bugs—null dereferences, resource leaks, SQL injection patterns—that tests missed. The 4-minute CI hit is real but fine on an 11-minute build with changed-files-only scanning. Practical warning: false-positive rates on Python decorators and SQL CTEs are genuinely painful for two weeks. Sana and Lars's warning period isn't optional; it's how you build trust in the gate. I back Jin's per-vertical sign-off. One addition: let the backend vertical choose which rules we enable first. Blanket-enabling everything on day one buried my old team in noise.",
+  "tldr": "Ravi supports the gate based on six months of real use. Key asks: changed-files scanning, two-week warning period, and letting each language vertical choose its initial rule set rather than enabling all rules at once.",
+  "stance": "for",
+  "label": "round 1",
+  "agent": "b1"
+ },
+ {
+  "seq": 11,
+  "who": "Mei",
+  "kind": "statement",
+  "text": "As the person who keeps this pipeline from melting, I support Lintwise—but only with non-negotiable operational guardrails. Marcus's three-minute fail-open timeout is my hard ceiling; a misconfigured rule adding four minutes across twenty concurrent checks wastes eighty minutes of CI capacity per merge cycle. Changed-files-only scanning is mandatory—I've seen monorepo-wide scans blow past eleven minutes alone. The kill-switch must be a one-command toggle I can flip at two a.m. without a policy vote. I want a queue-depth alert: if linting pushes median build time above fourteen minutes, the gate auto-demotes to warning-only. Elena's fail-closed secrets pass is fine—it's a single targeted scan. I'll own timeout tuning and the kill-switch runbook.",
+  "tldr": "Support the gate with a hard three-minute timeout, changed-files-only scanning, a one-command kill-switch, and an auto-demote trigger at fourteen-minute median build time. I own the operational side.",
+  "stance": "for",
+  "label": "round 1",
+  "agent": "b2"
+ },
+ {
+  "seq": 12,
+  "who": "Noah",
+  "kind": "statement",
+  "text": "I support the gate, but my trust is conditional on security scope. Elena's fail-closed secrets pass is non-negotiable and must be separate from Marcus's three-minute fail-open timeout—secrets and dependency vulnerabilities cannot be \"best-effort.\" If Lintwise's rule set doesn't include dependency-manifest scanning (lockfile drift, known CVEs in pinned versions), then this tool is a style linter wearing a security hat, and I need a separate dependency-audit step regardless. I also require that the two-week warning period does NOT apply to the secrets/dependency pass; those rules go hard on day one. My concern: if the tool only catches JSX and SQL patterns, it solves the wrong problem for my risk profile. I'll sign off once I can verify the secrets scanner catches at least our last three leaked-key incidents in staging.",
+  "stance": "for",
+  "label": "round 1",
+  "agent": "b3"
+ },
+ {
+  "seq": 13,
+  "who": "Zoe",
+  "kind": "statement",
+  "text": "I used Lintwise on a side-project React app and it caught three real bugs—a stale closure in a useEffect, a missing key on a mapped list, and a type mismatch in a prop chain. Those are exactly the mistakes I make under deadline pressure in this monorepo. I support the gate. My practical ask mirrors Tom's: the two-week warning period must cover JSX and hook patterns specifically, because Lintwise's default rules flagged valid patterns in my side project and I'd have wasted hours suppressing them. Changed-files-only scanning is essential—my PRs touch two or three files in a 40k-file repo; scanning everything is waste. I also back Olga's educational-message requirement. When Lintwise told me \"no anonymous function in render,\" I didn't know why until I Googled it. A one-line \"this breaks memoization\" would've saved me twenty minutes. I'll help tune the JS rule set during the warning window.",
+  "tldr": "Hands-on Lintwise use on a React side project showed real bug-catching value, so I'm for the gate. Key conditions: two-week warning period must explicitly cover JSX/hook false positives, changed-files-only scanning (not full-repo), and educational warning messages explaining *why* a rule fires. I'll volunteer to tune the JS rule set during the warning window.",
+  "stance": "for",
+  "label": "round 1",
+  "agent": "b4"
+ },
+ {
+  "seq": 14,
+  "who": "Omar",
+  "kind": "statement",
+  "text": "I support the gate in principle. Lintwise could catch the kind of silent bugs that slip through my Python and SQL pipelines—unused imports, implicit type casts, missing null-guards in joins. But I've never used it, so I'm trusting Sana and Lars's warnings. My specific asks: the two-week warning period must fully cover SQL and Python pipeline code, not just JSX. Lintwise must handle our SQL dialects (Postgres, BigQuery) before any rule goes hard on my dbt models. Changed-files-only scanning is non-negotiable; my PRs touch one or two pipeline files in a 40k-file repo. I back Jin's per-vertical sign-off and Marcus's kill-switch. I also echo Olga's ask: when a rule fires on my SQL, tell me *why*—I'm still learning tribal conventions.",
+  "stance": "for",
+  "label": "round 1",
+  "agent": "b5"
+ },
+ {
+  "seq": 15,
+  "who": "Hana",
+  "kind": "statement",
+  "text": "I support the gate. Lintwise catches static patterns our tests miss—dead branches, unreachable assertions, shadowed variables in test setup. But test directories need a narrower rule set than production code. Fixtures intentionally carry unused imports for type clarity; error-path tests use broad exception catches by design; snapshot helpers look like dead code. If those fire red, I'll start ignoring Lintwise output entirely, and we lose the one static signal that complements test runs. I require: (1) test-file rules limited to unreachable-code and shadowed-variable checks during the warning window, (2) the two-week period explicitly covers test directories, (3) educational messages explaining *why* a pattern is flagged in test context, echoing Olga and Omar. I back Marcus's kill-switch, Elena's fail-closed secrets pass, and Jin's per-vertical sign-off. Noise in test files corrodes the signal we trust most.",
+  "tldr": "Hana supports Lintwise as a complementary static check but demands a narrower rule set for test directories (unreachable-code and shadowed-variable only during the warning window), explicit test-dir coverage in the two-week period, and educational messages. Backs kill-switch, fail-closed secrets, and per-vertical sign-off. Core concern: lint noise in test files destroys the one signal we trust most.",
+  "stance": "for",
+  "label": "round 1",
+  "agent": "b6"
+ },
+ {
+  "seq": 16,
+  "who": "Ben",
+  "kind": "statement",
+  "text": "I'm for this. One gate, one policy—no per-vertical rule sets that fragment consistency. I'll adopt Jin's structure as the merge-policy baseline but tighten two things: first, the warning window is exactly two weeks, no extensions, and at day fourteen we vote hard-or-soft per vertical with a simple majority; no indefinite \"still tuning\" drift. Second, I'm consolidating the timeout story: 3-minute fail-open for lint rules, 2-minute fail-open for dependency checks, secrets fail-closed with no timeout. That's three tiers, not five. The kill-switch stays with Marcus as a single ops toggle—no committee needed. Educational messages are a day-one requirement, not a nice-to-have; Olga and Omar are right that a red X without a \"why\" teaches nothing. Changed-files-only scanning is non-negotiable. I'll draft the policy doc by Friday for one review cycle before the warning window opens.",
+  "tldr": "For the gate with consolidated three-tier timeouts (lint fail-open, dependency fail-open, secrets fail-closed), a strict two-week warning ending in a day-fourteen hard/soft vote per vertical, changed-files-only scanning, mandatory educational messages, and a single ops kill-switch. One policy, not twenty.",
+  "stance": "for",
+  "label": "round 1",
+  "agent": "b7"
+ },
+ {
+  "seq": 17,
+  "who": "Ida",
+  "kind": "statement",
+  "text": "I'm for this. As an intern, I've spent my first weeks reading PR comments to learn our conventions, and a consistent automated check would help me learn faster than waiting for a reviewer's turn. I haven't used Lintwise, so I trust the team's conditions—especially the two-week warning period, changed-files-only scanning, and educational messages explaining *why* a rule fires. My one ask: during the warning window, could the output include a link to our internal style guide or a short example of the preferred pattern? A red X tells me I'm wrong; a \"here's how we do it\" tells me how to grow. I'll defer to Jin's policy structure and won't block the vote. I just need the tool to be a teacher, not a wall.",
+  "tldr": "Supportive intern; wants warning period to fully apply, changed-files-only scanning, and—beyond a bare \"why\"—a link or example showing the preferred pattern so the gate doubles as onboarding. Trusts Jin's structure; won't block.",
+  "stance": "for",
+  "label": "round 1",
+  "agent": "b8"
+ },
+ {
+  "seq": 18,
+  "who": "Kofi",
+  "kind": "statement",
+  "text": "I own the runners, so I'll speak in numbers. Eleven-minute builds across twenty concurrent PRs already queue at peak. Adding four minutes per check pushes median past fifteen, which is Mei's auto-demote threshold—meaning we'd trigger our own circuit breaker within a sprint. I support the gate, but only if incremental scanning and per-commit caching are verified in staging before day one, not assumed. I need a hard two-minute lint timeout, not three; three minutes on a cold cache with twenty queued jobs starves the pool. I back Marcus's kill-switch and Ben's single ops toggle. I also want the lint step to run on a separate runner pool so a stuck Lintwise job doesn't block test execution. If we can't keep median build under fourteen minutes after two weeks, I pull the gate to warning-only without debate.",
+  "tldr": "Support the gate conditionally: verified incremental caching, two-minute timeout, separate runner pool, and auto-revert to warning if median build exceeds fourteen minutes.",
+  "stance": "for",
+  "label": "round 1",
+  "agent": "b9"
+ },
+ {
+  "seq": 19,
+  "who": "Lena",
+  "kind": "statement",
+  "text": "I've run Lintwise on a React Native side project for three months—it caught a stale-closure bug and two missing dependency-array entries our tests missed. The signal is real. But mobile JS is pattern-heavy: custom hooks, render-props, conditional JSX. I need the two-week warning window to explicitly cover hook-rule and JSX false positives, changed-files-only scanning, and educational messages with a code example—Olga and Ida are right, a bare red X wastes my afternoon. I back Elena's fail-closed secrets, Marcus's kill-switch, and Kofi's separate runner pool. My timeout ask is three minutes, not two; a cold cache on a render-heavy component legitimately needs that extra minute.",
+  "tldr": "Hands-on use confirms real value in React Native. Support the gate with changed-files scanning, warning window covering hook/JSX patterns, educational messages with fix examples, fail-closed secrets, kill-switch, and three-minute lint timeout on a separate runner pool.",
+  "stance": "for",
+  "label": "round 1",
+  "agent": "b10"
+ },
+ {
+  "seq": 20,
+  "who": "Theo",
+  "kind": "statement",
+  "text": "I'll gate Lintwise, but nineteen conditions isn't a policy—it's a wish list. As release manager I need one enforceable rule, not twenty exceptions. Here's my synthesis: changed-files-only scanning, three-minute fail-open timeout for lint, fail-closed secrets pass exempt from timeout, two-week warning period ending in a day-fourteen hard/soft vote per vertical per Jin, Marcus's kill-switch with a post-incident review, and Mei's auto-demote at fourteen-minute median build. Educational messages are mandatory—Olga and Ida are right that a red X without context wastes engineer hours. The warning period applies to all verticals including SQL and Python, not just JSX. I own the merge policy, so I'll write the single YAML that encodes this. No per-person exceptions. If a vertical's rule set exceeds Lars's five-percent false-positive budget after the warning window, that vertical stays warning-only until fixed. Consistency beats perfection.",
+  "tldr": "Theo endorses Lintwise as a gate but consolidates the nineteen individual asks into one enforceable policy: changed-files scanning, tiered timeouts (fail-open lint, fail-closed secrets), a universal two-week warning period covering all verticals, per-vertical day-fourteen vote, kill-switch with post-incident review, auto-demote at fourteen-minute median build, mandatory educational messages, and a five-percent false-positive budget per vertical. He will author the single merge-policy YAML himself and rejects per-person exceptions.",
+  "stance": "for",
+  "label": "round 1",
+  "agent": "b11"
+ },
+ {
+  "seq": 21,
+  "who": "Vera",
+  "kind": "statement",
+  "text": "I ran Lintwise six months on my last team. It caught real bugs—null dereferences, forgotten async awaits, a SQL injection pattern tests missed. The value is genuine. But I lived the 4-minute CI tax. On an 11-minute build that's a 36% slowdown across twenty engineers on one monorepo. I back Theo's consolidated policy: changed-files-only scanning, three-minute fail-open lint timeout, fail-closed secrets, kill-switch, two-week warning period, educational messages. My addition: during the warning window, track per-rule hit rates weekly. If a rule fires but nobody fixes it, it's noise—kill it before day fourteen. Don't let a rule survive because it \"might be useful someday.\" Trust data, not rule count.",
+  "tldr": "Six months hands-on: real bugs caught, 4-minute CI tax is real. Back Theo's policy. Add weekly per-rule hit-rate review; kill unacted-on rules before day fourteen.",
+  "stance": "for",
+  "label": "round 1",
+  "agent": "b12"
+ },
+ {
+  "seq": 22,
+  "who": "Chair",
+  "kind": "chair-question",
+  "text": "To Priya: Whether the ~4-minute CI overhead observed over 6 months was from full-repo scans or changed-files-only scans, and approximate false-positive rate (Priya ran Lintwise for 6 months and reported null derefs and async races caught with +≈4 min CI cost. The group needs to know if that 4 min was full-repo or incremental, because Kofi, Marcus, and Mei's queue and timeout calculations assume different scan scopes.)",
+  "label": "fact-finding question"
+ },
+ {
+  "seq": 23,
+  "who": "Priya",
+  "kind": "answer",
+  "text": "The 4-minute figure was our default full-repo scan. Enabling Lintwise's result cache dropped it to roughly 1 minute per PR. I don't have a precise false-positive rate logged, but the three null-handling bugs in month one were all true positives—no false alarms surfaced in my notes. For this team's 11-minute build, expect ~1 minute with caching, not 4.",
+  "tldr": "The 4 min was full-repo; caching brings it to ~1 min. No false-positive rate recorded, but month-one catches were all true positives. Kofi, Marcus, Mei: plan around the 1-min cached figure, not 4.",
+  "stance": "for",
+  "label": "answer to chair",
+  "agent": "a1"
+ },
+ {
+  "seq": 24,
+  "who": "Chair",
+  "kind": "chair-question",
+  "text": "To Ravi: Rough false-positive rate on decorators and CTEs, and whether FPs were concentrated in a few rules or spread across many (Ravi used Lintwise daily for 6 months and called decorator/CTE false positives 'genuinely painful' but did not quantify the rate. Lars's 5% FP budget and Theo's 5% pause trigger need a concrete baseline, and Vera's weekly per-rule hit-rate plan depends on whether FPs come from a small set of rules that can be individually tuned.)",
+  "label": "fact-finding question"
+ },
+ {
+  "seq": 25,
+  "who": "Ravi",
+  "kind": "answer",
+  "text": "I didn't log a precise FP rate. Qualitatively, decorator and CTE false positives concentrated in two or three rules, not spread across many. They were \"genuinely painful\" because they fired repeatedly on the same patterns. That concentration supports Vera's per-rule tuning approach. I'd back per-rule disables during the warning window over a blanket budget.",
+  "stance": "for",
+  "label": "answer to chair",
+  "agent": "b1"
+ },
+ {
+  "seq": 26,
+  "who": "Chair",
+  "kind": "chair-reminder",
+  "text": "Reminder from Ben's full statement: \"the warning window is exactly two weeks, no extensions, and at day fourteen we vote hard-or-soft per vertical with a simple majority; no indefinite 'still tuning' drift.\"",
+  "label": "chair reminder"
+ },
+ {
+  "seq": 27,
+  "who": "Chair",
+  "kind": "chair-reminder",
+  "text": "Reminder from Hana's full statement: \"Fixtures intentionally carry unused imports for type clarity; error-path tests use broad exception catches by design; snapshot helpers look like dead code.\"",
+  "label": "chair reminder"
+ },
+ {
+  "seq": 28,
+  "who": "Priya",
+  "kind": "statement",
+  "text": "Confirming my earlier position. The cached one-minute scan means Marcus's three-minute timeout and Kofi's two-minute ask are generous headroom—queue pressure is minimal. On Hana's point: on my previous team, Lintwise flagged snapshot helpers and intentional broad catches as dead code or unreachable paths. We disabled those two rules permanently rather than tolerate recurring noise. That supports Ravi's per-rule disable approach over a blanket five-percent budget. I back Theo's single YAML and Ben's hard two-week cutoff. One correction to Noah: my six months produced zero false positives, but that's a tiny sample on null-handling rules; I can't confirm Lintwise catches dependency-manifest drift or CVEs. That's a separate tool. Secrets fail-closed day one—agreed—but don't expect Lintwise to be the dependency auditor.",
+  "tldr": "Cached scan is ~1 min, so timeout worries are overblown. Two rules (snapshot helpers, broad catches) should be permanently disabled per Hana's test-fixture concern, echoing Ravi's per-rule tuning. Back Theo's single policy and Ben's strict two-week vote. Caveat: my zero-FP sample is too small to validate Noah's security-scope expectations; Lintwise likely isn't a dependency auditor.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "a1"
+ },
+ {
+  "seq": 29,
+  "who": "Marcus",
+  "kind": "statement",
+  "text": "Priya's correction changes my math. One minute cached, not four. My peak queue is 6 minutes wait plus 11-minute builds; adding 1 minute of lint is negligible. Kofi's two-minute and my three-minute timeouts both have enormous headroom—I'll accept Ben's consolidated three-tier timeout structure. The kill-switch stays non-negotiable: I need to toggle it without a team vote when a bad rule floods the queue at 2 a.m. I back Theo authoring the single YAML; I'll review it for runner-pool allocation and auto-demote thresholds before merge. One correction to my round-1 ask: I no longer need a separate runner pool for lint if the scan is truly one minute cached. I'll confirm on a staging branch before day fourteen.",
+  "tldr": "Priya's 1-minute cached figure collapses my queue-throughput concern. I accept the consolidated timeout structure and drop my separate-runner-pool ask. Kill-switch and auto-demote at 14-minute median build remain non-negotiable. I'll validate on staging before the day-fourteen vote.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "a2"
+ },
+ {
+  "seq": 30,
+  "who": "Elena",
+  "kind": "statement",
+  "text": "Priya's correction to ~1 minute cached removes the CI-cost objection to my fail-closed secrets pass—there's no excuse to timeout-exempt it. Theo and Ben's tiered structure (lint fail-open, secrets fail-closed) matches my round-one ask exactly. My desk notes confirm it: last quarter a hard-coded test key reached main and required rotation; Lintwise's secret-detection ruleset would have flagged that commit. That validates Noah's day-one-hard requirement for secrets. However, Priya's caveat that Lintwise \"likely isn't a dependency auditor\" is the gap I care about most. If it can't scan lockfiles for CVE drift, Noah and I need a separate dependency-audit step regardless of this gate. I'll verify the secrets ruleset against our three staging incidents before day fourteen and sign off once it passes.",
+  "tldr": "Priya's ~1-min cached scan removes CI objections to fail-closed secrets. My notes confirm Lintwise's secret ruleset would have caught last quarter's leaked key, validating Noah's day-one-hard ask. Critical unresolved gap: if Lintwise isn't a dependency auditor, a separate CVE/lockfile scan is needed. I'll verify against three staging incidents before day fourteen.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "a3"
+ },
+ {
+  "seq": 31,
+  "who": "Tom",
+  "kind": "statement",
+  "text": "Priya's one-minute cached figure removes my CI-cost worry entirely. But I need to flag my own data: on my side project, Lintwise's default JS rules produced roughly thirty percent noise—mostly JSX and ref-pattern false positives. I never tuned them. That number is my worst-case baseline, not what we'll see after tuning. Ravi's point that FPs concentrate in two or three rules matches my experience; the noise wasn't spread across everything. I back Vera's weekly per-rule hit-rate review and per-rule disables during the warning window over Theo's blanket five-percent budget. I'll take Zoe's offer seriously and co-tune the JS rule set this fortnight, explicitly addressing Hana's fixture patterns—unused imports for type clarity, broad catches in error-path tests, snapshot helpers. Those three rule categories should be permanently off in test directories, not just paused. Theo's single YAML, Ben's hard day-fourteen vote, Elena's fail-closed secrets: all good. I'm in.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "a4"
+ },
+ {
+  "seq": 32,
+  "who": "Sana",
+  "kind": "statement",
+  "text": "Priya's one-minute cached figure removes my CI objection. But that number came from a React project—my dbt models and Postgres/BigQuery SQL are untested territory. Tom's thirty-percent untuned noise on JS makes me genuinely nervous about what default rules do to my pipelines. I still can't verify SQL-dialect handling myself. However, my notes are concrete: two outages last year traced to config-key typos in pipeline YAML. A static check catching that class of bug is exactly why I want this gate. I back Ravi's per-rule disable approach over a blanket budget—my SQL false positives will likely concentrate in two or three rules, same pattern. I need the full two-week warning window for SQL and Python, dialect verification before day fourteen, and changed-files-only scanning. I'll test Lintwise against those two outage configs this week and report back.",
+  "tldr": "Sana supports the gate—her two config-key-typo outages are exactly what a static check catches—but stresses that Priya's 1-min React number doesn't validate SQL/dbt behavior. Backs per-rule tuning, full warning window for SQL/Python, dialect verification, and will test against her outage configs before the day-fourteen vote.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "a5"
+ },
+ {
+  "seq": 33,
+  "who": "Lars",
+  "kind": "statement",
+  "text": "Priya's one-minute cached figure and Ravi's concentration finding reshape my view. I'm dropping my blanket five-percent budget for per-rule tuning—FPs clustering in two or three rules means targeted disables protect signal better than a global cap. Honesty check: the tuned trial I read showed roughly eight percent FP, above my original ask. I won't pretend that's acceptable without Vera's weekly per-rule review. Two notes: Lintwise's baseline mode ignores pre-existing findings, limiting noise to new code—complementary to changed-files scanning. I back Hana's permanent test-directory disables (unused imports, broad catches, snapshot helpers) as non-negotiable; those patterns are intentional and will erode QA trust. Jin's dashboard demotion is fine, but we need per-rule hit-rate data before the day-fourteen vote. I accept Ben's strict timeline and Theo's single YAML.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "a6"
+ },
+ {
+  "seq": 34,
+  "who": "Jin",
+  "kind": "statement",
+  "text": "Priya's one-minute cached scan and Ravi's concentration finding kill my blanket five-percent budget—per-rule tuning is the right lever. I'm adopting Tom and Zoe's JS co-tuning, Hana's permanent test-directory disables (unused imports, broad catches, snapshot helpers), and Elena's day-one-hard secrets pass. Noah's dependency gap is real: Lintwise isn't a CVE auditor, so I'll schedule a separate lockfile scan outside this policy. My notes flag two prior reversals from repo-wide rollouts; Ben's strict day-fourteen per-vertical vote and Theo's single YAML prevent that drift. I'll author the merge-policy YAML with tiered timeouts, kill-switch, auto-demote at fourteen-minute median, and mandatory educational messages. Per-rule hit-rate data from Vera's weekly review is a prerequisite for the day-fourteen vote—no data, no promotion.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "a7"
+ },
+ {
+  "seq": 35,
+  "who": "Olga",
+  "kind": "statement",
+  "text": "Theo's consolidated policy now includes the mandatory educational messages I asked for, and Hana's permanent test-directory disables mean I won't get blocked on intentional fixture patterns. That addresses my core fear of being punished for missing tribal knowledge. Tom's thirty-percent untuned noise figure initially scared me, but per-rule tuning and the two-week warning window mean I'll learn the rules before they gate my merges. My notes confirm style questions are my biggest review-time sink; a tool that explains *why* a pattern is discouraged would genuinely accelerate my onboarding. One small addition: when educational messages link to a preferred example, please include a one-line \"what to write instead,\" not just the rule rationale. I trust Jin's YAML and Ben's hard day-fourteen vote. I'm in.",
+  "tldr": "Olga supports the gate now that Theo's policy mandates educational messages and Hana's test-dir disables protect intentional patterns. Tom's 30% untuned noise is mitigated by per-rule tuning and the warning window. Asks only for a \"what to write instead\" line in messages. Trusts Jin's YAML and Ben's strict timeline.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "a8"
+ },
+ {
+  "seq": 36,
+  "who": "Ravi",
+  "kind": "statement",
+  "text": "Priya's one-minute cached figure removes my CI-cost concern entirely; my own notes confirm the same cache behavior. My six months produced three null-handling bugs, zero false alarms in my logs, so my personal FP rate was effectively nil—but Ravi-me flagged decorator/CTE noise in two or three rules. That concentration finding is now consensus: per-rule tuning beats Theo's blanket five-percent budget, and I'm glad Lars and Jin dropped it. My original ask—let each vertical pick its initial rule set—maps cleanly onto per-rule disables during the warning window; I don't need a separate mechanism. Hana's permanent test-directory disables protect the signal I care about. I'll verify my two CTE rules and one decorator rule against our SQL dialects before the day-fourteen vote. Elena's dependency gap is real; I won't pretend Lintwise audits lockfiles. I back Theo's single YAML and Ben's hard deadline.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "b1"
+ },
+ {
+  "seq": 37,
+  "who": "Mei",
+  "kind": "statement",
+  "text": "Priya's cached-scan figure of roughly one minute changes my math entirely. My peak queue is already six minutes on eleven-minute builds; a four-minute full-repo tax would have pushed us past the fourteen-minute auto-demote threshold on every PR. At one minute, my three-minute timeout becomes a generous ceiling, not a daily trigger. I haven't measured Lintwise myself—I only had Priya's four-minute number—so I'll validate cached-scan latency and queue impact on staging before day fourteen. If median build exceeds fourteen minutes, the auto-demote fires and I pull the kill-switch without a vote. I back Theo's single YAML, Ben's hard deadline, and the per-rule tuning consensus. One operational note: I need the auto-demote metric to read from the CI dashboard, not a manual check, so it triggers without me watching a graph at two a.m.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "b2"
+ },
+ {
+  "seq": 38,
+  "who": "Noah",
+  "kind": "statement",
+  "text": "Elena's confirmation that Lintwise's secret ruleset would have caught last quarter's leaked key validates my day-one-hard requirement. My notes confirm: that key reached main and required rotation; Lintwise's detector would have flagged it. Secrets go hard on day one—no warning window, fail-closed, separate from Marcus's fail-open lint timeout. That structure holds.\n\nOn dependencies: Jin scheduling a separate lockfile/CVE scan outside this policy resolves my core objection. Lintwise is not a dependency auditor, and I won't let anyone pretend otherwise. That separate scan is non-negotiable regardless of Lintwise's adoption.\n\nI still need to replay our three staging leaked-key incidents against Lintwise's ruleset before the day-fourteen vote. If it catches all three, I sign off. If it misses one, secrets stay warning-only until patched. Theo's single YAML, Ben's hard deadline: agreed.",
+  "tldr": "Elena validated my secrets ruleset against last quarter's leaked key; secrets go hard day one, fail-closed, no warning window. Jin's separate lockfile scan resolves the dependency-audit gap. I'll replay three staging incidents before day fourteen to confirm coverage.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "b3"
+ },
+ {
+  "seq": 39,
+  "who": "Zoe",
+  "kind": "statement",
+  "text": "Tom's thirty-percent untuned JS noise mirrors my own side-project notes exactly, which reassures me this isn't a tool defect—it's a tuning gap. I didn't tune a single rule; Ravi and Lars confirming FPs cluster in two or three rules means my co-tuning work this fortnight should slash that number sharply. I'm committing to that work with Tom, explicitly disabling Hana's three test-directory patterns and addressing JSX/ref false positives. Priya's one-minute cached figure removes any CI-cost hesitation. I back Theo's single YAML, Ben's hard day-fourteen vote, Elena's day-one-hard secrets, and Jin's per-rule hit-rate prerequisite. One addition: when I tune, I want the educational messages to include a one-line \"write this instead\" example, matching Olga and Ida's ask, so the gate teaches rather than just blocks.",
+  "tldr": "Zoe confirms her 30% untuned JS noise matches Tom's data, commits to co-tuning JS rules with him during the warning window, supports per-rule tuning over a blanket budget, Hana's permanent test-dir disables, Theo's single YAML, Ben's strict deadline, and asks educational messages include a \"write this instead\" example.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "b4"
+ },
+ {
+  "seq": 40,
+  "who": "Omar",
+  "kind": "statement",
+  "text": "The one-minute cached scan and per-rule tuning consensus resolve my round-one concerns. My two config-key-typo outages last year are exactly the silent errors a static gate catches—our pipeline repos have zero checks today. I confirm: changed-files-only scanning is non-negotiable for my 40k-file repo where PRs touch one or two dbt models. The two-week warning must fully cover SQL and Python; I'll verify Postgres and BigQuery dialect handling against my pipeline configs before the day-fourteen vote. I back per-rule disables over a blanket budget—Ravi's concentration finding matches what I'd expect for CTE and implicit-cast rules. Zoe's \"write this instead\" line in educational messages is essential; I'm still learning tribal conventions and a bare red X wastes hours. Jin's YAML, Ben's hard deadline, Noah's day-one secrets: all good. I'm in.",
+  "tldr": "Omar supports the gate. His two config-typo outages justify a static check on currently unguarded pipeline repos. Non-negotiables: changed-files-only scanning, full warning coverage for SQL/Python, dialect verification against Postgres and BigQuery, per-rule tuning over a blanket budget, and educational messages with fix examples. Backs Theo's single YAML and Ben's day-fourteen vote.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "b5"
+ },
+ {
+  "seq": 41,
+  "who": "Hana",
+  "kind": "statement",
+  "text": "The permanent test-directory disables—unused imports, broad catches, snapshot helpers—are now consensus across Tom, Jin, and Lars, which protects the signal I care about most. Lars's note that Lintwise's baseline mode ignores pre-existing findings complements changed-files scanning: in test dirs we won't re-flag legacy fixture patterns. My desk notes flag one caveat: the tuned trial I read showed roughly eight percent FP. That's tolerable in application code with per-rule tuning, but in test files even eight percent erodes trust fast, so I want the day-fourteen vote to include a per-rule hit-rate check scoped to test directories specifically. Tom and Zoe's JS co-tuning must explicitly validate the three fixture patterns against Hana's test suite, not just React components. I back Theo's single YAML, Ben's hard deadline, and Noah's day-one secrets. I'm in.",
+  "tldr": "Hana confirms support. The three permanent test-directory disables are now group consensus. Her one remaining ask: because her notes show an 8% tuned FP rate—acceptable in app code but corrosive in test files—the day-fourteen vote must include a per-rule hit-rate check scoped specifically to test directories. Tom and Zoe's JS co-tuning must validate against Hana's actual test suite, not just React components. Backs Theo's single YAML, Ben's strict deadline, and Noah's day-one secrets pass.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "b6"
+ },
+ {
+  "seq": 42,
+  "who": "Ben",
+  "kind": "statement",
+  "text": "Theo's single YAML is exactly what I asked for—one policy, not twenty. My notes flag two prior reversals from repo-wide rollouts; the per-vertical day-fourteen vote and Ben's hard deadline prevent that drift. Priya's one-minute cached figure collapses the CI objection entirely. The per-rule tuning consensus replaces my earlier blanket budget—Ravi, Lars, and Tom all confirmed FPs cluster in two or three rules, so targeted disables protect signal better than a global cap. I confirm: secrets fail-closed day one, no warning window; lint fail-open with a three-minute ceiling; auto-demote at fourteen-minute median read from the CI dashboard, not a manual check. Hana's permanent test-dir disables and the \"write this instead\" educational messages are non-negotiable in the YAML. I'll co-author the policy with Jin and validate the kill-switch and auto-demote on staging before day fourteen.",
+  "tldr": "Ben confirms support, endorses Theo's single YAML and per-rule tuning over a blanket budget, locks in tiered timeouts (secrets fail-closed day one, lint fail-open at three minutes), auto-demote at fourteen-minute median from CI dashboard, Hana's test-dir disables, and educational messages with fix examples. Cites his notes on two prior repo-wide reversals to justify the per-vertical vote and strict two-week window. Co-authors with Jin; validates kill-switch and auto-demote on staging pre-vote.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "b7"
+ },
+ {
+  "seq": 43,
+  "who": "Ida",
+  "kind": "statement",
+  "text": "I'm still for the gate and won't block. My notes say style questions eat the most time in my reviews, so a patient automated reviewer is genuinely useful to me. The group has landed on mandatory educational messages with a \"write this instead\" example—Olga and Zoe both asked for that, and it's exactly what I need. I don't have hands-on Lintwise experience, so I'm trusting Jin's YAML and Ben's strict two-week timeline. One small request: during the warning window, could the per-rule hit-rate data Vera reviews weekly include a quick intern-facing summary? Not a dashboard—just a short note in the team channel saying which rules fired most and why. That way I learn the conventions faster instead of guessing. I'll follow whatever Theo and Jin codify.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "b8"
+ },
+ {
+  "seq": 44,
+  "who": "Kofi",
+  "kind": "statement",
+  "text": "Priya's one-minute cached figure collapses my original two-minute timeout and separate-runner-pool asks—I'm dropping both. At 11 minutes build plus 1 minute lint, we're at 12, well under the fourteen-minute auto-demote threshold. But my notes are blunt: peak queue wait is already six minutes. The lint step isn't my bottleneck; the queue is. So I'll accept the three-minute fail-open timeout as a ceiling, not a daily trigger, and back the auto-demote reading from the CI dashboard so it fires without manual intervention. I have not measured Lintwise myself—I only had Priya's four-minute number. I'll validate cached-scan latency and queue impact on staging before the day-fourteen vote. If median build plus queue exceeds fourteen minutes, I pull the kill-switch. Theo's single YAML, Ben's hard deadline, per-rule tuning: all good. I'm in.",
+  "tldr": "Kofi drops his separate-runner-pool and two-minute-timeout asks now that cached scans are ~1 min. His real concern is the existing 6-minute peak queue wait, not the lint step itself. Accepts 3-min fail-open ceiling, auto-demote at 14-min median from CI dashboard, kill-switch authority. Hasn't measured Lintwise personally; will validate on staging before day-fourteen vote. Backs Theo's single YAML, Ben's strict deadline, per-rule tuning.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "b9"
+ },
+ {
+  "seq": 45,
+  "who": "Lena",
+  "kind": "statement",
+  "text": "My 30% untuned JS noise matches Tom and Zoe exactly—three of us saw the same pattern, which strengthens the per-rule tuning consensus. But I must be honest: I never tuned a single rule. I can't speak to post-tuning quality, only that the default config is too noisy for a hard gate. I'm glad Tom and Zoe volunteered to co-tune JS; I'll validate their tuned ruleset against my React Native components—hooks, ref forwarding, platform-specific imports—before the day-fourteen vote. Hana's permanent test-dir disables protect my integration-test files. I back Theo's single YAML, Ben's strict deadline, Elena's day-one secrets pass, and the educational messages with fix examples. One caveat: my 30% figure is a worst-case untuned baseline, not a prediction. Treat it as a tuning target, not a rejection signal.",
+  "tldr": "Lena confirms her 30% untuned JS noise matches Tom and Zoe, reinforcing per-rule tuning consensus. She admits she never tuned rules, so can't validate post-tuning quality. Will test the co-tuned JS ruleset against React Native patterns (hooks, refs, platform imports) before the day-fourteen vote. Backs Theo's YAML, Ben's deadline, Hana's test-dir disables, day-one secrets, and educational messages. Her 30% is a worst-case untuned baseline, not a prediction.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "b10"
+ },
+ {
+  "seq": 46,
+  "who": "Theo",
+  "kind": "statement",
+  "text": "I'm updating the YAML. The five-percent blanket budget is dead—Ravi's concentration finding and Lars, Jin, Tom, Zoe, Lena all confirmed per-rule tuning is the right lever. I'm replacing it with Vera's weekly per-rule hit-rate review and per-rule disable authority during the warning window. Hana's three permanent test-directory disables are in. Noah's dependency gap is resolved by Jin's separate lockfile scan—outside this policy. Educational messages now include a \"write this instead\" example per Olga, Zoe, Ida. Auto-demote reads from the CI dashboard, not a manual check—Mei and Kofi are right that two-a.m. graph-watching isn't an ops model. My notes flag two prior repo-wide reversals; Ben's strict day-fourteen per-vertical vote is the guardrail against a third. I reject per-person exceptions but accept per-vertical rule-set choices within the single YAML. I'll circulate the updated YAML by Thursday.",
+  "tldr": "Theo updates the single merge-policy YAML: drops the five-percent blanket FP budget in favor of per-rule tuning and Vera's weekly review; adds Hana's permanent test-dir disables, educational messages with fix examples, CI-dashboard-driven auto-demote, and Jin's separate lockfile scan outside this policy. Confirms strict two-week window and per-vertical day-fourteen vote as the anti-reversal guardrail. Rejects per-person exceptions; accepts per-vertical rule-set choices. Updated YAML by Thursday.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "b11"
+ },
+ {
+  "seq": 47,
+  "who": "Vera",
+  "kind": "statement",
+  "text": "My round-1 ask—weekly per-rule hit-rate review with authority to kill unacted-on rules before day fourteen—is now Theo's policy. Good. Priya's cached-scan figure matches my own notes: 4 minutes full-repo, ~1 minute with caching. The CI tax is real but manageable at one minute. Ravi's concentration finding (FPs in two or three rules, not spread) is exactly why per-rule tuning beats a blanket budget; I'm glad Theo, Lars, and Jin dropped the five-percent cap. One operational addition to my weekly review: I'll publish hit-rate data as a short team-channel note—Ida asked for an intern-readable summary, and I'll fold that in. My six-month sample caught three null-handling bugs with zero false alarms logged, but that's one team, one codebase. I'll validate the co-tuned ruleset against our SQL and test-directory patterns before the day-fourteen vote. Back Theo's YAML, Ben's deadline, Hana's test-dir disables, Noah's day-one secrets.",
+  "stance": "for",
+  "label": "round 2",
+  "agent": "b12"
+ },
+ {
+  "seq": 48,
+  "who": "Chair",
+  "kind": "chair-reminder",
+  "text": "Reminder from Kofi's full statement: \"If median build plus queue exceeds fourteen minutes, I pull the kill-switch.\"",
+  "label": "chair reminder"
+ },
+ {
+  "seq": 49,
+  "who": "Chair",
+  "kind": "chair-reminder",
+  "text": "Reminder from Noah's full statement: \"That separate scan is non-negotiable regardless of Lintwise's adoption.\"",
+  "label": "chair reminder"
+ }
+]

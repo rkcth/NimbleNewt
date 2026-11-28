@@ -1,0 +1,273 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "yes",
+      "reason": "The advisory-first pilot with caching, severity gating, and the separate security CI job addresses every concern I raised from six months of real use—three bugs caught, CI penalty down to ~1 minute, and no false-positive blocks—while giving the team two weeks of data before anything actually blocks a merge."
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "yes",
+      "reason": "Every operational safeguard I demanded—changed-files scope, 60-second kill-switch, parallel execution, result caching (4→~1 min), separate security CI job outside the timeout, day-three dashboard, one global config, and Jin's advisory-first pilot as the rollback path—is now baked into the motion, so I can ship the integration and ratify the blocking gate after pilot queue data confirms peak wait stays under seven minutes."
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "yes",
+      "reason": "Marcus's separate security CI job with forced error-severity on secrets and CVEs, running outside Lintwise's sixty-second budget and un-suppressible, closes the gap that caused last quarter's leaked-key incident and satisfies every condition I set in round one."
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "yes",
+      "reason": "The advisory-first pilot with the severity gate (correctness and security block, cosmetic advisory) and JS noise-rate tracking addresses my 30-percent-noise concern while the separate security CI job with forced error severity protects against the leaked-key risk Elena flagged, so I support adoption conditioned on pilot data before ratification."
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "yes",
+      "reason": "The advisory-first pilot gives me the two-week SQL/Python trial I need with per-language false-positive metrics, and if aligned DDL or pipeline patterns generate noise, I can request a global-config severity tweak for .sql before ratification—so the motion as structured lets me validate fit without risking a blocked deploy."
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "yes",
+      "reason": "The advisory-first pilot with baseline mode, enforced suppression audits, and my eight-percent correctness-FP ceiling gives me the signal-to-noise data I need before any rule blocks a merge, and security blocking from day one via the separate CI job closes the gap Elena flagged."
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "yes",
+      "reason": "The motion now matches my core condition—an advisory-first two-week pilot with security blocking from day one, rules promoted one at a time only after FP and queue data clear thresholds, one global config with no carve-outs—giving us the rollback path that prevented our two prior policy reversals."
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "yes",
+      "reason": "The advisory-first pilot with rule-description links, \"what to do instead\" hints, and a blocks-vs-advisory cheat-sheet gives me exactly the learning structure I need to understand why a finding matters without merge pressure, and the severity gate ensures I'm never blocked by a style nit I can't yet judge."
+    },
+    {
+      "agent": "b1",
+      "name": "Ravi",
+      "vote": "yes",
+      "reason": "Six months of real use—three bugs caught, zero false-positive blocks—plus the advisory-first pilot, forced security severity, caching, and baseline mode address every concern I raised, so I support adoption with ratification deferred to pilot data."
+    },
+    {
+      "agent": "b2",
+      "name": "Mei",
+      "vote": "yes",
+      "reason": "The advisory-first pilot with changed-files scope, caching, and parallel execution keeps peak queue wait within my seven-minute tolerance while the day-three dashboard gives me the per-PR duration and queue-wait data to confirm that before anything blocks a merge."
+    },
+    {
+      "agent": "b3",
+      "name": "Noah",
+      "vote": "yes",
+      "reason": "The motion now guarantees security rules block from pilot day one via Marcus's separate CI job with Elena's forced error-severity override, un-suppressible findings, and a dedicated security dashboard—every non-negotiable condition I set is met, and the advisory-first structure for style rules does not weaken the security gate."
+    },
+    {
+      "agent": "b4",
+      "name": "Zoe",
+      "vote": "yes",
+      "reason": "The advisory-first pilot lets me see what fires on my TS/React patterns without merge pressure, the severity gate keeps the ~30% cosmetic noise advisory-only, and security blocks from day one via Marcus's separate CI job—so the gate catches the stale-closure-class bugs I need while I tune the global config during those two weeks before anything locks."
+    },
+    {
+      "agent": "b5",
+      "name": "Omar",
+      "vote": "yes",
+      "reason": "The advisory-first pilot lets me verify Lintwise catches config-key typos like the ones that caused my two prior outages without risking aligned-DDL false positives blocking a deploy, and the severity gate keeps cosmetic SQL formatting advisory while security blocks from day one."
+    },
+    {
+      "agent": "b6",
+      "name": "Hana",
+      "vote": "yes",
+      "reason": "The advisory-first pilot with baseline mode gives me two weeks to measure whether Lintwise flags my intentional test patterns—duplicated setup, magic-number assertions, mock factories—as false positives before anything blocks a merge, and the 8% FP ceiling plus per-rule tracking in test files means I can demand global-config tuning before correctness rules are promoted, so my test signal stays clean while security blocks from day one."
+    },
+    {
+      "agent": "b7",
+      "name": "Ben",
+      "vote": "yes",
+      "reason": "The motion now delivers one enforceable gate with a safe advisory-first pilot, security blocking from day one via a separate CI job, a single global config, and a data-driven ratification checkpoint—balancing my consistency mandate against the team's speed without the carve-out sprawl that would fracture merge policy across twenty devs."
+    },
+    {
+      "agent": "b8",
+      "name": "Ida",
+      "vote": "yes",
+      "reason": "The advisory-first pilot lets me learn what each rule means—via description links and \"what to do instead\" hints—without merge pressure, and the security-blocking carve-out from day one means I can't accidentally silence a leaked secret while I'm still learning."
+    },
+    {
+      "agent": "b9",
+      "name": "Kofi",
+      "vote": "yes",
+      "reason": "The advisory-first pilot with caching, changed-files scope, parallel execution, and the day-three queue dashboard gives me the data and rollback path I need before the blocking gate is locked, so adopting the framework now while security blocks from day one via the separate CI job is the right sequencing for keeping peak queue wait under seven minutes."
+    },
+    {
+      "agent": "b10",
+      "name": "Lena",
+      "vote": "yes",
+      "reason": "The advisory-first pilot with baseline mode, security blocking from day one via Marcus's separate CI job, and ratification only after RN-pattern false-positive data confirms the gate catches real bugs without drowning me in cosmetic noise addresses every concern from my side-project experience."
+    },
+    {
+      "agent": "b11",
+      "name": "Theo",
+      "vote": "yes",
+      "reason": "The advisory-first pilot with security blocking from day one, one global config, and data-gated promotion to blocking gives me the rollback path two prior reversals taught me I need, and I will only lock the merge gate once pilot queue data confirms sub-seven-minute waits and FP rates at or below eight percent."
+    },
+    {
+      "agent": "b12",
+      "name": "Vera",
+      "vote": "yes",
+      "reason": "The advisory-first pilot with caching, enforced suppression audits, baseline mode, and a hard ratification gate on queue and FP data addresses every failure mode I saw on my prior team where unchecked suppressions gutted the gate within a quarter."
+    }
+  ],
+  "ballotHistory": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "yes",
+      "reason": "The advisory-first pilot with caching, severity gating, and the separate security CI job addresses every concern I raised from six months of real use—three bugs caught, CI penalty down to ~1 minute, and no false-positive blocks—while giving the team two weeks of data before anything actually blocks a merge.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "yes",
+      "reason": "Every operational safeguard I demanded—changed-files scope, 60-second kill-switch, parallel execution, result caching (4→~1 min), separate security CI job outside the timeout, day-three dashboard, one global config, and Jin's advisory-first pilot as the rollback path—is now baked into the motion, so I can ship the integration and ratify the blocking gate after pilot queue data confirms peak wait stays under seven minutes.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "yes",
+      "reason": "Marcus's separate security CI job with forced error-severity on secrets and CVEs, running outside Lintwise's sixty-second budget and un-suppressible, closes the gap that caused last quarter's leaked-key incident and satisfies every condition I set in round one.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "yes",
+      "reason": "The advisory-first pilot with the severity gate (correctness and security block, cosmetic advisory) and JS noise-rate tracking addresses my 30-percent-noise concern while the separate security CI job with forced error severity protects against the leaked-key risk Elena flagged, so I support adoption conditioned on pilot data before ratification.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "yes",
+      "reason": "The advisory-first pilot gives me the two-week SQL/Python trial I need with per-language false-positive metrics, and if aligned DDL or pipeline patterns generate noise, I can request a global-config severity tweak for .sql before ratification—so the motion as structured lets me validate fit without risking a blocked deploy.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "yes",
+      "reason": "The advisory-first pilot with baseline mode, enforced suppression audits, and my eight-percent correctness-FP ceiling gives me the signal-to-noise data I need before any rule blocks a merge, and security blocking from day one via the separate CI job closes the gap Elena flagged.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "yes",
+      "reason": "The motion now matches my core condition—an advisory-first two-week pilot with security blocking from day one, rules promoted one at a time only after FP and queue data clear thresholds, one global config with no carve-outs—giving us the rollback path that prevented our two prior policy reversals.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "yes",
+      "reason": "The advisory-first pilot with rule-description links, \"what to do instead\" hints, and a blocks-vs-advisory cheat-sheet gives me exactly the learning structure I need to understand why a finding matters without merge pressure, and the severity gate ensures I'm never blocked by a style nit I can't yet judge.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b1",
+      "name": "Ravi",
+      "vote": "yes",
+      "reason": "Six months of real use—three bugs caught, zero false-positive blocks—plus the advisory-first pilot, forced security severity, caching, and baseline mode address every concern I raised, so I support adoption with ratification deferred to pilot data.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b2",
+      "name": "Mei",
+      "vote": "yes",
+      "reason": "The advisory-first pilot with changed-files scope, caching, and parallel execution keeps peak queue wait within my seven-minute tolerance while the day-three dashboard gives me the per-PR duration and queue-wait data to confirm that before anything blocks a merge.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b3",
+      "name": "Noah",
+      "vote": "yes",
+      "reason": "The motion now guarantees security rules block from pilot day one via Marcus's separate CI job with Elena's forced error-severity override, un-suppressible findings, and a dedicated security dashboard—every non-negotiable condition I set is met, and the advisory-first structure for style rules does not weaken the security gate.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b4",
+      "name": "Zoe",
+      "vote": "yes",
+      "reason": "The advisory-first pilot lets me see what fires on my TS/React patterns without merge pressure, the severity gate keeps the ~30% cosmetic noise advisory-only, and security blocks from day one via Marcus's separate CI job—so the gate catches the stale-closure-class bugs I need while I tune the global config during those two weeks before anything locks.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b5",
+      "name": "Omar",
+      "vote": "yes",
+      "reason": "The advisory-first pilot lets me verify Lintwise catches config-key typos like the ones that caused my two prior outages without risking aligned-DDL false positives blocking a deploy, and the severity gate keeps cosmetic SQL formatting advisory while security blocks from day one.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b6",
+      "name": "Hana",
+      "vote": "yes",
+      "reason": "The advisory-first pilot with baseline mode gives me two weeks to measure whether Lintwise flags my intentional test patterns—duplicated setup, magic-number assertions, mock factories—as false positives before anything blocks a merge, and the 8% FP ceiling plus per-rule tracking in test files means I can demand global-config tuning before correctness rules are promoted, so my test signal stays clean while security blocks from day one.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b7",
+      "name": "Ben",
+      "vote": "yes",
+      "reason": "The motion now delivers one enforceable gate with a safe advisory-first pilot, security blocking from day one via a separate CI job, a single global config, and a data-driven ratification checkpoint—balancing my consistency mandate against the team's speed without the carve-out sprawl that would fracture merge policy across twenty devs.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b8",
+      "name": "Ida",
+      "vote": "yes",
+      "reason": "The advisory-first pilot lets me learn what each rule means—via description links and \"what to do instead\" hints—without merge pressure, and the security-blocking carve-out from day one means I can't accidentally silence a leaked secret while I'm still learning.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b9",
+      "name": "Kofi",
+      "vote": "yes",
+      "reason": "The advisory-first pilot with caching, changed-files scope, parallel execution, and the day-three queue dashboard gives me the data and rollback path I need before the blocking gate is locked, so adopting the framework now while security blocks from day one via the separate CI job is the right sequencing for keeping peak queue wait under seven minutes.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b10",
+      "name": "Lena",
+      "vote": "yes",
+      "reason": "The advisory-first pilot with baseline mode, security blocking from day one via Marcus's separate CI job, and ratification only after RN-pattern false-positive data confirms the gate catches real bugs without drowning me in cosmetic noise addresses every concern from my side-project experience.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b11",
+      "name": "Theo",
+      "vote": "yes",
+      "reason": "The advisory-first pilot with security blocking from day one, one global config, and data-gated promotion to blocking gives me the rollback path two prior reversals taught me I need, and I will only lock the merge gate once pilot queue data confirms sub-seven-minute waits and FP rates at or below eight percent.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b12",
+      "name": "Vera",
+      "vote": "yes",
+      "reason": "The advisory-first pilot with caching, enforced suppression audits, baseline mode, and a hard ratification gate on queue and FP data addresses every failure mode I saw on my prior team where unchecked suppressions gutted the gate within a quarter.",
+      "trigger": "original ballot"
+    }
+  ],
+  "result": {
+    "yes": 20,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  }
+}

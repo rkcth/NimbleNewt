@@ -1,0 +1,400 @@
+{
+ "startedAt": "2026-11-28T07:11:49.448Z",
+ "model": "qwen3.8-flash-next-iq4r",
+ "parts": "R",
+ "gapsS": [
+  0
+ ],
+ "lines": 300,
+ "levels": [
+  1,
+  2,
+  4,
+  8
+ ],
+ "statsAtStart": {
+  "at": "2026-11-28T07:11:49.453Z",
+  "version": "2.3.0",
+  "running": 0,
+  "waiting": 0,
+  "in_flight": 0,
+  "max_num_seqs": 8,
+  "kv_tokens_used": 0,
+  "kv_tokens_total": 200236,
+  "kv_tokens_cached": 0,
+  "kv_bytes_used": 0,
+  "kv_bytes_total": 948260880,
+  "prefix_hit_rate": 0.8502145409584045,
+  "prefix_evictions": 566,
+  "linear_hit_rate": 0.8194417357444763,
+  "linear_cached_tokens": 16440832,
+  "checkpoints_written": 932,
+  "ckpt_evictions": {
+   "retention": 660,
+   "store_full": 91
+  },
+  "ckpt_refused": 0,
+  "hit_cuts": {
+   "no_snapshot": 168,
+   "windowed_group": 0,
+   "adopt_failed": 0,
+   "resumed_below": 49
+  },
+  "total_requests": 615,
+  "prefill_tps": 437.71197509765625,
+  "decode_tps": 1.325683832168579,
+  "cards": [
+   {
+    "index": 0,
+    "vramUsed": 32239374336,
+    "vramTotal": 34208743424
+   },
+   {
+    "index": 1,
+    "vramUsed": 32342171648,
+    "vramTotal": 34208743424
+   }
+  ]
+ },
+ "retained": {
+  "steps": [
+   {
+    "phase": "cold-native",
+    "step": "cold",
+    "status": 200,
+    "outcome": "cold",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 10072,
+    "cachedTokens": 0,
+    "computedTokens": 10072,
+    "expectedCachedTokens": 0,
+    "serverPromptMs": 4060,
+    "serverTtftMs": 4061,
+    "clientTtftMs": 4066,
+    "wallMs": 4128,
+    "answer": "jade-843",
+    "expected": "jade-843",
+    "correct": true
+   },
+   {
+    "phase": "cold-native",
+    "step": "native-repeat",
+    "status": 200,
+    "outcome": "hit",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 10072,
+    "cachedTokens": 8192,
+    "computedTokens": 1880,
+    "expectedCachedTokens": 1,
+    "serverPromptMs": 862,
+    "serverTtftMs": 933,
+    "clientTtftMs": 935,
+    "wallMs": 981,
+    "answer": "jade-843",
+    "expected": "jade-843",
+    "correct": true
+   },
+   {
+    "phase": "other",
+    "step": "other-0",
+    "status": 200,
+    "outcome": "cold",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 3270,
+    "cachedTokens": 0,
+    "computedTokens": 3270,
+    "expectedCachedTokens": 0,
+    "serverPromptMs": 1573,
+    "serverTtftMs": 1618,
+    "clientTtftMs": 1620,
+    "wallMs": 1678,
+    "answer": "jade-599",
+    "expected": "jade-599",
+    "correct": true
+   },
+   {
+    "phase": "retained",
+    "step": "retained-after-0s",
+    "status": 200,
+    "outcome": "hit",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 10072,
+    "cachedTokens": 8192,
+    "computedTokens": 1880,
+    "expectedCachedTokens": 8192,
+    "serverPromptMs": 850,
+    "serverTtftMs": 906,
+    "clientTtftMs": 909,
+    "wallMs": 945,
+    "answer": "jade-843",
+    "expected": "jade-843",
+    "correct": true
+   },
+   {
+    "phase": "retained",
+    "step": "retained-switch-back",
+    "status": 200,
+    "outcome": "hit",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 10072,
+    "cachedTokens": 8192,
+    "computedTokens": 1880,
+    "expectedCachedTokens": 8192,
+    "serverPromptMs": 833,
+    "serverTtftMs": 870,
+    "clientTtftMs": 879,
+    "wallMs": 916,
+    "answer": "Lynx",
+    "expected": "Lynx",
+    "correct": true
+   },
+   {
+    "phase": "retained",
+    "step": "lost-changed-head",
+    "status": 200,
+    "outcome": "miss",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 10074,
+    "cachedTokens": 0,
+    "computedTokens": 10074,
+    "expectedCachedTokens": 8192,
+    "serverPromptMs": 4074,
+    "serverTtftMs": 4076,
+    "clientTtftMs": 4079,
+    "wallMs": 4121,
+    "answer": "jade-843",
+    "expected": "jade-843",
+    "correct": true
+   }
+  ],
+  "markers": [
+   {
+    "gapS": 0,
+    "expectedCachedTokens": 8192,
+    "servedCachedTokens": 8192,
+    "outcome": "hit",
+    "reusedAll": true,
+    "answerCorrect": true
+   },
+   {
+    "switchBack": true,
+    "expectedCachedTokens": 8192,
+    "servedCachedTokens": 8192,
+    "outcome": "hit",
+    "answerCorrect": true
+   },
+   {
+    "changedHead": true,
+    "expectedCachedTokens": 8192,
+    "servedCachedTokens": 0,
+    "outcome": "miss",
+    "answerCorrect": true,
+    "markerAfter": "lost"
+   },
+   {
+    "activeMarkersAtEnd": []
+   }
+  ],
+  "sessions": [
+   {
+    "id": 534,
+    "model": "qwen4exp",
+    "label": "nn-wzxVVanvon8laQ2EQHkyrV2vj12",
+    "tokens": 10079,
+    "bytes": 151946080,
+    "idle_s": 0.041259304,
+    "age_s": 0.041259304,
+    "on_device": 2518,
+    "on_host": 1,
+    "moving": true,
+    "snapshots": 4,
+    "snap_bytes": 475971776,
+    "resume_tokens": 8192
+   },
+   {
+    "id": 533,
+    "model": "qwen4exp",
+    "label": "nn-wzxVVanvon8laQ2EQHkyrV2vj12",
+    "tokens": 10075,
+    "bytes": 151885760,
+    "idle_s": 4.160456296,
+    "age_s": 4.160456296,
+    "on_device": 0,
+    "on_host": 2518,
+    "moving": false,
+    "snapshots": 4,
+    "snap_bytes": 475971776,
+    "resume_tokens": 8192
+   },
+   {
+    "id": 532,
+    "model": "qwen4exp",
+    "label": "nn-wzxVVanvon8laQ2EQHkyrV2vj12",
+    "tokens": 10077,
+    "bytes": 151946080,
+    "idle_s": 5.078281867,
+    "age_s": 8.687829585,
+    "on_device": 0,
+    "on_host": 2519,
+    "moving": false,
+    "snapshots": 4,
+    "snap_bytes": 475971776,
+    "resume_tokens": 8192
+   }
+  ],
+  "statsBefore": {
+   "at": "2026-11-28T07:11:49.558Z",
+   "version": "2.3.0",
+   "running": 0,
+   "waiting": 0,
+   "in_flight": 0,
+   "max_num_seqs": 8,
+   "kv_tokens_used": 0,
+   "kv_tokens_total": 200236,
+   "kv_tokens_cached": 0,
+   "kv_bytes_used": 0,
+   "kv_bytes_total": 948260880,
+   "prefix_hit_rate": 0.8502145409584045,
+   "prefix_evictions": 566,
+   "linear_hit_rate": 0.8194417357444763,
+   "linear_cached_tokens": 16440832,
+   "checkpoints_written": 932,
+   "ckpt_evictions": {
+    "retention": 660,
+    "store_full": 91
+   },
+   "ckpt_refused": 0,
+   "hit_cuts": {
+    "no_snapshot": 168,
+    "windowed_group": 0,
+    "adopt_failed": 0,
+    "resumed_below": 49
+   },
+   "total_requests": 615,
+   "prefill_tps": 364.1069030761719,
+   "decode_tps": 1.102758526802063,
+   "cards": [
+    {
+     "index": 0,
+     "vramUsed": 32239374336,
+     "vramTotal": 34208743424
+    },
+    {
+     "index": 1,
+     "vramUsed": 32342171648,
+     "vramTotal": 34208743424
+    }
+   ]
+  },
+  "statsAfter": {
+   "at": "2026-11-28T07:12:02.378Z",
+   "version": "2.3.0",
+   "running": 0,
+   "waiting": 0,
+   "in_flight": 0,
+   "max_num_seqs": 8,
+   "kv_tokens_used": 10072,
+   "kv_tokens_total": 200236,
+   "kv_tokens_cached": 10072,
+   "kv_bytes_used": 75942880,
+   "kv_bytes_total": 1006439520,
+   "prefix_hit_rate": 0.849449098110199,
+   "prefix_evictions": 566,
+   "linear_hit_rate": 0.8184787631034851,
+   "linear_cached_tokens": 16465408,
+   "checkpoints_written": 941,
+   "ckpt_evictions": {
+    "retention": 660,
+    "store_full": 100
+   },
+   "ckpt_refused": 0,
+   "hit_cuts": {
+    "no_snapshot": 171,
+    "windowed_group": 0,
+    "adopt_failed": 0,
+    "resumed_below": 49
+   },
+   "total_requests": 621,
+   "prefill_tps": 1293.208984375,
+   "decode_tps": 2.636413335800171,
+   "cards": [
+    {
+     "index": 0,
+     "vramUsed": 32239374336,
+     "vramTotal": 34208743424
+    },
+    {
+     "index": 1,
+     "vramUsed": 32342171648,
+     "vramTotal": 34208743424
+    }
+   ]
+  },
+  "checks": {
+   "coldComputedEverything": true,
+   "nativeReuseServed": true,
+   "missMarkedLost": true,
+   "missStillAnsweredFromFullContext": true,
+   "retainedReusedAll": true,
+   "retentionMissObserved": false,
+   "allAnswersCorrect": true
+  }
+ },
+ "statsAtEnd": {
+  "at": "2026-11-28T07:12:02.383Z",
+  "version": "2.3.0",
+  "running": 0,
+  "waiting": 0,
+  "in_flight": 0,
+  "max_num_seqs": 8,
+  "kv_tokens_used": 10072,
+  "kv_tokens_total": 200236,
+  "kv_tokens_cached": 10072,
+  "kv_bytes_used": 75942880,
+  "kv_bytes_total": 1006439520,
+  "prefix_hit_rate": 0.849449098110199,
+  "prefix_evictions": 566,
+  "linear_hit_rate": 0.8184787631034851,
+  "linear_cached_tokens": 16465408,
+  "checkpoints_written": 941,
+  "ckpt_evictions": {
+   "retention": 660,
+   "store_full": 100
+  },
+  "ckpt_refused": 0,
+  "hit_cuts": {
+   "no_snapshot": 171,
+   "windowed_group": 0,
+   "adopt_failed": 0,
+   "resumed_below": 49
+  },
+  "total_requests": 621,
+  "prefill_tps": 1293.208984375,
+  "decode_tps": 2.636413335800171,
+  "cards": [
+   {
+    "index": 0,
+    "vramUsed": 32239374336,
+    "vramTotal": 34208743424
+   },
+   {
+    "index": 1,
+    "vramUsed": 32342171648,
+    "vramTotal": 34208743424
+   }
+  ]
+ },
+ "finishedAt": "2026-11-28T07:12:02.383Z"
+}

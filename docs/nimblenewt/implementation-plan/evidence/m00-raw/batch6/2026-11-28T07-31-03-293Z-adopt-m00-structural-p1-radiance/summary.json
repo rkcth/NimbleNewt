@@ -1,0 +1,191 @@
+{
+  "scenario": "Adopt Lintwise as a required pre-merge check (eight engineers)",
+  "variant": {
+    "name": "m00-structural-p1",
+    "firstRound": "blind",
+    "rounds": 2,
+    "transcriptMode": "full",
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "chairQuestionCheck": "structural",
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 1,
+    "allowTabling": true,
+    "directQuestions": true,
+    "deskRead": true
+  },
+  "model": "qwen3.8-flash-next-iq4r",
+  "roster": [
+    {
+      "id": "a1",
+      "name": "Priya",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a2",
+      "name": "Marcus",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a3",
+      "name": "Elena",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a4",
+      "name": "Tom",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a5",
+      "name": "Sana",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a6",
+      "name": "Lars",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a7",
+      "name": "Jin",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a8",
+      "name": "Olga",
+      "model": "qwen3.8-flash-next-iq4r"
+    }
+  ],
+  "chairModel": "qwen3.8-flash-next-iq4r",
+  "motion": {
+    "text": "The team adopts Lintwise, an automated code-quality checker, as a required pre-merge check on every repository.",
+    "version": 1
+  },
+  "result": {
+    "outcome": "tabled",
+    "research": [
+      "Marcus: Run Lintwise in parallel with the existing CI build on a representative branch set of our monorepo (including a 40+ file PR); record median wall-clock delta, worst-case tail latency, and queue-depth impact at peak merge windows. Bring the numbers to the next meeting.",
+      "Sana: Check Lintwise's supported-language list for SQL; run it against a sample of our pipeline .sql files to confirm it actually parses them (not silently skips) and measure false-positive rate on stored-procedure patterns. Bring coverage and noise numbers to the next meeting."
+    ]
+  },
+  "stats": {
+    "objections": [],
+    "chairQuestions": [
+      {
+        "to": "a1",
+        "topic": "Measured runtime delta of Lintwise with a scoped high-severity ruleset versus the default full rulebook on a comparable codebase",
+        "experience_sought": "Priya ran Lintwise for six months on a prior team. We need the concrete wall-clock numbers: was the ~4-minute figure with the default rulebook, and what did the runtime drop to after she scoped to high-severity checks? Also, was that measured on a monorepo of similar scale or a smaller repo?"
+      },
+      {
+        "to": "a4",
+        "topic": "Specific false-positive instances encountered on the React project and how each was resolved",
+        "experience_sought": "Tom ran Lintwise on a small React project and flagged issues. We need the factual record: what were the false positives (rule names, file types), how many per PR on average, and what resolution did he use—inline suppression comment, config exclusion, or rule disable?"
+      }
+    ],
+    "rejectedChairQuestions": [],
+    "skippedAbsent": [],
+    "inquiries": [],
+    "ownerReports": [],
+    "deskRead": {
+      "refused": [],
+      "excerpts": [],
+      "rejectedExcerpts": [],
+      "corrections": []
+    },
+    "directQuestions": [
+      {
+        "from": "a2",
+        "to": "Priya",
+        "refused": "unknown or self"
+      },
+      {
+        "from": "a4",
+        "to": "Marcus",
+        "refused": "unknown or self"
+      },
+      {
+        "from": "a8",
+        "to": "Tom",
+        "refused": "unknown or self"
+      }
+    ],
+    "tabled": {
+      "research": [
+        "Marcus: Run Lintwise in parallel with the existing CI build on a representative branch set of our monorepo (including a 40+ file PR); record median wall-clock delta, worst-case tail latency, and queue-depth impact at peak merge windows. Bring the numbers to the next meeting.",
+        "Sana: Check Lintwise's supported-language list for SQL; run it against a sample of our pipeline .sql files to confirm it actually parses them (not silently skips) and measure false-positive rate on stored-procedure patterns. Bring coverage and noise numbers to the next meeting."
+      ]
+    },
+    "inquiryChecks": {
+      "heldAnswers": 0,
+      "leaks": [],
+      "revisionsPerVoter": {},
+      "voterRevisionTurnsOk": true,
+      "clockMs": {
+        "total": 252712,
+        "paused": 0,
+        "meeting": 252712
+      }
+    }
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 0.42857142857142855,
+    "membersWhoChangedStanceInRound2": 0,
+    "cacheHitRatio": 0.36338749334617626,
+    "calls": 28,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1-blind": {
+        "calls": 8,
+        "input": 2046,
+        "cached": 0,
+        "output": 5554,
+        "ms": 71986,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 1724,
+        "cached": 0,
+        "output": 727,
+        "ms": 11616,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 2,
+        "input": 4033,
+        "cached": 0,
+        "output": 623,
+        "ms": 10220,
+        "costUsd": 0
+      },
+      "round2": {
+        "calls": 8,
+        "input": 22298,
+        "cached": 12288,
+        "output": 8440,
+        "ms": 105122,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 8,
+        "input": 5734,
+        "cached": 0,
+        "output": 4719,
+        "ms": 48433,
+        "costUsd": 0
+      },
+      "chair-ruling": {
+        "calls": 1,
+        "input": 3616,
+        "cached": 2048,
+        "output": 446,
+        "ms": 5322,
+        "costUsd": 0
+      }
+    }
+  }
+}

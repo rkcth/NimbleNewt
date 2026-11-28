@@ -83,7 +83,8 @@ for (const backend of backends) {
     test(`${backend.name}: ${name}`, async () => {
       now = Date.parse("2026-11-27T15:00:00.000Z");
       const world = await backend.open();
-      const scratch = realpathSync(mkdtempSync(join(tmpdir(), "nn-b06c-")));
+      // The native realpath, as the judge's: on Windows the long name of a temporary folder spelled with a short (8.3) name.
+      const scratch = realpathSync.native(mkdtempSync(join(tmpdir(), "nn-b06c-")));
       try {
         const projects = await ProjectService.open(world.storage, { holder: "c1", ...options });
         const epoch = projects.epoch;
@@ -683,7 +684,7 @@ for (const backend of backends) {
     const inside = join(c.install, "packages");
     mkdirSync(inside);
     const live = await c.resources.bindResource(c.owner, { commandId: cid("b"), projectId: c.devProject, kind: "repository", label: "live", locator: inside, access: "write" } as never);
-    await refuses("unavailable", () => c.enable(), /not enabled: the development project's repository "live" at .*\/install\/packages is inside the running installation's program files/);
+    await refuses("unavailable", () => c.enable(), /not enabled: the development project's repository "live" at .*[\\/]install[\\/]packages is inside the running installation's program files/);
     assert.deepEqual(await c.svc.settings(c.owner), { revision: 0, enabled: false, history: [] }, "nothing was written");
     await c.resources.unbindResource(c.owner, { commandId: cid("u"), resourceId: live.id, expectedRevision: live.revision });
     await c.enable();

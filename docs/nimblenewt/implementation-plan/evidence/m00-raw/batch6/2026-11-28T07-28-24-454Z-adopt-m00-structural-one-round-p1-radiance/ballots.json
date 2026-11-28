@@ -1,0 +1,11 @@
+{
+  "ballots": [],
+  "ballotHistory": [],
+  "result": {
+    "outcome": "tabled",
+    "research": [
+      "Marcus: Measure Lintwise wall-clock runtime on our actual monorepo and confirm whether it can execute as a parallel CI job alongside compilation rather than as a serial pre-build gate. Report the added latency in seconds and whether it stays under the 60-second threshold.",
+      "Sana: Run Lintwise against a representative slice of our SQL queries and Python pipeline scripts for a short trial. Report the false-positive rate on those languages specifically, so we can determine whether the JavaScript noise figure (~30 %) generalises or whether SQL/Python need a separate, narrower rule set before the gate is made mandatory."
+    ]
+  }
+}
