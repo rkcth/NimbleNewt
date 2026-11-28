@@ -20,7 +20,7 @@ export interface RelayFetch {
   accept(message: ToChild): boolean;
   /** Latches the relay closed (the lease ended): every later call fails before anything is sent. Does not touch calls in flight; `closeAll` does. */
   refuse(reason: string): void;
-  /** Fails every call in flight (the channel ended). */
+  /** Fails every call in flight (the lease ended, the channel ended) and asks the host to abort each one (`fetch.abort`), so its call to the model ends too. */
   closeAll(reason: string): void;
   /**
    * W09 fixes: from the next call on, a model request (a POST whose body is a JSON object that names a reply limit, `max_tokens` or `max_completion_tokens`) whose limit is below `tokens` is sent with `tokens` instead. Raises only, never
@@ -135,6 +135,8 @@ export function relayFetch(relayBase: string, send: (message: FromChild) => void
     closeAll(reason) {
       for (const [id, entry] of [...pending]) {
         pending.delete(id);
+        // The host is told too (card G08): it holds the call to the model, and without this it went on reading the reply (and the model on writing it) after the lease ended, until the host stopped the attempt.
+        try { send({ t: "fetch.abort", id }); } catch { /* the channel is gone; the host ends its calls with the process */ }
         const error = new TypeError(`fetch failed: ${reason}`);
         entry.fail(error);
         entry.errorStream?.(error);

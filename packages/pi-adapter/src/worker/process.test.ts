@@ -375,6 +375,27 @@ test("a lease that ends while a turn waits stops the turn, answers its pending c
   await h.done;
 });
 
+test("G08: a lease lost while a turn is open is told to the host as lease.lost as well (so the host ends the process when the grace is over), the model call in flight is aborted at the host, and the process still winds down on its own", async () => {
+  const { offline, hooks } = scripted();
+  offline.faux.setResponses([fauxAssistantMessage(fauxToolCall("nimblenewt__desk-read", { recordId: "dsk-aaaaaaaaaaaaaaaaaaaa" }, { id: "c1" }), { stopReason: "toolUse" }), fauxAssistantMessage("never reached")]);
+  const k = fakeClock(); let dog: LeaseWatchdog | undefined; const ended: string[] = [];
+  const h = host({ ...hooks, lease: { clock: k, tickMs: 0, onWatchdog: (d) => { dog = d; }, terminate: (r) => { ended.push(r); } } });
+  h.send({ t: "start", v: 1, start: leased });
+  await h.next("ready");
+  h.send({ t: "run", requestId: "req-1", content: "work" });
+  await h.next("bridge");
+  k.advance(21_000); await dog!.tick();
+  const told = await h.next("lease.lost");
+  assert.equal(told.reason, "silent");
+  const result = await h.next("result");
+  assert.match(result.error ?? "", /^lease lost \(silent\)/);
+  assert.ok(h.seen.indexOf(told) < h.seen.indexOf(result), "the host is told before the turn's result");
+  k.advance(60_000); await dog!.tick();
+  assert.deepEqual(ended, [], "it wound down on its own: the process does not end itself (the host's own end after the grace is the worker package's)");
+  h.send({ t: "close" });
+  await h.done;
+});
+
 test("a machine that slept loses the lease as 'wake' before any turn runs; the loss is told to the host and a later run is refused with that reason (card H08b)", async () => {
   const { hooks } = scripted();
   const k = fakeClock(); let dog: LeaseWatchdog | undefined;
