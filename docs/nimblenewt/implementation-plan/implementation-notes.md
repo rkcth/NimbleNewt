@@ -21912,6 +21912,108 @@ Card not flipped.
 
 Card not flipped.
 
+## M05 slice: the open owner inquiries are one bounded list, so the reminder, the Needs-you list and the status view no longer read every floor record (Claude agent, Opus 5.5, 2026-11-27 EST; branch `card-m05b` from main 26899633; card M05 NOT flipped, M00 NOT flipped; task-plan files unchanged; not pushed; no workflow dispatched; no model or network call made, the local model server is offline)
+
+ASSUMPTION: M05 build-ahead of unflipped M00, as recorded for the earlier M05 slices (M00's code is built; it stays open only for the live model runs). Build only.
+
+**Why this item.** Of the offline items the last slice left, the full scans cost the most. `sweep` (the idle-inquiry reminder) runs on every scheduled turn (`tick`), and it read every `meeting-floor` record ever kept. Ended floors are never removed, so the cost of each turn grew with every meeting held, not with the inquiries open. `ownerPending` (API `meeting.floor.needs-you`) and `openInquiries` (the status view's Needs-you list) read them all too. The late-join gap (M04h) changes M04's admission and is a larger slice.
+
+**Slice boundary.**
+- New record `meeting-floor-inquiries` / `installation`: `{ ids }`, the meeting record IDs whose floor has an open owner inquiry, in the order they opened.
+- `#update` (the one place a floor changes) adds the list change to the same write whenever an inquiry opens or ends. That covers the owner's open and end, the owner's end of the meeting, and a meeting closed by other means. A conflict on either record is `stale_revision`, which `#update` already retries. So the list cannot be out of step with the floors.
+- `sweep`, `ownerPending` and `openInquiries` read the list and load only those floors (at most 200 gets). `ownerPending` now lists in the order the inquiries opened, not in floor-ID order. The API shape is unchanged.
+- Bound: `FLOOR_LIMITS.openInquiries` = 200 open at once. One more is refused (`invalid_command`, "end one first"). `openInquiry` checks this before it writes the owner's note or holds a vote, and the write checks again. If the write refuses, a vote this call held is resumed. Ending an inquiry is never refused.
+- A list that does not exist yet (floors kept before this version), or one that cannot be trusted (not an array, over 200, an ID not of meeting-record form, a repeated ID) is built again from the floors. The walk is bounded (`indexPages` = 500 pages of 200), oldest first, and a walk that does not finish refuses (`unavailable`) rather than answer with part of the list. The rebuilt list is stored once, written as the floor's service, so later reads walk nothing. A rebuilt list over 200 is never stored cut short; it is walked again until inquiries end.
+- The reminder drops listed IDs whose floor is gone or has no inquiry (checked again against the floor before the write; the write is revision-guarded), so stale entries cannot fill the bound.
+- No interpreter prompt text and no API summary text were changed. The prompt-room test is unchanged.
+
+ASSUMPTION: 200 open owner inquiries at once is far above use (only the owner opens them). Refusing the 201st is the smallest fail-closed choice. Raising the limit is a constant.
+ASSUMPTION (corrected by the first review, below): the list is believed when it is well formed. A well-formed list that leaves out an open inquiry can only come from a direct storage edit, since every inquiry change writes the list in the same write.
+
+**Tests.** `meetings/floor-inquiries.test.ts`, 12 scenarios on all four backends (48 tests):
+- open, replay, end, end again, ended with the meeting, a restart, and owner-only reads;
+- a record finished by other means leaves the list on the next sweep;
+- no floor walk once the list exists (storage `listAggregates` counted for the reminder, the Needs-you list, the status view, opening and ending), and the first read stores an empty list;
+- floors without a list (rebuilt, oldest first; an end or an open with no list keeps the older ones);
+- ten untrusted list bodies, including an own `__proto__` key and an array-like object;
+- the bound: refused before any note or notice, ending never refused, gone IDs dropped;
+- a sweep of another project neither reminds nor drops;
+- concurrent opens and ends, also racing the first build;
+- two opens racing for the last place (exactly one wins);
+- a stale list that already names the floor (listed once);
+- a planted floor with a malformed record ID left out of a rebuild;
+- an open refused at the write (the last place taken after the early check) resumes the vote it held.
+- Runs: the new test and its neighbours (`floor*`, `procedure`, `start-meeting-floor*`, `chat/meeting-controls` on four backends, `chat/prompt-room`): 500 of 500 on Node 22.23.0 and on Node 24.21.0. `tsc --build --force`, `api:docs:write` (no diff), `check:deps`, `licenses:check`, `roadmap:check` and `plan.test` 6/6 pass.
+- 28 deliberate breakages (own script `/tmp/claude-1000/m05b/breakages.py`, built `dist/meetings/floor.js`, each alone against `floor-inquiries.test` on all four backends, restored and checked by SHA-256): 19 of the first 25 caught at first; 26 of 28 after the race, stale-list, malformed-ID and vote-resume tests were added. Not caught, both equivalent in tests that run calls one after another: (1) the re-check of each floor before the reminder drops it from the list, which matters only when an inquiry opens during the sweep (the write is also revision-guarded); (2) `openInquiries` without its `running` filter, because every way a floor ends also clears its inquiry.
+
+**Not done (remaining M05).**
+- Everything that needs live model runs.
+- The production `checkpointOf`, `persona`, `deskNotes` and `budget` ports, and the `work` release and recall.
+- The M04h late-join gap.
+- A console waiting-on view.
+- `tick` still walks up to `tickPages` (10 x 200) floor records each turn to find the running and owing ones. That is bounded, but ended floors use up the pages. A list of running floors, kept the same way, would be the next bound.
+- The reminder's `projectId` filter still loads every listed floor (at most 200).
+- Residual: two opens racing for the last place both pass the early check. The one refused at the write resumes a vote it held itself (tested), but its owner note ("The owner opens an inquiry") stays on the record, which is append-only. Only at exactly 200 open inquiries.
+- Owner chat: no new control. The refusal reaches chat as the operation's error text.
+
+### M05 slice: first review (Claude agent, Opus 5.5, 2026-11-27 EST; clean context; review and fixes; card NOT flipped; not pushed)
+
+Checked: nothing outside `meetings/floor.ts` writes or removes `meeting-floor` records (no import, migration, retention, archive or delete path names the kind), so every inquiry change goes through `#update` and its list change. The floor and list changes are one operation, and the storage conformance suite commits an operation all or nothing on all four backends. A conflict on the list alone comes back as `stale_revision` on the floor (the runner names the floor) and `#update` retries. Backups are consistent snapshots, so a restore brings back a list and floors from the same moment. The API names no order for `meeting.floor.needs-you`. The prompt text and API docs are unchanged.
+
+Problems found and fixed (product code changed):
+- MEDIUM-HIGH, list believed while stale. Release rollback is supported (`release/activation.ts`). After a rollback, the earlier release opens and ends inquiries without the list. Once this release is back, the well-formed list was believed, and an inquiry the earlier release opened was missing from the owner's Needs-you list and the status view, and got no idle reminder. Fix: the first read after each start (`#inquiriesChecked`, per service instance) walks the floors once (same bound) and stores the list again when its set differs. The write is revision-guarded. A write that loses leaves the instance unchecked, so the next read checks again. When the walk hits its bound, a well-formed list is believed until the next start. The ASSUMPTION above is corrected by this.
+- MEDIUM, vote not held on a retry. After an open refused at the write resumed the vote it held, the same command sent again was answered from the earlier hold (same command ID). The inquiry opened saying `voteHeld: true` while the vote ran on. Fix: the motion's revision is in the hold and resume command IDs. A crash after the hold is still covered by `heldAt`, and identical concurrent requests still share one ID.
+- LOW, scheduled turn stopped. `tick` called `sweep` without a catch. With no list and more floors than the bounded walk reads, every turn refused and no meeting was driven. Now a reminder that cannot run does not stop the meetings' steps. The walk's "too many" now comes back as a value, so only the bound (not a storage error) marks the list checked.
+
+Tests added to `meetings/floor-inquiries.test.ts` (now 14 scenarios on four backends, 56 tests): a well-formed list missing an open inquiry, and one still naming an ended inquiry, put right on the first read after a start; a check whose write loses checks again; a list that matches is not written; the reminder after a start sees the left-out inquiry; the same command retried after a resume holds the vote again; and a floor walk that never ends (reads refused `unavailable` with no list, `tick` goes on, a well-formed list believed after one bounded walk and not walked again). Three earlier tests read once before planting fake IDs, since the first-read check now (correctly) replaces a planted list with the real one.
+
+Runs: `floor*`, `procedure`, `start-meeting-floor*`, `chat/meeting-controls*`, `chat/prompt-room` and `status/*` suites: 755 of 755 on Node 22.23.0 and on Node 24.21.0. `tsc --build --force`, `api:docs:write` (no diff), `check:deps`, `licenses:check`, `roadmap:check` and `plan.test` 6/6 pass.
+
+Deliberate breakages of my own (22, each applied alone to the built `dist/meetings/floor.js`, run against `floor-inquiries.test` on the reference store, restored and checked by SHA-256; script `/tmp/claude-1000/m05b-r1/breakages.py`): 19 caught before the last two tests, 21 after. Not caught, and equivalent: storing a rebuilt list of more than 200 (it is distrusted on read and rebuilt, so only the cost differs).
+
+Card not flipped.
+
+### M05 slice: second review (Claude agent, Opus 5.5, 2026-11-27 EST; clean context; double-check; card NOT flipped; not pushed)
+
+Checked:
+- Every change to a floor's inquiry goes through `#update`: open, end, the owner's `end`, `#closeOut`, and the activity updates that keep an inquiry open. Nothing else writes or removes `meeting-floor` records. The list change rides in the same operation, so it is all or nothing on all four backends. A lost race on the list (create or update) comes back as `stale_revision` on the floor, and `#update` retries.
+- The first-read check cannot take a just-opened inquiry off the list. The list is read before the walk, and the write is guarded by the list's revision. A change committed before the list read is seen by the walk, which reads after it. A change during the walk moves the list's revision, so the check's write loses and the next read checks again. Several controllers, each with its own flag, write only when their walk differs from the shared list. They read the same storage, so they cannot alternate writes. Cost: one bounded walk per start per controller.
+- Vote hold and resume IDs: a crash after the hold is covered by `heldAt` (no second hold). Identical concurrent requests share one ID. The resume after a refused write runs once, and only when the floor has no inquiry.
+- `tick` swallows a reminder failure. The only expected failure is `unavailable` (no list, too many floors). It still shows: the Needs-you list and the status view refuse the same way.
+- The refusal at 201 comes before the owner note and the vote hold. Its text is plain. The order change is harmless.
+
+Problem found and fixed (product code changed):
+- LOW, "ending is never refused" did not hold with no list and more floors than the bounded walk reads. Ending an inquiry, the owner's `end` and `#closeOut` all asked for a list change and were refused `unavailable`. Now an end with no list to trust changes no list. An open is still refused.
+
+Recorded, not changed:
+- LOW. A crash between the vote hold and the inquiry write, followed by a retry refused at the 200 limit, leaves the vote held with no inquiry until the owner retries once a place is free. Resume is service-only. The same state exists after a crash with no retry.
+- LOW. A refused open's resume can race an identical request that succeeds between the reload and the resume. That needs the limit freeing in that window.
+- LOW. During a rolling deploy, a controller on the earlier release could open an inquiry after this release's check, and it would stay off the list until the next start.
+
+Tests added to `meetings/floor-inquiries.test.ts` (16 scenarios, 64 tests on four backends): another controller opens an inquiry while the first-read check walks the floors (the inquiry stays listed, the next read stores both); with no list and an endless floor walk, ending an inquiry and ending a meeting are not refused and no partial list is written. The stale-list test now reads once before planting, so it reaches the open that adds an already-listed floor.
+
+Deliberate breakages (21 of my own, script `/tmp/claude-1000/m05b-r2/breakages.py`, each applied alone to the built `dist/meetings/floor.js` against `floor-inquiries.test` on four backends, restored and checked by SHA-256): 20 of 21 caught at first, 21 of 21 after the stale-list test change.
+
+Runs: `floor*`, `procedure*`, `start-meeting-floor*`, `chat/meeting-controls*` (four backends), `chat/prompt-room` and `status/*`: 769 of 769 on Node 22.23.0 and on Node 24.21.0. `tsc --build --force`, `api:docs:write` (no diff), `check:deps`, `licenses:check`, `roadmap:check` and `plan.test` 6/6 pass.
+
+Card not flipped.
+
+### M05 slice: third check of the second review's change (Claude agent, Opus 5.5, 2026-11-27 EST; clean context; tests and notes only; card NOT flipped; not pushed)
+
+Checked `#inquiryChange` after the change "ending an inquiry is never refused". No product problem found:
+- With no list to trust and the walk at its bound, an end (`endInquiry`, the owner's `end`, `#closeOut`) writes the floor and no list. An open is refused `unavailable`, first by `openInquiry`'s check before any note or hold, and again at the write. With a good list, an end takes the ID off as before. Ending an inquiry that was never listed writes the same list.
+- Possible stale entry: one controller's walk finishes just under the bound while another's reaches it and ends an inquiry with no list. The first then stores a list that still names the ended inquiry. This is harmless. `sweep`, `ownerPending` and `openInquiries` load each listed floor and skip one with no inquiry. `sweep` takes it off the list, and the first-read check after a start rewrites the list when the walk differs. It takes one of the 200 places until the next scheduled turn.
+- An open inquiry cannot drop off the list. Every open writes the list (create or update) in the same write as its floor, guarded by the list's revision. An end with no list writes no list, so it cannot remove anyone else's entry. A walk that misses an open made during it loses its write.
+
+Tests added to `meetings/floor-inquiries.test.ts` (17 scenarios, 68 tests on four backends):
+- The no-list test now also covers `#closeOut`: the owner says done on a meeting closed by other means, and the floor ends with its inquiry.
+- New test: the list goes missing after the open's first check, and the walk cannot finish. The open is refused at the write, the floor gets no inquiry and the stored list is unchanged. The write-time refusal was otherwise not exercised.
+
+Deliberate breakages: 12 of my own, script `/tmp/claude-1000/m05b-r3/breakages.py`. Each was applied alone to the built `dist/meetings/floor.js` and restored, checked by SHA-256. 11 of 12 were caught before; the one missed was the write-time open refusal. All 12 are caught after.
+
+Runs: `floor*`, `procedure*`, `api/start-meeting-floor*`, `chat/meeting-controls*`, `chat/prompt-room`, `status/*` (22 files): 773 of 773 on Node 22.23.0 and on Node 24.21.0. `tsc --build --force`, `check:deps` and `plan.test` 6/6 pass.
+
+Card not flipped.
 ## B05 and B04 retention slice: only open adoptions and experiments count toward a project's limit, one asker has at most 5 waiting, and ended records leave a full list without being deleted (Claude agent, Opus 5.5, 2026-11-27 EST; branch `card-b05r` from main `26899633`; cards B04 and B05 NOT flipped; task-plan files unchanged; not pushed; no workflow dispatched; no model or network call made)
 
 Plain words first. Before this slice, every adoption and every experiment a project ever had counted toward its limit of 300, and nothing was ever removed. So someone with only `meeting.read` could ask to adopt an improved experiment and take the request back, over and over, until the project held 300 adoptions. From then on nobody could ask for a new adoption in that project. Someone with `meeting.agenda` could do the same to experiments by proposing and withdrawing. That was the open item the B05 second review recorded. Now only open records count: an adoption that is asked or in force, or an experiment that is proposed, running or paused. One asker can have at most 5 requests waiting for a review in a project at once, and one proposer at most 5 proposals waiting for their criteria. The project's list still shows at most 300 records. When it is full, the oldest ended record leaves the list in the same write as the new one. Nothing is deleted: a record that left the list is kept exactly as it was and can still be read by its ID.
@@ -22064,3 +22166,11 @@ Deliberate breakages of my own: 21 (`/tmp/claude-1000/b05w-r2/breakages.py`), no
 Runs (Linux, `/tmp/nn-slot.sh`, `NIMBLENEWT_REQUIRE_SANDBOX=1`, offline guard, TMPDIR `/tmp/claude-1000/b05w-r2/`): `tsc --build --force`; `api:docs:write` (no diff); `check:deps`, `licenses:check` and `roadmap:check` pass; `plan.test` 6 of 6. Node 22 and Node 24.21.0: 598 of 598 each, none skipped, on the same file list as the first review. The interpreter prompt is unchanged, as are CHAT_OPS and STATUS_KINDS.
 
 Card B05 not flipped.
+## CI fix: two typical-tier failures on main after K05 third slice (tests only)
+
+The typical tier (`.github/workflows/ci.yml`, five parts via `scripts/test-changed.mjs --shard=i/5`, which runs `scripts/run-package-tests.mjs` with `NIMBLENEWT_TIER=typical NIMBLENEWT_FAST=1`) failed on Linux Node 22 in two controller test files. Both reproduce locally only with that environment set; neither is a product regression.
+
+- `api/start-dispatch.test` ("the tick runs the reconciler and stall detection ..."): the test lists the tick's loops whose names start with `recovery.` and expected exactly reconcile, stall-scan and auto-step. K05 third slice (`6b2039c0`) added the sweep `recovery.workers-hold` to every tick in `api/start.ts` (it reviews the workers hold; with no promotion there is no hold and it reports ok, and it needs no grant). The new entry is intended. The expected lists now include `["recovery.workers-hold", true]`, with a comment. The test's intent is kept: every recovery loop passes without the stall-scan right, the owner is told once, and the narrow right is not the broad one. It fails on every tier, not only the typical one; the merge checks of K05 did not run this file.
+- `recovery/recovery.test` ("the same writes give the same manifest on ... PostgreSQL"): it collects one manifest digest per backend from the preceding per-backend tests and asserted exactly 4. `domain/testing/backends.ts` gives only the reference store and SQLite when `NIMBLENEWT_TIER=typical`, so the typical tier has 2. This dates from K04 (`343b86d1`), not from K05. The test now expects `backends.length` digests (4 on the exhaustive tier, 2 on the typical tier), requires at least 2, and still requires all of them to be equal. A backend whose test failed pushes no digest, so the count still catches it.
+
+No product code changed. Runs are listed in the commit message.

@@ -80,8 +80,11 @@ for (const backend of backends) {
   });
 }
 
-test("the same writes give the same manifest on the reference store, SQLite, SQLite on a worker thread and PostgreSQL", () => {
-  assert.equal(digestsAcrossBackends.length, 4);
+// The typical tier (NIMBLENEWT_TIER=typical) runs the reference store and SQLite only; the exhaustive tier runs all four. Every backend of the run must have written its manifest (a failed one
+// pushes no digest), and all must agree.
+test("the same writes give the same manifest on the reference store, SQLite, SQLite on a worker thread and PostgreSQL (those of the tier)", () => {
+  assert.equal(digestsAcrossBackends.length, backends.length);
+  assert.ok(backends.length >= 2, "at least two backends are compared");
   assert.equal(new Set(digestsAcrossBackends).size, 1, digestsAcrossBackends.join(" "));
 });
 
