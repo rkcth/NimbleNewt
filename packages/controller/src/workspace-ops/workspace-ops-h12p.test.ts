@@ -19,7 +19,7 @@ for (const backend of backends) {
     const { taskId } = await w.task("t", ann);
     const other = (await w.task("t2", bob)).taskId;
     const state = { live: opts.live ?? true, stopped: opts.stopped ?? false, frozen: opts.frozen as string | undefined, asked: [] as WorkspaceCall[], quiesced: 0 };
-    const attempts = new Map<string, { taskId: string; agentId: string }>([["att-ann", { taskId, agentId: ann.id }], ["att-ann-2", { taskId, agentId: ann.id }], ["att-bob", { taskId: other, agentId: bob.id }]]);
+    const attempts = new Map<string, { taskId: string; agentId: string }>([["att-ann", { taskId, agentId: ann.id }], ["att-ann-2", { taskId, agentId: ann.id }], ["att-bob", { taskId: other, agentId: bob.id }], ["att-ann-other", { taskId: other, agentId: ann.id }]]);
     const port: WorkspacePort = { run: async (call) => { state.asked.push(call); return opts.port === undefined ? { ok: true, summary: "moved", detail: { changed: true, base: "b".repeat(40), kept: 1, taken: 1, merged: 0, conflictCount: 0, conflicts: [] } } : opts.port(call); } };
     const svc = WorkspaceOpService.withEpoch(w.storage, w.epoch, {
       quiesce: { around: async () => { state.quiesced++; throw new Error("a reapply must not be quiesced"); } },
@@ -57,6 +57,20 @@ for (const backend of backends) {
       const b = await r.svc.reapply(r.as(r.ann, r.taskId), { commandId: "ra-2", attemptId: "att-ann" });
       assert.equal(b.round, 2);
       assert.equal(await r.svc.refreshRounds(r.taskId), 2);
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: the same command ID on the same agent's credential of another task is a new refresh of that task, never a replay of the first task's answer (card P10b, take scoping)`, async () => {
+    const r = await rig();
+    try {
+      const first = await r.svc.reapply(r.as(r.ann, r.taskId), { commandId: "ra-take", attemptId: "att-ann" });
+      const second = await r.svc.reapply(r.as(r.ann, r.other), { commandId: "ra-take", attemptId: "att-ann-other" });
+      assert.deepEqual([second.taskId, second.replayed, second.id === first.id], [r.other, false, false]);
+      assert.deepEqual(r.state.asked.map((c) => c.taskId), [r.taskId, r.other]);
+      // The same take asking again still replays its own answer.
+      const again = await r.svc.reapply(r.as(r.ann, r.other), { commandId: "ra-take", attemptId: "att-ann-other" });
+      assert.deepEqual([again.id, again.replayed], [second.id, true]);
+      assert.equal(r.state.asked.length, 2);
     } finally { await r.store.close(); }
   });
 

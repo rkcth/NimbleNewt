@@ -22970,3 +22970,36 @@ In plain words: the woken integrator's attempt can now do its job. Its task cred
 1. (Third clause) What may remain is unchanged from the third slice: once inquiries and reviews are admitted in production, they share the two control places with landing. Whether landing then needs a share of its own is still open.
 2. OPEN chat wording, unchanged: "inquiries and reviews" in STATUS_KINDS `capacity.about` and in the `capacity.quotas` summaries (see the third slice). Still no room in the prompt.
 3. The follow-ups above: an ended wake's idle lease, and a cost charged after a transfer.
+
+### P10b fourth slice, first review (Claude agent, Opus 5.5, 2026-11-28 EST; card NOT flipped)
+
+Read the whole diff with a careful owner's eye: what can a confused or compromised agent do with a landing task's credential?
+
+**Checked and sound.**
+- Only the wake writes `landing-task` and `integrator-wake` records. No operation writes a record kind by name; a backup restore is the owner's.
+- A release clears the assignment's owner, so a released landing task has no reach.
+- Agent names are `[a-z0-9-]`, so a take key (`agent:x.<task>`) can never be another principal's own ID.
+- The door's `operation === "landing"` is strict equality, and the service takes only an exact `WORKSPACE_OPERATIONS` name, so no other operation passes as a landing.
+- Unknown and foreign leases, tasks and projects get the same refusal.
+- A landing on a task credential lands only the queue's first approved submission, under the caller's own live hold.
+- The reach is never wider than the agent's own credential with the same rights: one branch, a current wake, and project-wide `workspace.manage`.
+
+**Fixed.**
+1. (Medium) The author's own refresh (`reapply`) still scoped command IDs by principal only. The same command ID on the same agent's credential for another task replayed the first task's recorded answer and refreshed nothing. Now scoped by `takeKeyOf` like the rest. Own credentials are unchanged. Test in `workspace-ops-h12p`.
+2. (Medium, fail closed) A landing on a task credential was let through even by a workspace service composed without `landingLease` or `landingQueue`. Such a landing would be checked by neither gate. Now refused (`not_found`) unless both are composed. The composed controller always has both.
+3. (Low, liveness) An auto-ended wake whose work landed left the woken integrator's idle hold in place for up to the lease's TTL (24 h at most). While it ran, the branch counted as held and nothing new was woken. The end now gives the hold back when the round's live lease is the woken integrator's own. It uses the fence the round read (a hold that changed since is refused and left alone) and the command ID `iwk-free:<task>:<fence>`. It is best effort, and `ended[].lease` says `released`. A taken branch (another active holder) is never touched. This closes the first "Limits stated" item above.
+4. Test gap: a wildcard grant (`*` on the project) in place of the exact `integration.lease` was not tested. It is now.
+
+**Deliberate breakages, new (21; script `/tmp/claude-1000/p10b4-r1/brk/breakages.py`, sha256 restore, ten slice test files at the typical tier).** 15 caught. Equivalent (6):
+- `reachServes` without both project checks: `allowsExactly` under a task scope refuses another project;
+- `landingReach` without the record-project check: `reachServes` compares the reach's project with the credential's;
+- `landingReach` without its kind/prefix check: `reachServes` checks both;
+- `renew` without the holder identity: the lease service's own renew checks the holder;
+- the idle-hold release without its holder check: a holder that is not the woken integrator and is active makes the end `taken`, which never releases (only an inactive other holder differs, and the lease door ends that one at the next take anyway);
+- the round keeping the ended branch counted open: the same round judges capacity on its opening snapshot, where the ended integrator is still busy.
+
+**Runs after the fixes** (`tsc --build --force` first; `/tmp/nn-slot.sh` one at a time, `NIMBLENEWT_REQUIRE_SANDBOX=1`, offline guard, TMPDIR `/tmp/claude-1000/p10b4-r1/t`):
+- `check:deps`, `licenses:check` and `roadmap:check` pass; `plan.test.mjs` 6 of 6; `api:docs:write` gives no diff.
+- The same 73 focused files: 2,174 of 2,174 on Node 22 and on Node 24.21.0 (8 new tests).
+- All 235 `api/start*.test.js` at the typical tier: 593 of 593 on Node 22.
+- No new operation, owner control, chat op, status kind or prompt text; CHAT_OPS and STATUS_KINDS unchanged. The new tests use no POSIX path, mode or link assumption.

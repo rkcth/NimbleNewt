@@ -432,7 +432,8 @@ export class WorkspaceOpService {
     const taskId = checkTaskId(attempt.taskId);
     const task = (await this.#runner.get("task", taskId))?.body as unknown as TaskBody | undefined;
     if (task === undefined) throw new DomainError("not_found", `task ${taskId} does not exist`);
-    const scoped = scopedCommandId(by.id, command.commandId);
+    // Scoped by the take too (card P10b): a task credential's command ID in a later task never replays an earlier task's recorded refresh.
+    const scoped = scopedCommandId(takeKeyOf(by), command.commandId);
     const id = derivedId("wsr", scoped);
     const replay = await this.#replayOf(by, id, scoped, taskId);
     if (replay !== undefined) return replay;
@@ -962,6 +963,8 @@ export class WorkspaceOpService {
     const refused = (): DomainError => new DomainError("not_found", `task ${taskId} does not exist or is not yours to manage`);
     // A landing task's own credential (card P10b): a landing only, in its project, with the agent's exact project-wide workspace.manage and its lease right there. The same refusal as any other, so it says nothing more.
     if (by.taskScope !== undefined && operation === "landing" && projectId !== undefined) {
+      // Only where every landing is gated by the lease and the queue: without both, a landing here would be checked by neither, so a task credential is refused as before (fail closed).
+      if (this.#deps.landingLease === undefined || this.#deps.landingQueue === undefined) throw refused();
       const reach = await reachOf(this.#deps.landingReach, by);
       if (!reachServes(by, reach, projectId) || !allowsExactly(by, "workspace.manage", projectId)) throw refused();
       return projectId;

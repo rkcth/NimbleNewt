@@ -61,7 +61,7 @@ export interface WakeRound {
    * Landing tasks this round ended (cancelled) because their wake's work is no longer queued (it landed, or was taken out or returned) or because another active integrator holds the branch's live lease now. Never one
    * with an attempt admitted or running: that one ends through its attempt as usual, and a later round ends the task once the attempt is over.
    */
-  readonly ended?: readonly { readonly projectId: string; readonly branch: string; readonly taskId: string; readonly why: "landed" | "taken" }[];
+  readonly ended?: readonly { readonly projectId: string; readonly branch: string; readonly taskId: string; readonly why: "landed" | "taken"; readonly lease?: "released" }[];
   /** Not every queue was looked at, or the round stopped at one of its bounds. */
   readonly partial: boolean;
   /** Set when the round woke nobody because the leases or the wake records could not all be read. */
@@ -72,7 +72,8 @@ export interface WakeRound {
 
 export interface IntegratorWakeDeps {
   readonly queue: Pick<LandingQueueService, "queuesWithEntries">;
-  readonly leases: Pick<IntegratorLeaseService, "liveLeases" | "projectOfTask">;
+  /** `release` (optional): an ended wake whose work landed gives back the woken integrator's own idle hold of the branch (see `round`). Absent: the hold runs out by itself. */
+  readonly leases: Pick<IntegratorLeaseService, "liveLeases" | "projectOfTask"> & Partial<Pick<IntegratorLeaseService, "release">>;
   readonly capacity: Pick<IntegratorCapacity, "integrators">;
   readonly projects: Pick<ProjectService, "createTask" | "getTask" | "transitionTask">;
   readonly assignments: Pick<AssignmentService, "assignTask" | "getAssignment">;
@@ -214,7 +215,7 @@ export class IntegratorWake {
     let finishes = 0;
     // A wake whose work is done ends with its task (card P10b): its work is no longer queued on the branch (it landed, or was taken out or returned), or another active integrator took the branch. Judged on this
     // round's picture: a queue missing from a partial read of the queues is not taken as landed. At most `policyReads` such ends tried per round.
-    const ended: { projectId: string; branch: string; taskId: string; why: "landed" | "taken" }[] = [];
+    const ended: { projectId: string; branch: string; taskId: string; why: "landed" | "taken"; lease?: "released" }[] = [];
     let ends = 0;
     for (const w of wakes.open) {
       const lease = leases.find((l) => l.projectId === w.projectId && l.branch === w.branch);
@@ -226,7 +227,13 @@ export class IntegratorWake {
       ends++;
       const why = taken ? "taken" as const : "landed" as const;
       try {
-        if (await this.#end(w.taskId, why)) { ended.push({ projectId: w.projectId, branch: w.branch, taskId: w.taskId, why }); openOn.delete(`${w.projectId}\0${w.branch}`); }
+        if (await this.#end(w.taskId, why)) {
+          // Its work landed and the woken integrator still holds the branch: nothing runs on the ended task (no attempt, and its credential reaches nothing now), so the hold is given back, under the fence this round
+          // read (a hold that changed since is left alone), and the branch's next work is not kept waiting until the hold runs out (up to a day). Best effort: a refusal leaves the hold to run out as before.
+          const freed = why === "landed" && lease !== undefined && lease.holder === w.agentId && (await this.#free(w.taskId, lease));
+          ended.push({ projectId: w.projectId, branch: w.branch, taskId: w.taskId, why, ...(freed ? { lease: "released" as const } : {}) });
+          openOn.delete(`${w.projectId}\0${w.branch}`);
+        }
       } catch (error) {
         if (!(error instanceof DomainError)) throw error;
         unreadable++;
@@ -281,6 +288,15 @@ export class IntegratorWake {
       }
     }
     return { woken, held, open, noneFree, spent, unreadable, ...(ended.length === 0 ? {} : { ended }), partial: queuesPartial || stopped };
+  }
+
+  /** Gives back an ended wake's idle hold (see `round`): true when released. The command ID derives from the task and the fence, so a repeat is the same command. A domain refusal (the hold changed hands) is false. */
+  async #free(taskId: string, lease: { readonly leaseId: string; readonly fence: number }): Promise<boolean> {
+    if (this.#deps.leases.release === undefined) return false;
+    try {
+      await this.#deps.leases.release({ commandId: `iwk-free:${taskId}:${lease.fence}`, leaseId: lease.leaseId, fence: lease.fence, note: "the landing task it was woken for ended: its work is no longer queued" });
+      return true;
+    } catch (error) { if (error instanceof DomainError) return false; throw error; }
   }
 
   /**

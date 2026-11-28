@@ -155,7 +155,8 @@ for (const backend of backends) {
       await r.w.principals.setGrants(r.w.owner, { commandId: "less-1", principalId: "agent:ivy", expectedRevision: ivyRecord.revision, grants: integrates([a, b]).filter((g) => !(g.action === "workspace.manage" && g.project === a)) });
       const less = await r.w.credentials.authenticate(cA.token);
       await refuses("not_found", () => r.land(less, "land-4", frontA, renewed));
-      await r.w.principals.setGrants(r.w.owner, { commandId: "less-2", principalId: "agent:ivy", expectedRevision: ivyRecord.revision + 1, grants: [{ action: "workspace.manage", project: a }, { action: "workspace.manage", project: "*" }, { action: "integration.lease", project: b }] });
+      await r.w.principals.setGrants(r.w.owner, { commandId: "less-2", principalId: "agent:ivy", expectedRevision: ivyRecord.revision + 1, grants: [{ action: "workspace.manage", project: a }, { action: "workspace.manage", project: "*" }, { action: "integration.lease", project: b }, { action: "*", project: a }] });
+      // A wildcard grant (even `*` on Apple) is not the exact right: the reach still serves nothing.
       const none2 = await r.w.credentials.authenticate(cA.token);
       await refuses("not_found", () => r.leaseOps.list(none2, { projectId: a }));
       // The pool: the landing task still has its reach, but with the right gone it serves nothing, so nothing is looked at, taken or counted.
@@ -371,6 +372,58 @@ for (const backend of backends) {
       assert.equal(six.ended, undefined);
       assert.equal((await r.w.projects.getTask(tA2))?.state, "ready");
       void frontA2;
+    } finally { await r.close(); }
+  });
+
+  test(`${backend.name}: an ended wake whose work landed gives back the woken integrator's idle hold, never another's or a changed one; a landing on a task credential needs both landing gates (card P10b)`, async () => {
+    const r = await rig();
+    try {
+      const [a, b] = [await r.project("Apple"), await r.project("Birch")];
+      const frontA = await r.queued(a);
+      const frontB = await r.queued(b);
+      await r.person("ivy", integrates([a]));
+      await r.person("max", integrates([b]));
+      const zoe = await r.person("zoe", integrates([b]));
+      const one = await r.wake.round();
+      const [tA, tB] = [one.woken.find((x) => x.projectId === a)!.taskId, one.woken.find((x) => x.projectId === b)!.taskId];
+      // Apple: ivy takes the branch on its landing credential, lands, and keeps the hold; its work then leaves the queue. Birch: max holds the branch, then its work leaves the queue, then the hold changes hands
+      // (max gives it back and zoe takes it) after the round read the leases: that hold is not max's to give back any more.
+      const cA = await r.credential(tA, "ivy");
+      const lA = await r.leaseOps.acquire(cA.as, { commandId: "take", taskId: frontA, branch: "main", ttlMs: 30 * MIN });
+      await r.queue.remove({ commandId: "landed-a", actor: "controller", projectId: a, branch: "main", taskId: frontA, reason: "landed" });
+      const cB = await r.credential(tB, "max");
+      const lB = await r.leaseOps.acquire(cB.as, { commandId: "take", taskId: frontB, branch: "main", ttlMs: 30 * MIN });
+      await r.queue.remove({ commandId: "landed-b", actor: "controller", projectId: b, branch: "main", taskId: frontB, reason: "landed" });
+      let swapped = false;
+      const leases = {
+        liveLeases: async () => {
+          const seen = await r.leases.liveLeases();
+          if (!swapped) { swapped = true; await r.leaseOps.release(cB.as, { commandId: "give-back", leaseId: lB.leaseId, fence: lB.fence }); await r.leaseOps.acquire(zoe, { commandId: "zoe", taskId: frontB, branch: "main", ttlMs: 30 * MIN }); }
+          return seen;
+        },
+        projectOfTask: (t: string) => r.leases.projectOfTask(t),
+        release: (c: Parameters<typeof r.leases.release>[0]) => r.leases.release(c),
+      };
+      const ending = IntegratorWake.withEpoch(r.w.storage, r.w.epoch, { queue: r.queue, leases, capacity: r.capacity, projects: r.w.projects, assignments: r.w.assignments, landingBranch: async () => "main", activeAgent: async () => true }, r.options);
+      const two = await ending.round();
+      const byTask = new Map((two.ended ?? []).map((e) => [e.taskId, e]));
+      assert.deepEqual([byTask.get(tA)?.why, byTask.get(tA)?.lease, byTask.get(tB)?.why, byTask.get(tB)?.lease], ["landed", "released", "landed", undefined], JSON.stringify(two));
+      const [nowA, nowB] = [await r.leases.get(lA.leaseId), await r.leases.get(lB.leaseId)];
+      assert.deepEqual([nowA?.live, nowB?.live, nowB?.holder], [false, true, "zoe"], "ivy's idle hold is given back; zoe's new hold is untouched");
+      // A hold of another active integrator (taken) is never given back by the end.
+      assert.equal((await r.leases.get(lB.leaseId))?.fence, lB.fence + 1);
+
+      // A workspace service with no lease gate (or no queue gate) refuses a landing task's credential outright, as for any task credential.
+      const frontA2 = await r.queued(a);
+      const three = await r.wake.round();
+      const tA2 = three.woken.find((x) => x.projectId === a)!.taskId;
+      const cA2 = await r.credential(tA2, "ivy");
+      assert.ok((await r.wake.landingReach(cA2.as)) !== undefined);
+      const port = { run: async () => ({ ok: true, summary: "landed", detail: { landed: true } }) } as unknown as WorkspacePort;
+      const base = { landingReach: (by: Principal) => r.wake.landingReach(by), quiesce: { around: async (_s: unknown, _o: unknown, run: (x: never) => Promise<unknown>) => run({ attempts: [] } as never) }, portOf: async () => port, attempts: { live: async () => [], frozenReason: async () => undefined, release: async () => undefined, tell: async () => true } } as never;
+      const noLease = WorkspaceOpService.withEpoch(r.w.storage, r.w.epoch, { ...(base as object), landingQueue: { check: async () => undefined, landedChanges: async () => [] } } as never, r.options);
+      const noQueue = WorkspaceOpService.withEpoch(r.w.storage, r.w.epoch, { ...(base as object), landingLease: async () => undefined } as never, r.options);
+      for (const svc of [noLease, noQueue]) await refuses("not_found", () => svc.request(cA2.as, { commandId: "ungated", operation: "landing", taskId: frontA2, reason: "no gate" }));
     } finally { await r.close(); }
   });
 
