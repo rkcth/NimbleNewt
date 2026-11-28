@@ -28,6 +28,11 @@ export interface SwarmDeps {
   readonly settings?: Pick<SwarmLimitsService, "effective">;
   /** Fixed limits (tests and embedders): levels, live children of one parent and, optionally, children of one parent in all. */
   readonly limits?: { readonly depth: number; readonly children: number; readonly total?: number };
+  /**
+   * Whether a child may be made in this project at all, asked after the caller's right to spawn is settled and before anything is made (card B06, third slice: no child task is made in the NimbleNewt
+   * development project). The reason refuses. Absent: every project may have children.
+   */
+  readonly spawnGate?: (projectId: string) => Promise<string | undefined>;
 }
 
 const LINK = "swarm-link";
@@ -82,6 +87,8 @@ export class SwarmService {
     const parent = await this.#deps.projects.getTask(parentId);
     if (parent === undefined || !(await this.#deps.budgets.canManage(by, parentId)) || !(by.kind === "owner" || allows(by, "task.create", parent.projectId))) throw new DomainError("forbidden", `${by.id} may not spawn from that task`);
     if (FINAL.has(parent.state)) throw new DomainError("invalid_command", `a ${parent.state} task spawns nothing`, { field: "parentTaskId" });
+    const closed = await this.#deps.spawnGate?.(parent.projectId);
+    if (closed !== undefined) throw new DomainError("invalid_command", closed, { field: "parentTaskId" });
     const limits = await this.#limits();
     if ((await this.#depth(parentId)) + 1 > limits.depth) throw new DomainError("invalid_command", limits.depth === 0 ? "the owner allows no child tasks now (swarm depth 0)" : `a task may spawn at most ${limits.depth} levels deep`, { field: "parentTaskId" });
     const created = await this.#deps.projects.createTask({ commandId: scopedCommandId(by.id, `${command.commandId}:child`), actor: by.id, projectId: parent.projectId, title } as never);

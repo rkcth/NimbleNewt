@@ -515,6 +515,28 @@ export class ProjectResourceService {
   }
 
   /**
+   * The places a project's work may happen in, from its records alone (card B06, third slice: the NimbleNewt development project's own checkout): every bound resource (its kind, label, location and
+   * whether it gives write access), and every repository the project record lists that no binding (bound or ended) names: a binding's own entry in the list follows the binding (moved with it; an ended one
+   * holds nothing). For code that builds the services; takes no caller's rights and reads only.
+   * `too-many` past `limit` places (never a part of the list). Throws `unavailable` past the binding scan limit, like every other look at a project's bindings.
+   */
+  async localPlaces(projectId: string, limit: number): Promise<readonly { readonly label: string; readonly kind: ResourceKind; readonly locator: string; readonly write: boolean }[] | "too-many"> {
+    const id = checkProjectId(projectId);
+    const project = (await this.#runner.get("project", id))?.body as unknown as ProjectBody | undefined;
+    const out: { label: string; kind: ResourceKind; locator: string; write: boolean }[] = [];
+    const handles = new Set<string>();
+    for (const r of await this.#resourcesOf(id)) {
+      if (r.repositoryId !== undefined) handles.add(r.repositoryId);
+      if (r.state !== "bound") continue;
+      out.push({ label: r.label, kind: r.kind, locator: r.locator, write: r.scope.mode === "write" });
+    }
+    for (const repo of project?.repositories ?? []) {
+      if (!handles.has(repo.id)) out.push({ label: repo.label ?? repo.id, kind: "repository", locator: repo.location, write: false });
+    }
+    return out.length > limit ? "too-many" : out;
+  }
+
+  /**
    * Whether a worker host may open a task's workspace on `folder` (card P02: the workspace admits only repositories in the task's access scope). For code that builds the services (the host on this computer); takes no
    * caller's rights, reads only and never pins. `folder` is compared with the binding's location exactly as written (the location is opaque here and never read from disk).
    *

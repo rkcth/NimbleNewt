@@ -131,6 +131,41 @@ test("spawns sent at the same moment cannot take a parent over its live-children
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
+test("a spawn gate closes a project to children after the caller's right is settled and before anything is made; a gate that fails refuses; other projects spawn (card B06, third slice, first review)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-swarm-gate-"));
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4 });
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    const closedProject = (await c.services.projects.createProject({ commandId: "p1", actor: rob.id, name: "Closed" })).id;
+    const openProject = (await c.services.projects.createProject({ commandId: "p2", actor: rob.id, name: "Open" })).id;
+    const inClosed = (await c.services.projects.createTask({ commandId: "t1", actor: rob.id, projectId: closedProject, title: "Closed root" })).id;
+    const inOpen = (await c.services.projects.createTask({ commandId: "t2", actor: rob.id, projectId: openProject, title: "Open root" })).id;
+    const budgets = BudgetService.withEpoch(c.storage, c.epoch);
+    for (const [i, t] of [inClosed, inOpen].entries()) await budgets.open(rob, { commandId: `b${i}`, taskId: t, currency: "USD", costMicros: 1_000_000, computeMs: 60_000 });
+    const asked: string[] = [];
+    let failing = false;
+    const gate = async (projectId: string): Promise<string | undefined> => { asked.push(projectId); if (failing) throw new DomainError("unavailable", "settings unreadable"); return projectId === closedProject ? "closed to children" : undefined; };
+    const swarm = SwarmService.withEpoch(c.storage, c.epoch, { projects: c.services.projects, contracts: c.services.contracts, budgets, stops: StopService.withEpoch(c.storage, c.epoch, c.services.pauses, ports([])), limits: { depth: 2, children: 3 }, spawnGate: gate });
+    const tasks = async () => (await c.storage.listAggregates("task", { limit: 100 })).length;
+    const before = await tasks();
+    await assert.rejects(swarm.spawn(rob, { commandId: "s1", parentTaskId: inClosed, title: "child", ...WANT, costMicros: 1000, computeMs: 10 }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command" && e.message === "closed to children");
+    assert.equal(await tasks(), before, "nothing was made");
+    // A caller without the right to spawn from the parent is refused by the right check, and the gate is not asked (it says nothing about the project to them).
+    const made = await c.services.agents.create(rob, { commandId: "mk-bo", friendlyName: "Bo", roles: ["author"] });
+    const bo = await c.services.principals.authenticate((await c.services.principals.issueCredential(rob, `agent:${made.id}`)).token);
+    asked.length = 0;
+    await assert.rejects(swarm.spawn(bo, { commandId: "s2", parentTaskId: inClosed, title: "child", ...WANT, costMicros: 1000, computeMs: 10 }), (e: unknown) => e instanceof DomainError && e.code === "forbidden");
+    assert.deepEqual(asked, [], "the gate is asked only after the right is settled");
+    // Another project spawns as before; a gate that fails refuses there too, and makes nothing.
+    assert.ok((await swarm.spawn(rob, { commandId: "s3", parentTaskId: inOpen, title: "child", ...WANT, costMicros: 1000, computeMs: 10 })).taskId);
+    failing = true;
+    const mid = await tasks();
+    await assert.rejects(swarm.spawn(rob, { commandId: "s4", parentTaskId: inOpen, title: "child two", ...WANT, costMicros: 1000, computeMs: 10 }), /settings unreadable/);
+    assert.equal(await tasks(), mid, "a failing gate makes nothing");
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
 after(stopServer);
 
 for (const backend of backends) {
