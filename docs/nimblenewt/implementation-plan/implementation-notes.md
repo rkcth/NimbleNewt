@@ -21933,3 +21933,20 @@ Deliberate breakages (21 of my own, script `/tmp/claude-1000/m05b-r2/breakages.p
 Runs: `floor*`, `procedure*`, `start-meeting-floor*`, `chat/meeting-controls*` (four backends), `chat/prompt-room` and `status/*`: 769 of 769 on Node 22.23.0 and on Node 24.21.0. `tsc --build --force`, `api:docs:write` (no diff), `check:deps`, `licenses:check`, `roadmap:check` and `plan.test` 6/6 pass.
 
 Card not flipped.
+
+### M05 slice: third check of the second review's change (Claude agent, Opus 5.5, 2026-11-27 EST; clean context; tests and notes only; card NOT flipped; not pushed)
+
+Checked `#inquiryChange` after the change "ending an inquiry is never refused". No product problem found:
+- With no list to trust and the walk at its bound, an end (`endInquiry`, the owner's `end`, `#closeOut`) writes the floor and no list. An open is refused `unavailable`, first by `openInquiry`'s check before any note or hold, and again at the write. With a good list, an end takes the ID off as before. Ending an inquiry that was never listed writes the same list.
+- Possible stale entry: one controller's walk finishes just under the bound while another's reaches it and ends an inquiry with no list. The first then stores a list that still names the ended inquiry. This is harmless. `sweep`, `ownerPending` and `openInquiries` load each listed floor and skip one with no inquiry. `sweep` takes it off the list, and the first-read check after a start rewrites the list when the walk differs. It takes one of the 200 places until the next scheduled turn.
+- An open inquiry cannot drop off the list. Every open writes the list (create or update) in the same write as its floor, guarded by the list's revision. An end with no list writes no list, so it cannot remove anyone else's entry. A walk that misses an open made during it loses its write.
+
+Tests added to `meetings/floor-inquiries.test.ts` (17 scenarios, 68 tests on four backends):
+- The no-list test now also covers `#closeOut`: the owner says done on a meeting closed by other means, and the floor ends with its inquiry.
+- New test: the list goes missing after the open's first check, and the walk cannot finish. The open is refused at the write, the floor gets no inquiry and the stored list is unchanged. The write-time refusal was otherwise not exercised.
+
+Deliberate breakages: 12 of my own, script `/tmp/claude-1000/m05b-r3/breakages.py`. Each was applied alone to the built `dist/meetings/floor.js` and restored, checked by SHA-256. 11 of 12 were caught before; the one missed was the write-time open refusal. All 12 are caught after.
+
+Runs: `floor*`, `procedure*`, `api/start-meeting-floor*`, `chat/meeting-controls*`, `chat/prompt-room`, `status/*` (22 files): 773 of 773 on Node 22.23.0 and on Node 24.21.0. `tsc --build --force`, `check:deps` and `plan.test` 6/6 pass.
+
+Card not flipped.
