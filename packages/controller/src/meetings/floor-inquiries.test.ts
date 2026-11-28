@@ -99,8 +99,8 @@ floorSuite(test, "reading the open inquiries walks no floor records once the lis
   const a = (await w.meet()).rec, b = (await w.meet()).rec;
   await start(w, a, { inquiryIdleMinutes: 10 });
   await start(w, b, { inquiryIdleMinutes: 10 });
-  // no inquiry has ever been opened: the first read walks the floors once and stores an empty list; later reads walk nothing
-  assert.ok((await walks(w, () => w.floor.sweep(w.service))) >= 1, "the first read builds the list");
+  // no inquiry has ever been opened: the first reminder walks the floors once and stores an empty list; later reads walk nothing
+  assert.ok((await walks(w, () => w.floor.sweep(w.service))) >= 1, "the first reminder builds the list");
   assert.deepEqual(await listed(w), [], "an empty list is stored");
   assert.equal(await walks(w, () => reads(w)), 0, "later reads walk no floor");
   await open(w, a);
@@ -518,4 +518,39 @@ floorSuite(test, "the reads (the Needs-you list and the status view's list) writ
   } finally { l.listAggregates = realList; s.applyOperation = real; }
   assert.equal(writes, 0, "a refused read writes nothing");
   assert.equal(await stored(w), undefined);
+});
+
+floorSuite(test, "a meeting that ends at a unit boundary while the owner's inquiry is open ends the inquiry with it; a floor an earlier release left ended with its inquiry open is put right by the owner's done and by the reminder", async (w) => {
+  const a = (await w.meet()).rec, b = (await w.meet()).rec, c = (await w.meet()).rec;
+  for (const r of [a, b, c]) await start(w, r, { inquiryIdleMinutes: 10 });
+  for (const r of [a, b, c]) await open(w, r);
+  assert.deepEqual(await listed(w), [a, b, c]);
+  // the meeting record of a ends while one of its units is in flight (the owner's question to a member)
+  let armed = true;
+  w.script.rules.unshift(async () => { if (armed) { armed = false; await w.records.finish(w.owner, { commandId: cid("fin"), recordId: a }); } return undefined; });
+  await w.floor.ask(w.owner, { commandId: cid("ask"), recordId: a, agent: w.pB, question: "What did the last run cost?" }).catch(() => undefined);
+  for (let i = 0; i < 20 && (await floorOf(w, a)).state !== "ended"; i += 1) await w.floor.advance(w.service, { recordId: a }).catch(() => undefined);
+  assert.equal(armed, false, "a unit ran");
+  assert.equal((await floorOf(w, a)).state, "ended");
+  assert.equal((await floorOf(w, a)).inquiry, undefined, "the inquiry ended with the meeting");
+  assert.deepEqual(await listed(w), [b, c], "and left the list in the same write");
+  assert.deepEqual((await w.floor.ownerPending(w.owner)).items.map((i) => i.recordId), [b, c], "it is not on the Needs-you list");
+  // floors an earlier release left ended with the inquiry open (the list still names them)
+  for (const r of [b, c]) {
+    await w.records.finish(w.owner, { commandId: cid("fin"), recordId: r });
+    const agg = ((await w.storage.listAggregates("meeting-floor", { limit: 200 })) as { id: string; body: object }[]).find((x) => (x.body as FloorBody).recordId === r)!;
+    assert.ok((agg.body as FloorBody).inquiry !== undefined);
+    await apply(w, "meeting-floor", agg.id, (rev) => ({ type: "update", expectedRevision: rev, body: { ...agg.body, state: "ended", endedAt: w.iso() } }));
+  }
+  assert.deepEqual(await listed(w), [b, c]);
+  await end(w, b);
+  assert.equal((await floorOf(w, b)).inquiry, undefined, "the owner's done ends it");
+  assert.deepEqual(await listed(w), [c]);
+  w.clock.tick(11);
+  assert.deepEqual((await w.floor.sweep(w.service)).reminded, [], "an ended meeting is not reminded");
+  assert.equal((await floorOf(w, c)).inquiry, undefined, "the reminder ends it");
+  assert.equal((await floorOf(w, c)).state, "ended");
+  assert.deepEqual(await listed(w), []);
+  assert.deepEqual((await w.floor.ownerPending(w.owner)).items, []);
+  assert.deepEqual((await w.floor.openInquiries(w.owner, 10)).items, []);
 });

@@ -577,8 +577,11 @@ export class MeetingFloorService {
     const fresh = (await this.#need(recordId)).body;
     const recNow = await this.#meeting(recordId);
     if (recNow.state !== "open") {
-      // the meeting ended (the owner's end command takes effect at this boundary): the unit is dropped, nothing completed is undone
-      await this.#update(recordId, by, `ended-${unit.id}`, (b) => ({ ...b, inflight: undefined, state: "ended", endedAt: this.#runner.now() }));
+      // the meeting ended (the owner's end command takes effect at this boundary): the unit is dropped, nothing completed is undone. An open inquiry ends with it (its notices are closed), as when the floor is ended or closed out,
+      // so it leaves the list of open inquiries and the Needs-you list.
+      const now = this.#runner.now();
+      await this.#update(recordId, by, `ended-${unit.id}`, (b) => ({ ...b, inflight: undefined, state: "ended", endedAt: now, inquiry: undefined, clock: { ...b.clock, pausedAt: undefined } }));
+      if (fresh.inquiry !== undefined) await this.#deps.settleOwner?.({ recordId, projectId: fresh.projectId, kinds: ["inquiry-open", "inquiry-idle"] }).catch(() => undefined);
       return { waiting: "meeting-ended", phase: "none" };
     }
     let fx: Record<string, unknown>;
@@ -1379,6 +1382,8 @@ export class MeetingFloorService {
       const b = (await this.#load(id))?.body;
       if (b === undefined || b.inquiry === undefined) { gone.push(id); continue; }
       if (command.projectId !== undefined && b.projectId !== command.projectId) continue;
+      // A floor already ended with its inquiry still open (an earlier release ended it at a unit boundary without ending the inquiry): the inquiry ends now instead of staying listed.
+      if (b.state === "ended") { await this.#closeOut(by, b.recordId, b.projectId).catch(() => undefined); continue; }
       const idleFrom = b.inquiry.remindedAt ?? b.inquiry.lastActivityAt;
       if (ms(now) - ms(idleFrom) < b.settings.inquiryIdleMinutes * 60_000) continue;
       // A meeting closed by other means ends its inquiry instead of reminding; an archived project's meeting reminds nobody until it is restored.
@@ -1797,12 +1802,15 @@ export class MeetingFloorService {
     return ((await this.#runner.get("project", b.projectId))?.body as { state?: unknown } | undefined)?.state !== "archived";
   }
 
-  /** Ends the floor of a meeting that is no longer open: its inquiry is closed (its notices settled), nothing is in flight. Safe to repeat. */
+  /**
+   * Ends the floor of a meeting that is no longer open: its inquiry is closed (its notices settled), nothing is in flight. Safe to repeat. A floor already ended with its inquiry still open (an earlier release ended the floor at a
+   * unit boundary without ending the inquiry) has the inquiry ended now, so the owner's "done" takes it off the Needs-you list and the list of open inquiries.
+   */
   async #closeOut(by: Principal, recordId: string, projectId: string): Promise<void> {
     const now = this.#runner.now();
     const had = (await this.#load(recordId))?.body;
-    if (had === undefined || had.state === "ended") return;
-    await this.#update(recordId, by, "closed-out", (b) => (b.state === "ended" ? undefined : { ...b, state: "ended", endedAt: now, inquiry: undefined, inflight: undefined, clock: { ...b.clock, pausedAt: undefined } }));
+    if (had === undefined || (had.state === "ended" && had.inquiry === undefined)) return;
+    await this.#update(recordId, by, "closed-out", (b) => (b.state === "ended" && b.inquiry === undefined ? undefined : { ...b, state: "ended", endedAt: b.state === "ended" ? b.endedAt : now, inquiry: undefined, inflight: undefined, clock: { ...b.clock, pausedAt: undefined } }));
     if (had.inquiry !== undefined) await this.#deps.settleOwner?.({ recordId, projectId, kinds: ["inquiry-open", "inquiry-idle"] }).catch(() => undefined);
   }
 

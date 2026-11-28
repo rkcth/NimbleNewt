@@ -22199,3 +22199,21 @@ No product code changed. Runs are listed in the commit message.
 **Other red.** All 229 `api/start*.test.js` files were run under `NIMBLENEWT_TIER=typical NIMBLENEWT_FAST=1` on Node 22 in 12 batches, with the fix in place: 583 of 583 passed. Nothing else from the M05b merge is red there.
 
 No interpreter prompt text, API summary text, task-plan file or card status changed.
+
+## Recheck of the status-write fix: an inquiry left open on an ended floor (Claude agent, 2026-11-27 EST; branch `card-recheck-fs` from main `f8bd0df1`; no card flipped; not pushed)
+
+**Review of `dffe515c`/`f8bd0df1`.** The read paths (`ownerPending`, `openInquiries`) write nothing and the kept walk (`#walked`) is keyed correctly. Every inquiry open or end goes through `#update`, which changes the stored list in the same write. With no list stored, an open creates one, and an end creates one when the walk finishes. A storage revision is never reused, even after a delete (the tombstone), and nothing outside tests deletes the list. So the revision moves whenever the floors' open inquiries change through the current release. A kept walk can name an inquiry that has since ended (for example an end with no list and too many floors to build one). It cannot leave out one that has opened. Both reads load each listed floor and skip one without an inquiry. Repeated reads with no list walk the floors once, then answer from the kept walk until the revision moves or the next scheduled turn stores the list. The breakages are listed in the commit message.
+
+**Problem found (earlier than the fix: `5d36e814`, 2026-11-14).** When the meeting record ended while a unit was in flight, `#advance` ended the floor at the unit boundary but did not end an open inquiry. Such a floor stayed on `meeting.floor.needs-you` and on the stored list (taking one of the `openInquiries` places). The reminder skipped it because it was not running. The owner's "done" (`endInquiry` on a closed meeting, through `#closeOut`) returned without ending it, because `#closeOut` left any ended floor alone.
+
+**Fix (`meetings/floor.ts`).**
+- The unit-boundary end now ends the inquiry, like the floor's own end and `#closeOut`, and settles its notices.
+- `#closeOut` also acts on a floor that is ended but still has an inquiry (kept by an earlier release). It ends the inquiry and keeps the first `endedAt`.
+- The reminder (`sweep`) closes out an ended floor that is still listed with an inquiry, instead of skipping it.
+
+**Test (`meetings/floor-inquiries.test`).** A new scenario covers three things:
+- A meeting record that ends during the owner's question to a member ends the inquiry. The list and the Needs-you list drop it.
+- An ended floor planted with its inquiry open is put right by the owner's done.
+- Another planted floor is put right by the reminder, without a reminder being sent.
+
+Undoing each of the three changes in the built file makes the scenario fail.
