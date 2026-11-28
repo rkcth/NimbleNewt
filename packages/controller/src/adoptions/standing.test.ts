@@ -287,7 +287,7 @@ for (const backend of backends) {
     assert.match(none, /Adoption of the practice it tried from experiment exp-[a-z2-7]+: in force, approved by owner:rob/, "a practice needs no catalog");
   });
 
-  suite("withdrawal, by a decision or a regression, and declining write only the adoption and its index: recorded external effects and the catalog stay exactly as they were", async (c) => {
+  suite("withdrawal, by a decision or a regression, and declining write only the adoption, its index and (a withdrawal) the start of its look: recorded external effects and the catalog stay exactly as they were", async (c) => {
     await c.register("toolbox.fetch", "1.0.0");
     // Effects recorded by work that used the adopted change: confirmed, failed, uncertain and still intended.
     const op = (operationId: string, over: Partial<OperationInput>): OperationInput => ({ operationId, epoch: c.epoch, actor: c.owner.id, correlationId: `c-${operationId}`, at: new Date(now).toISOString(), changes: [], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [], ...over });
@@ -314,8 +314,10 @@ for (const backend of backends) {
     await svc().withdraw(c.mgr, { commandId: cid("w"), adoptionId: t1, expectedRevision: await c.rev(t1), reason: "we stop using it" });
     await svc().decline(c.owner, { commandId: cid("dc"), adoptionId: asked, expectedRevision: await c.rev(asked), reason: "not now" });
     assert.equal(seen.length, 3, "one write each");
+    // The affected-work slice: a withdrawal (regression or decision) also starts its look in the same write (the look record and the pending list); declining starts none. Still no effect, timer or outbox.
+    const kinds = seen.map((s) => [...new Set(s.changes.map((ch) => ch.ref.kind))].sort());
+    assert.deepEqual(kinds, [["adoption", "adoption-index", "adoption-look", "adoption-looks"], ["adoption", "adoption-index", "adoption-look", "adoption-looks"], ["adoption", "adoption-index"]]);
     for (const s of seen) {
-      assert.deepEqual([...new Set(s.changes.map((ch) => ch.ref.kind))].sort(), ["adoption", "adoption-index"], s.operationId);
       assert.deepEqual([s.effects, s.settleEffects, s.timers, s.cancelTimers, s.outbox, s.completeDeliveries, s.completeTimers], [[], [], [], [], [], [], []], s.operationId);
     }
     assert.deepEqual(await effects(), fx, "the effects are as they were recorded: nothing marked undone or settled");

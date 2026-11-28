@@ -303,7 +303,7 @@ export interface StateApiDeps {
   readonly observations?: Pick<ObservationService, "submit" | "dispose" | "get" | "open">;
   readonly lessons?: Pick<LessonService, "propose" | "addEvidence" | "decide" | "get" | "current">;
   readonly experiments?: Pick<ExperimentService, "propose" | "pin" | "recordRun" | "raiseBudget" | "conclude" | "withdraw" | "get" | "list">;
-  readonly adoptions?: Pick<AdoptionService, "request" | "approve" | "decline" | "withdraw" | "monitor" | "inForce" | "get" | "list">;
+  readonly adoptions?: Pick<AdoptionService, "request" | "approve" | "decline" | "withdraw" | "monitor" | "inForce" | "get" | "list" | "affected">;
   /** Optional agent work on NimbleNewt's own code (card B06). */
   readonly ownCode?: Pick<OwnCodeService, "settings" | "enable" | "disable" | "request" | "decide" | "withdraw" | "get" | "list">;
   readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep" | "readiness">;

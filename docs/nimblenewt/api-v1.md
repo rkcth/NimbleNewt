@@ -1680,6 +1680,16 @@ Arguments:
 
 Result: `{ item }`.
 
+#### `adoption.affected`
+
+The look at the work that used a withdrawn adoption (card B05): for a tool, the tasks that ran exactly the withdrawn version (from the catalog's run records), each as paused, open, finished or missing when first seen; unfinished ones were told in their activity and keep the version, finished ones are left as they are. A practice's use by tasks is not recorded, so its look finds none. `state` is looking or done; `partial` when the page limit was reached. The same readers as adoption.get.
+
+Arguments:
+
+- `adoptionId`: adp-...
+
+Result: `{ item }` (`not_found` when there is no look or you may not read it).
+
 #### `adoption.list`
 
 The adoptions of a project, oldest first, a page at a time (none is deleted); `status` keeps one status. The list holds every open adoption and the newest ended ones (300 in all); `archived` counts the ended ones that left it, each still readable by its ID. Needs meeting.read or meeting.manage.
@@ -6077,7 +6087,7 @@ Result: `{ revision }`.
 
 #### `adoption.withdraw`
 
-Withdraws an adoption in force with a reason (the owner, a manager of the project's meetings, or its asker): it is no longer in force; only the adoption and its index are written, so nothing else (no task, effect or catalog record) is deleted or undone. Final; adopting again is a new request.
+Withdraws an adoption in force with a reason (the owner, a manager of the project's meetings, or its asker): it is no longer in force. The same write starts a look at the work that used it (adoption.affected); unfinished tasks that ran the version are told in their activity and the owner gets one notice. Nothing is deleted or undone: no task state, effect or catalog record changes. Final; adopting again is a new request.
 
 Arguments:
 

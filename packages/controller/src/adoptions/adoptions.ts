@@ -10,6 +10,7 @@ import type { CatalogService } from "../catalog/catalog.js";
 import { METRICS, betterPct, sealOf, type ExperimentBody, type Metric } from "../experiments/experiments.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import { clean, invalid, plain, whole } from "../standups/shared.js";
+import { AffectedWorkLook, lookStartChanges, type AdoptionLookPorts, type LookBody } from "./affected.js";
 
 /**
  * Scoped adoption and monitored withdrawal (card B05, first slice). An experiment (B04) the controller judged `improved` may be adopted in its project: the practice it tried, or one exact, already published
@@ -32,11 +33,17 @@ import { clean, invalid, plain, whole } from "../standups/shared.js";
  *
  * - **Honest future use (standing slice).** A tool version set aside in the catalog (deprecated, or rolled back past) is not adopted, and a tool adoption approved earlier is not in force while the
  *   catalog no longer offers its exact version (revoked, set aside, gone, or another digest). Asking writes nothing; `standing` says why it is not used.
- * - **Nothing else is undone.** Withdrawal (by a decision or a regression) writes only the adoption and its index: no task, effect, timer or catalog record is touched, so a completed external effect
- *   stays as it was recorded.
+ * - **Nothing else is undone.** Withdrawal (by a decision or a regression) writes only the adoption, its index and the start of its look at affected work; the look then writes only its own record,
+ *   the pending list, one activity step per unfinished task and the owner's notice. No task state, effect, timer, outbox entry or catalog record is touched, so a completed external effect stays as it
+ *   was recorded.
  *
- * Not here (later slices): telling the tasks and paused work that use an adopted change and reconciling them on withdrawal (paused dependencies), and setting a withdrawn tool version aside in the
- * catalog.
+ * - **Affected work (affected-work slice).** A withdrawal (by a decision or a regression) also starts a look at the work that used the withdrawn change, in the same write: a stored look record and an
+ *   entry in a bounded pending list (`affected.ts`). The look reads the catalog's run records of the project in bounded pages, tells each unfinished task that ran exactly that version through one step of
+ *   its activity (it keeps the version), counts the finished ones and leaves them as they are, and then tells the owner once. A practice's use by a task is not recorded, so its look tells no task and
+ *   says so. A look cut short is carried on by the dispatcher's tick (`sweepAffected`). Declining or taking back an asked adoption starts no look: it was never in force, so nothing used it through it.
+ *
+ * Not here (later slices): a typed migration blocker (a withdrawal never sets the version aside or removes it, so no task needs one yet), recording which task applied a practice, and setting a withdrawn
+ * tool version aside in the catalog.
  */
 export const ADOPTION_STATUSES = ["requested", "active", "declined", "withdrawn"] as const;
 export type AdoptionStatus = (typeof ADOPTION_STATUSES)[number];
@@ -106,18 +113,21 @@ export interface AdoptionOptions extends RunnerOptions {
    * adopted and no tool adoption is answered as in force (fail closed); practices still are.
    */
   readonly tools?: AdoptionCatalog;
+  /** What the look at affected work after a withdrawal needs (the affected-work slice). Absent: the look is still recorded at the withdrawal, and nothing carries it on here. */
+  readonly looks?: AdoptionLookPorts;
 }
 export type AdoptionCatalog = Pick<CatalogService, "get" | "standingOf">;
 
 export class AdoptionService {
   readonly #runner: CommandRunner;
   readonly #tools: AdoptionCatalog | undefined;
+  readonly #looks: AffectedWorkLook;
 
-  private constructor(runner: CommandRunner, tools: AdoptionCatalog | undefined) { this.#runner = runner; this.#tools = tools; }
+  private constructor(runner: CommandRunner, tools: AdoptionCatalog | undefined, looks: AdoptionLookPorts | undefined) { this.#runner = runner; this.#tools = tools; this.#looks = new AffectedWorkLook(runner, looks); }
 
   static withEpoch(storage: ControllerStorage, epoch: number, options: AdoptionOptions = {}): AdoptionService {
-    const { tools, ...rest } = options;
-    return new AdoptionService(new CommandRunner(storage, epoch, rest), tools);
+    const { tools, looks, ...rest } = options;
+    return new AdoptionService(new CommandRunner(storage, epoch, rest), tools, looks);
   }
 
   /** Asks to adopt what an `improved` experiment tried (whoever may read the experiment). Nothing is in force until a reviewer approves it. */
@@ -201,7 +211,9 @@ export class AdoptionService {
 
   /** Withdraws an adoption in force with a reason (the owner, a manager of the project's meetings, or its asker). Future use stops; nothing is deleted or undone. */
   async withdraw(by: Principal, command: NoActor & { adoptionId: string; expectedRevision: number; reason: string }): Promise<{ revision: number }> {
-    return this.#close(by, command, "adoption.withdraw", "active", "withdrawn");
+    const out = await this.#close(by, command, "adoption.withdraw", "active", "withdrawn");
+    await this.#lookNow(this.#id(command.adoptionId));
+    return out;
   }
 
   /**
@@ -235,12 +247,14 @@ export class AdoptionService {
         const next: AdoptionBody = { ...b, reports: [...b.reports, report].slice(-ADOPTION_LIMITS.reports), reportCount: n,
           ...(out ? { status: "withdrawn" as const, withdrawnWhy: "regression" as const, withdrawnBy: by.id, history: this.#history(b, nowIso, by.id, "withdrawn", `regression: ${regressed.join(", ")}`) } : {}) };
         const changes: Change[] = [{ type: "update", ref: { kind: "adoption", id }, expectedRevision: got.found.revision, body: clean(next) }];
-        if (out) changes.push(await this.#release(b, id));
+        if (out) changes.push(await this.#release(b, id), ...(await this.#lookStart(b, id, "regression")));
         return { ref: { kind: "adoption", id }, creates: false, changes, detail: { projectId: b.projectId, report: n, regressed: regressed.length } };
       },
     })));
     // The report this command wrote (the first time or on a replay) is the one at the revision it produced; the status is the adoption's now.
     const after = await this.#get(id);
+    // A regression withdrew it (now or on the original of a repeat): its look at affected work is carried on.
+    if (after?.body.status === "withdrawn") await this.#lookNow(id);
     const mine = after?.body.reports.find((r) => r.revision === result.revision);
     if (after === undefined || (mine === undefined && !result.replayed)) throw new DomainError("integrity", `adoption ${id}: the report recorded by this command is not found at revision ${result.revision}`);
     // A repeat of a report older than the kept ones (the last ADOPTION_LIMITS.reports) is answered with report 0: it was recorded, and is no longer kept.
@@ -276,6 +290,25 @@ export class AdoptionService {
     if (got === undefined || got.status !== "active") return undefined;
     return got.target.kind === "practice" ? "live" : this.#toolStanding(got.target, got.targetDigest);
   }
+
+  /**
+   * The look at the work that used a withdrawn adoption (the affected-work slice): the tasks that ran exactly the withdrawn tool version, what each was when first seen, how many runs were read and
+   * whether the look is done. The same readers as `get`; an adoption with no look (not withdrawn, or withdrawn before looks existed), one the viewer may not read and an unknown ID all answer `undefined`.
+   */
+  async affected(viewer: Principal, adoptionId: string): Promise<(LookBody & { revision: number }) | undefined> {
+    const got = await this.get(viewer, adoptionId);
+    if (got === undefined) return undefined;
+    const look = await this.#looks.read(got.id);
+    return look === undefined ? undefined : { ...look.body, revision: look.revision };
+  }
+
+  /**
+   * Carries one withdrawn adoption's look on (the controller's own call after a withdrawal, and the tick's): a few pages of the run records, then the owner's notice once it is done. Not an API operation.
+   */
+  async lookAtAffected(adoptionId: string, pages?: number): Promise<LookBody | undefined> { return this.#looks.run(this.#id(adoptionId), pages); }
+
+  /** The dispatcher's tick: carries on looks that were cut short or interrupted (a bounded number per tick). Writes nothing when none is pending. */
+  async sweepAffected(): Promise<{ looked: number; failed: number }> { return this.#looks.sweep(); }
 
   /** One adoption: the owner, a reader or manager of the project's meetings, or its asker. Anyone else gets `undefined`. */
   async get(viewer: Principal, adoptionId: string): Promise<View<AdoptionBody> | undefined> {
@@ -324,7 +357,8 @@ export class AdoptionService {
         if (b.status !== from) throw new DomainError("invalid_command", `adoption ${id} is ${b.status}; only ${from === "requested" ? "an asked" : "an in-force"} adoption is ${to}`, { field: "adoptionId" });
         const nowIso = this.#runner.now();
         const next: AdoptionBody = { ...b, status: to, ...(to === "withdrawn" ? { withdrawnWhy: "decision" as const, withdrawnBy: by.id } : {}), history: this.#history(b, nowIso, by.id, to, reason) };
-        return { ref: { kind: "adoption", id }, creates: false, changes: [{ type: "update", ref: { kind: "adoption", id }, expectedRevision: got.found.revision, body: clean(next) }, await this.#release(b, id)], detail: { projectId: b.projectId } };
+        const look = to === "withdrawn" ? await this.#lookStart(b, id, "decision") : [];
+        return { ref: { kind: "adoption", id }, creates: false, changes: [{ type: "update", ref: { kind: "adoption", id }, expectedRevision: got.found.revision, body: clean(next) }, await this.#release(b, id), ...look], detail: { projectId: b.projectId } };
       },
     })));
     return { revision: result.revision };
@@ -339,6 +373,17 @@ export class AdoptionService {
     const { [id]: _waited, ...waiting } = index.waiting;
     void _gone; void _waited;
     return this.#indexChange(b.projectId, index, { ...index, open, waiting });
+  }
+
+  /** The changes that start the look at affected work, in the withdrawal's own write. */
+  async #lookStart(b: AdoptionBody, id: string, why: "regression" | "decision"): Promise<Change[]> {
+    return lookStartChanges(this.#runner, { adoptionId: id, projectId: b.projectId, experimentId: b.experimentId, target: b.target, ...(b.targetDigest === undefined ? {} : { targetDigest: b.targetDigest }), why });
+  }
+
+  /** The look right after a withdrawal. Its failure never fails the withdrawal, which is written: the look stays pending and the tick carries it on. */
+  async #lookNow(id: string): Promise<void> {
+    if (!this.#looks.ready) return;
+    try { await this.#looks.run(id); } catch { /* carried on by the tick */ }
   }
 
   async #toolDigest(by: Principal, t: { name: string; version: string }): Promise<string> {
