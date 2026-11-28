@@ -22469,3 +22469,26 @@ In plain words: the first review's mount and git checks were right in shape. Fiv
 **Tests added:** `owncode/separate.test.ts` (18, from 16): a circle of parents on the way and elsewhere; an unlisted parent beside `/` on the way and elsewhere; the pair budget across two guarded folders; a non-numeric parent ID; a `commondir` over 4096 bytes.
 
 **Deliberate breakages** (21 new on the source, each alone, `tsc --build`, `owncode/separate.test`, restored and checked by sha256; script `/tmp/claude-1000/b06c-r3/breakages.py`): 21 of 21 caught (19 before the non-numeric parent and long `commondir` tests).
+## Recheck of the status-write fix: an inquiry left open on an ended floor (Claude agent, 2026-11-27 EST; branch `card-recheck-fs` from main `f8bd0df1`; no card flipped; not pushed)
+
+**Review of `dffe515c`/`f8bd0df1`.** The read paths (`ownerPending`, `openInquiries`) write nothing and the kept walk (`#walked`) is keyed correctly. Every inquiry open or end goes through `#update`, which changes the stored list in the same write. With no list stored, an open creates one, and an end creates one when the walk finishes. A storage revision is never reused, even after a delete (the tombstone), and nothing outside tests deletes the list. So the revision moves whenever the floors' open inquiries change through the current release. A kept walk can name an inquiry that has since ended (for example an end with no list and too many floors to build one). It cannot leave out one that has opened. Both reads load each listed floor and skip one without an inquiry. Repeated reads with no list walk the floors once, then answer from the kept walk until the revision moves or the next scheduled turn stores the list. The breakages are listed in the commit message.
+
+**Problem found (earlier than the fix: `5d36e814`, 2026-11-14).** When the meeting record ended while a unit was in flight, `#advance` ended the floor at the unit boundary but did not end an open inquiry. Such a floor stayed on `meeting.floor.needs-you` and on the stored list (taking one of the `openInquiries` places). The reminder skipped it because it was not running. The owner's "done" (`endInquiry` on a closed meeting, through `#closeOut`) returned without ending it, because `#closeOut` left any ended floor alone.
+
+**Fix (`meetings/floor.ts`).**
+- The unit-boundary end now ends the inquiry, like the floor's own end and `#closeOut`, and settles its notices.
+- `#closeOut` also acts on a floor that is ended but still has an inquiry (kept by an earlier release). It ends the inquiry and keeps the first `endedAt`.
+- The reminder (`sweep`) closes out an ended floor that is still listed with an inquiry, instead of skipping it.
+
+**Test (`meetings/floor-inquiries.test`).** A new scenario covers three things:
+- A meeting record that ends during the owner's question to a member ends the inquiry. The list and the Needs-you list drop it.
+- An ended floor planted with its inquiry open is put right by the owner's done.
+- Another planted floor is put right by the reminder, without a reminder being sent.
+
+Undoing each of the three changes in the built file makes the scenario fail.
+
+**Second review of the fix (clean-context Claude agent, 2026-11-27 EST; same branch; not pushed; no card flipped).** All three changes were checked against every end of a floor: its own end, a record that ends mid-unit, the owner's done, `#closeOut` and `sweep`. Each now leaves no inquiry, no `pausedAt`, closed notices, and the list entry removed in the same write. A repeat, or two callers racing, changes nothing more. A floor is marked ended only after its record has closed, so a close-out never ends an inquiry the owner is still in. A vote held for the inquiry is voided by the record's `finish` and is never resumed by these paths. The sweep's new write is bounded by the list (at most `openInquiries` floors, one guarded write each), and one failing floor does not stop it. Two problems were found and fixed:
+- The floor's own end (`end`) cleared the inquiry but did not close its notices. It now closes them like the other ends.
+- The unit-boundary end overwrote an `endedAt` the owner's end had already set. It now keeps the first one.
+
+Tests added: notices, `pausedAt`, the first `endedAt`, the unit not left in flight, and a repeated done that changes nothing. Also two new scenarios: the owner ends the meeting during a unit while the inquiry is open; and a failing close-out followed by another floor in the same reminder. 19 deliberate breakages of the changed lines: 17 caught by the first test additions, 19 after.
