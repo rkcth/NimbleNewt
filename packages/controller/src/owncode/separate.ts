@@ -1,6 +1,6 @@
-import { readFileSync } from "node:fs";
+import { constants as fsConstants, readFileSync } from "node:fs";
 import { open, readFile, realpath, stat } from "node:fs/promises";
-import { dirname, isAbsolute, join, parse, posix, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, parse, posix, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
@@ -38,8 +38,11 @@ export interface GuardedPlace {
   readonly what: string;
   readonly path: string;
 }
-/** One mount of the mount table: its file system (`major:minor`), the folder of that file system it shows (`root`; not a path for a few kernel file systems, such as `mnt:[...]`) and where it is mounted (`point`). */
-export interface MountEntry { readonly dev: string; readonly root: string; readonly point: string }
+/**
+ * One mount of the mount table: its file system (`major:minor`), the folder of that file system it shows (`root`; not a path for a few kernel file systems, such as `mnt:[...]`) and where it is mounted (`point`).
+ * `id` and `parent` (the table's first two fields) say which mount it was mounted on, so which of several mounts on one way is seen (second review: the table's order is not the order of mounting).
+ */
+export interface MountEntry { readonly dev: string; readonly root: string; readonly point: string; readonly id?: string; readonly parent?: string }
 /**
  * The file-system calls the judge makes (tests give their own to show a bind mount or a failing disk). `mounts` gives the mount table, or `undefined` where there is none to read (not Linux); a failure
  * to read it throws. `readText` reads the start of a file (a repository's `.git` file). A port without `mounts` or `readText` skips that part of the check (tests that show only identities).
@@ -50,19 +53,21 @@ export interface SeparationFs {
   mounts?(): Promise<readonly MountEntry[] | undefined>;
   readText?(path: string, maxBytes: number): Promise<string>;
 }
-export const SEPARATE_LIMITS = { places: 50, guarded: 20, depth: 128, mounts: 50_000, mountTableBytes: 16 * 1024 * 1024 } as const;
+export const SEPARATE_LIMITS = { places: 50, guarded: 20, depth: 128, mounts: 50_000, mountTableBytes: 16 * 1024 * 1024, gitFileBytes: 4096, mountPairs: 1_000_000 } as const;
 export type Separation = { readonly separate: true } | { readonly separate: false; readonly detail: string };
 
 const unescapeMount = (s: string): string => s.replace(/\\([0-7]{3})/g, (_, o: string) => String.fromCharCode(parseInt(o, 8)));
 /** The mounts of a `/proc/self/mountinfo` text, in its order (a later mount at the same point is on top). Throws on a line it does not understand or past the limit. */
 export function parseMountInfo(text: string): MountEntry[] {
   const out: MountEntry[] = [];
+  const ids = new Set<string>();
   for (const line of text.split("\n")) {
     if (line === "") continue;
     if (out.length >= SEPARATE_LIMITS.mounts) throw new Error(`the mount table has more than ${SEPARATE_LIMITS.mounts} mounts`);
     const f = line.split(" ");
-    if (f.length < 5 || !/^\d+:\d+$/.test(f[2]!) || f[3]! === "" || !f[4]!.startsWith("/")) throw new Error("the mount table has a line that could not be read");
-    out.push({ dev: f[2]!, root: unescapeMount(f[3]!), point: unescapeMount(f[4]!) });
+    if (f.length < 5 || !/^\d+$/.test(f[0]!) || !/^\d+$/.test(f[1]!) || ids.has(f[0]!) || !/^\d+:\d+$/.test(f[2]!) || f[3]! === "" || !f[4]!.startsWith("/")) throw new Error("the mount table has a line that could not be read");
+    ids.add(f[0]!);
+    out.push({ id: f[0]!, parent: f[1]!, dev: f[2]!, root: unescapeMount(f[3]!), point: unescapeMount(f[4]!) });
   }
   if (out.length === 0) throw new Error("the mount table is empty");
   return out;
@@ -78,8 +83,14 @@ export const nodeSeparationFs: SeparationFs = {
     return parseMountInfo(text);
   },
   readText: async (p, maxBytes) => {
-    const h = await open(p, "r");
-    try { const buf = Buffer.alloc(maxBytes); const { bytesRead } = await h.read(buf, 0, maxBytes, 0); return buf.subarray(0, bytesRead).toString("utf8"); } finally { await h.close(); }
+    // Opened without waiting (a FIFO named `.git` would otherwise hold the open, and a thread of the controller, until something writes to it); only a plain file is read.
+    const h = await open(p, fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0));
+    try {
+      const s = await h.stat();
+      if (s.isDirectory()) throw Object.assign(new Error("it is a folder"), { code: "EISDIR" });
+      if (!s.isFile()) throw Object.assign(new Error("it is not a plain file"), { code: "ENOTFILE" });
+      const buf = Buffer.alloc(maxBytes); const { bytesRead } = await h.read(buf, 0, maxBytes, 0); return buf.subarray(0, bytesRead).toString("utf8");
+    } finally { await h.close(); }
   },
 };
 
@@ -130,11 +141,46 @@ const lexicallyUnder = (inner: string, outer: string, platform: string): boolean
 /** `lexicallyUnder` for the paths of the mount table and of one file system (Linux: case kept, `/` separated). */
 const posixUnder = (inner: string, outer: string): boolean => staysBelow(posix.relative(outer, inner));
 
-/** Where a canonical path is in its file system: the mount it is under (the deepest; of several at one point, the last, which is on top) and the path inside that file system. */
+/** Where a canonical path is in its file system: the mount it is seen through and the path inside that file system. */
 interface FsLocation { readonly dev: string; readonly path: string }
-function locate(mounts: readonly MountEntry[], canon: string): FsLocation {
+const treeOf = new WeakMap<readonly MountEntry[], Map<string, MountEntry[]>>();
+/**
+ * The mount a canonical path is seen through. With the table's mount IDs (as the kernel gives them): from the mounts mounted on nothing in the table, down through the mounts mounted on the one reached; of
+ * those on the way, the one nearest the root is on top (a mount made later at a folder above an earlier one hides it, and one made at the same folder is mounted on the one below). Without IDs (made-up
+ * tables): the deepest, and of several at one point the last.
+ */
+function seenThrough(mounts: readonly MountEntry[], canon: string): MountEntry | undefined {
+  if (!mounts.every((m) => m.id !== undefined && m.parent !== undefined)) {
+    let best: MountEntry | undefined;
+    for (const m of mounts) if (posixUnder(canon, m.point) && (best === undefined || m.point.length >= best.point.length)) best = m;
+    return best;
+  }
+  let tree = treeOf.get(mounts);
+  if (tree === undefined) {
+    const ids = new Set(mounts.map((m) => m.id!));
+    tree = new Map();
+    // "" holds the mounts whose parent is not in the table: the roots of what this process sees.
+    for (const m of mounts) { const k = m.parent !== m.id && ids.has(m.parent!) ? m.parent! : ""; const kids = tree.get(k); if (kids === undefined) tree.set(k, [m]); else kids.push(m); }
+    treeOf.set(mounts, tree);
+  }
   let best: MountEntry | undefined;
-  for (const m of mounts) if (posixUnder(canon, m.point) && (best === undefined || m.point.length >= best.point.length)) best = m;
+  const seen = new Set<string>();
+  for (let level = tree.get("") ?? []; ;) {
+    let next: MountEntry | undefined;
+    let tie = false;
+    for (const m of level) {
+      if (seen.has(m.id!) || !posixUnder(canon, m.point)) continue;
+      if (next === undefined || m.point.length < next.point.length) { next = m; tie = false; } else if (m.point.length === next.point.length) tie = true;
+    }
+    if (next === undefined) return best;
+    if (tie) throw new CannotTell("the mount table does not say which of two mounts at one folder is on top");
+    seen.add(next.id!);
+    best = next;
+    level = tree.get(next.id!) ?? [];
+  }
+}
+function locate(mounts: readonly MountEntry[], canon: string): FsLocation {
+  const best = seenThrough(mounts, canon);
   if (best === undefined) throw new CannotTell("it is under no mount of the mount table");
   // A mount whose root is not a folder of a file system (`mnt:[...]`) gives no path to compare: the path stays as written, and `related` compares only paths.
   return { dev: best.dev, path: best.root.startsWith("/") ? posix.join(best.root, posix.relative(best.point, canon)) : best.root };
@@ -152,25 +198,35 @@ const related = (a: FsLocation, b: FsLocation): boolean => fsUnder(a, b) || fsUn
  */
 async function gitPlaces(fs: SeparationFs, canon: string): Promise<string[]> {
   if (fs.readText === undefined) return [];
-  const read = fs.readText.bind(fs);
+  const read = async (path: string, what: string): Promise<string> => {
+    // One byte past the limit is asked for, so a longer file is known to be longer (and is not judged by its start).
+    const text = await fs.readText!(path, SEPARATE_LIMITS.gitFileBytes + 1);
+    if (Buffer.byteLength(text, "utf8") > SEPARATE_LIMITS.gitFileBytes) throw new CannotTell(`${what} is longer than ${SEPARATE_LIMITS.gitFileBytes} bytes`);
+    return text;
+  };
+  // Paths git names are joined as written, not tidied: `..` after a link leads where the link leads (as the disk and git take it), and `realpath` resolves them when they are judged.
+  const under = (base: string, named: string): string => (isAbsolute(named) ? named : `${base}${sep}${named}`);
   const dotGit = join(canon, ".git");
-  let text: string;
+  let gitDir: string;
   try {
-    text = await read(dotGit, 4096);
+    const text = await read(dotGit, "its .git file");
+    const named = /^gitdir:[ \t]*(.+?)[ \t\r]*$/m.exec(text)?.[1];
+    if (named === undefined) throw new CannotTell("its .git file does not name a git folder");
+    gitDir = under(canon, named);
   } catch (error) {
+    if (error instanceof CannotTell) throw error;
     const code = (error as NodeJS.ErrnoException)?.code;
     if (code === "ENOENT") return [];
-    if (code === "EISDIR") return [dotGit];
-    throw new CannotTell(`its .git could not be read${typeof code === "string" ? ` (${code})` : ""}`);
+    // A .git folder (or a link to one): itself, and the common folder it may name too.
+    if (code !== "EISDIR") throw new CannotTell(`its .git could not be read${typeof code === "string" ? ` (${code})` : ""}`);
+    gitDir = dotGit;
   }
-  const named = /^gitdir:[ \t]*(.+?)[ \t\r]*$/m.exec(text)?.[1];
-  if (named === undefined) throw new CannotTell("its .git file does not name a git folder");
-  const gitDir = resolve(canon, named);
   const out = [gitDir];
   try {
-    const common = (await read(join(gitDir, "commondir"), 4096)).trim();
-    if (common !== "") out.push(resolve(gitDir, common));
+    const common = (await read(`${gitDir}${sep}commondir`, "its git folder's commondir")).trim();
+    if (common !== "") out.push(under(gitDir, common));
   } catch (error) {
+    if (error instanceof CannotTell) throw error;
     const code = (error as NodeJS.ErrnoException)?.code;
     if (code !== "ENOENT") throw new CannotTell(`its git folder's commondir could not be read${typeof code === "string" ? ` (${code})` : ""}`);
   }
@@ -243,6 +299,12 @@ export async function judgeSeparate(places: readonly OwnPlace[] | "too-many", gu
         if (through !== undefined) return no(`${look.what} holds a mount (${shown(through.point)}) of ${g.what} (${shown(g.path)}) or of a folder above or inside it; bind a separate checkout`);
         const shows = at === undefined ? undefined : g.holds.find((m) => related(m.at, at!));
         if (shows !== undefined) return no(`${look.what} is mounted inside ${g.what} (${shown(g.path)}, at ${shown(shows.point)}); bind a separate checkout`);
+        // Second review: a mount inside the place and a mount inside the guarded folder that show one folder (or one inside the other), such as one volume given to both.
+        if (holds.length * g.holds.length > SEPARATE_LIMITS.mountPairs) return no(`${look.what} and ${g.what} (${shown(g.path)}) hold too many mounts to compare, so the checkout cannot be checked`);
+        for (const m of holds) {
+          const both = g.holds.find((n) => related(m.at, n.at));
+          if (both !== undefined) return no(`${look.what} holds a mount (${shown(m.point)}) that shows what ${g.what} (${shown(g.path)}) holds at ${shown(both.point)}; bind a separate checkout`);
+        }
       }
     }
   }

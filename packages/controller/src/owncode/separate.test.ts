@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { after, test } from "node:test";
 import { SEPARATE_LIMITS, installationGuards, judgeSeparate, nodeSeparationFs, parseMountInfo, programRoot, type GuardedPlace, type MountEntry, type OwnPlace, type SeparationFs } from "./separate.js";
 
@@ -166,8 +166,10 @@ test("a bind mount of a folder inside the installation, a checkout that holds a 
 test("a mount table that cannot be read is refused; the table's own spelling is read as the kernel writes it", async () => {
   await refusedWith([repo("/work/dev")], g1, /mount table of the controller's machine could not be read \(denied\)/, { fs: fakeFs(bindTree, { mounts: new Error("denied") }), platform: "linux" });
   await refusedWith([repo("/work/dev")], g1, /cannot be checked: it is under no mount/, { fs: fakeFs(bindTree, { mounts: mt(["8:2", "/", "/data"]) }), platform: "linux" });
-  assert.deepEqual(parseMountInfo("22 1 8:1 / / rw - ext4 /dev/sda1 rw\n30 22 8:1 /srv/my\\040nn /mnt/a\\134b rw shared:1 - ext4 /dev/sda1 rw\n"), [{ dev: "8:1", root: "/", point: "/" }, { dev: "8:1", root: "/srv/my nn", point: "/mnt/a\\b" }]);
+  assert.deepEqual(parseMountInfo("22 1 8:1 / / rw - ext4 /dev/sda1 rw\n30 22 8:1 /srv/my\\040nn /mnt/a\\134b rw shared:1 - ext4 /dev/sda1 rw\n"), [{ id: "22", parent: "1", dev: "8:1", root: "/", point: "/" }, { id: "30", parent: "22", dev: "8:1", root: "/srv/my nn", point: "/mnt/a\\b" }]);
   assert.throws(() => parseMountInfo("22 1 x / / rw\n"), /could not be read/);
+  assert.throws(() => parseMountInfo("22 1 8:1 / / rw\n22 1 8:1 / /x rw\n"), /could not be read/, "a mount ID given twice");
+  assert.throws(() => parseMountInfo("a 1 8:1 / / rw\n"), /could not be read/);
   assert.throws(() => parseMountInfo(""), /empty/);
   if (process.platform === "linux") {
     const real = await nodeSeparationFs.mounts!();
@@ -222,4 +224,79 @@ test("a repository's git folder is one of its places: a worktree or a .git link 
   await refusedWith([repo(gone)], guarded, /git folder .* cannot be checked: .*ENOENT/);
   // Only repositories have git folders: an output folder with a .git file is judged as a folder.
   assert.deepEqual(await judgeSeparate([repo(plain), { label: "out", kind: "output", locator: wt, write: true }], guarded), { separate: true });
+});
+
+// Second review: which mount is seen comes from the table's mount IDs, not its order; mounts held on both sides; git paths as the disk takes them; a .git that is not a plain file.
+const mi = (...lines: string[]): MountEntry[] => parseMountInfo(lines.map((l) => `${l} rw - ext4 x rw`).join("\n"));
+test("the mount seen is found by the table's mount IDs: a later mount above an earlier one hides it, whatever the table's order", async () => {
+  // /mnt/pkg is a bind mount of /srv/nn/pkg (8:1), listed after /mnt, a mount of another disk made later and so on top: /mnt/pkg is then 8:2's /pkg, which is apart.
+  const hidden = mi("1 0 8:1 / /", "3 1 8:1 /srv/nn/pkg /mnt/pkg", "4 1 8:2 / /mnt");
+  assert.deepEqual(await judgeSeparate([repo("/mnt/pkg")], g1, { fs: fakeFs(bindTree, { mounts: hidden }), platform: "linux" }), { separate: true });
+  // The other way round (/mnt/pkg made on top of /mnt): the bind mount is seen, even listed first.
+  await refusedWith([repo("/mnt/pkg")], g1, /inside the running installation's program files/, { fs: fakeFs(bindTree, { mounts: mi("3 4 8:1 /srv/nn/pkg /mnt/pkg", "1 0 8:1 / /", "4 1 8:2 / /mnt") }), platform: "linux" });
+  // Two at one folder: the one mounted on the other is on top, whatever the order.
+  await refusedWith([repo("/mnt/pkg")], g1, /inside/, { fs: fakeFs(bindTree, { mounts: mi("1 0 8:1 / /", "6 5 8:1 /srv/nn/pkg /mnt/pkg", "5 1 8:2 /ws /mnt/pkg") }), platform: "linux" });
+  assert.deepEqual(await judgeSeparate([repo("/mnt/pkg")], g1, { fs: fakeFs(bindTree, { mounts: mi("1 0 8:1 / /", "6 5 8:2 /ws /mnt/pkg", "5 1 8:1 /srv/nn/pkg /mnt/pkg") }), platform: "linux" }), { separate: true });
+  // A table that does not say which is on top (two at one folder, mounted on the same mount) cannot tell.
+  await refusedWith([repo("/mnt/pkg")], g1, /cannot be checked: the mount table does not say which/, { fs: fakeFs(bindTree, { mounts: mi("1 0 8:1 / /", "5 1 8:2 /ws /mnt/pkg", "6 1 8:1 /srv/nn/pkg /mnt/pkg") }), platform: "linux" });
+});
+
+test("a mount inside the checkout and a mount inside the installation that show one folder are refused", async () => {
+  const ids = { ...bindTree, "/work/dev/nm": "4:1", "/srv/nn/nm": "4:1", "/work/dev/other": "4:9" };
+  // One volume (8:3's /vol) at /srv/nn/nm and at /work/dev/nm.
+  await refusedWith([repo("/work/dev")], g1, /holds a mount \(\/work\/dev\/nm\) that shows what the running installation's program files .* holds at \/srv\/nn\/nm/, { fs: fakeFs(ids, { mounts: mi("1 0 8:1 / /", "7 1 8:3 /vol /srv/nn/nm", "8 1 8:3 /vol/sub /work/dev/nm") }), platform: "linux" });
+  // Another folder of that volume: separate.
+  assert.deepEqual(await judgeSeparate([repo("/work/dev")], g1, { fs: fakeFs(ids, { mounts: mi("1 0 8:1 / /", "7 1 8:3 /vol /srv/nn/nm", "8 1 8:3 /other /work/dev/other") }), platform: "linux" }), { separate: true });
+});
+
+test("git's paths are taken as the disk takes them, a long .git file or a .git that is no plain file is refused, and a .git folder's commondir is followed", async () => {
+  // gitdir "l/../g", with l a link into the installation's .git/worktrees: the disk leads to the installation's .git/worktrees/g, not to the checkout's own g.
+  dir("srv", "nimblenewt", ".git", "worktrees", "g");
+  const wt = dir("work", "dots");
+  dir("work", "dots", "g");
+  symlinkSync(join(install, ".git", "worktrees", "x"), join(wt, "l"));
+  dir("srv", "nimblenewt", ".git", "worktrees", "x");
+  writeFileSync(join(wt, ".git"), "gitdir: l/../g\n");
+  await refusedWith([repo(wt)], guarded, /git folder .* is inside the running installation's program files/);
+  // A .git file longer than the limit is not judged by its start.
+  const long = dir("work", "long");
+  writeFileSync(join(long, ".git"), `gitdir: ${join(long, "own")}\n${"#".repeat(SEPARATE_LIMITS.gitFileBytes)}`);
+  dir("work", "long", "own");
+  await refusedWith([repo(long)], guarded, /its \.git file is longer than 4096 bytes/);
+  // A .git folder of its own that names the installation's as its common folder.
+  const half = dir("work", "half-dir");
+  dir("work", "half-dir", ".git");
+  writeFileSync(join(half, ".git", "commondir"), `${join(install, ".git")}\n`);
+  await refusedWith([repo(half)], guarded, /git folder .*\.git\) is inside the running installation's program files/);
+  // A git folder reached through a link, whose commondir is relative: ".." is taken from where the link leads (the installation's .git), not from the link's own folder (a separate folder of that name).
+  dir("srv", "side", "a");
+  dir("nimblenewt", ".git");
+  symlinkSync(join(root, "srv", "side", "a"), join(dir("work"), "lnk"));
+  writeFileSync(join(root, "srv", "side", "a", "commondir"), `..${sep}..${sep}nimblenewt${sep}.git\n`);
+  const viaLink = dir("work", "via-link");
+  writeFileSync(join(viaLink, ".git"), `gitdir: ${join(root, "work", "lnk")}\n`);
+  await refusedWith([repo(viaLink)], guarded, /git folder .*nimblenewt.\.git\) is inside the running installation's program files/);
+  // gitdir "l/../own" with l a link to a folder apart: the git folder is that folder's sibling own, and its commondir (the installation's .git) is read there, not in the checkout's own "own".
+  writeFileSync(join(dir("srv", "side", "own"), "commondir"), `${join(install, ".git")}\n`);
+  dir("srv", "side", "b");
+  const dots2 = dir("work", "dots2");
+  dir("work", "dots2", "own");
+  symlinkSync(join(root, "srv", "side", "b"), join(dots2, "l"));
+  writeFileSync(join(dots2, ".git"), "gitdir: l/../own\n");
+  await refusedWith([repo(dots2)], guarded, /git folder .*\.git\) is inside the running installation's program files/);
+  if (process.platform !== "win32") {
+    // A FIFO named .git is not waited on.
+    const { execFileSync } = await import("node:child_process");
+    const fifo = dir("work", "fifo");
+    execFileSync("mkfifo", [join(fifo, ".git")]);
+    await refusedWith([repo(fifo)], guarded, /its \.git could not be read \(ENOTFILE\)/);
+  }
+});
+
+test("more mounts held on both sides than it compares is refused", async () => {
+  const n = 1001;
+  const lines = ["1 0 8:1 / /"];
+  for (let i = 0; i < n; i++) lines.push(`${10 + i} 1 8:4 /a${i} /srv/nn/m${i}`, `${5000 + i} 1 8:5 /b${i} /work/dev/m${i}`);
+  await refusedWith([repo("/work/dev")], g1, /hold too many mounts to compare/, { fs: fakeFs(bindTree, { mounts: mi(...lines) }), platform: "linux" });
+  assert.deepEqual(await judgeSeparate([repo("/work/dev")], g1, { fs: fakeFs(bindTree, { mounts: mi(...lines.slice(0, 1 + 2 * 999)) }), platform: "linux" }), { separate: true });
 });
