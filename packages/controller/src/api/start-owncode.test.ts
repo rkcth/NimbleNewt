@@ -16,6 +16,7 @@ const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease:
 // check); after a restart the owner withdraws the approval and the next attempt is refused. Tasks of other projects start as before throughout.
 test("work on NimbleNewt's own code through the running controller: off by default, asked ahead, owner-approved, gated at attempt start, withdrawn (card B06)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-b06-"));
+  const co = mkdtempSync(join(tmpdir(), "nn-b06c-co-"));
   const open = () => startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
     dispatch: { timer: new ManualTimer(), manual: true, route: async () => ({ route: "cloud/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: true } }) } });
   let c = await open();
@@ -26,6 +27,8 @@ test("work on NimbleNewt's own code through the running controller: off by defau
     const call = async (token: string, op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
     const devProject = (await c.services.projects.createProject({ commandId: "p-dev", actor: rob.id, name: "NimbleNewt development" })).id;
     const garden = (await c.services.projects.createProject({ commandId: "p-garden", actor: rob.id, name: "Garden" })).id;
+    // Card B06, third slice: the development project's own checkout, apart from the data directory (which holds the database) and the program files.
+    await c.services.resources.bindResource(rob, { commandId: "bind-co", projectId: devProject, kind: "repository", label: "NimbleNewt source", locator: co, access: "write" } as never);
     const made = await c.services.agents.create(rob, { commandId: "mk-ann", friendlyName: "Ann", roles: ["author"] });
     const ann = `agent:${made.id}`;
     const annToken = (await c.services.principals.issueCredential(rob, ann)).token;
@@ -108,5 +111,5 @@ test("work on NimbleNewt's own code through the running controller: off by defau
     const got2 = (await call(boot.token, "owncode.get", { requestId: id2 })).result.item;
     assert.ok((await call(boot.token, "owncode.withdraw", { requestId: id2, expectedRevision: got2.revision, reason: "not now" }, "w-2")).ok);
     assert.match((await heldFor()) ?? "", /the owner withdrew the approval/, "withdrawn after the admission: the dispatcher holds the attempt");
-  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); rmSync(co, { recursive: true, force: true }); }
 });

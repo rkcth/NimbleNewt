@@ -7,6 +7,7 @@ import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import { clean, invalid, plain, whole } from "../standups/shared.js";
+import { SEPARATE_LIMITS, judgeSeparate, type GuardedPlace, type OwnPlace, type Separation, type SeparationFs } from "./separate.js";
 
 /**
  * Optional agent work on NimbleNewt's own code (card B06, first slice): the feature, an agent's request to work on it, the owner's decision, and the start gate.
@@ -21,6 +22,9 @@ import { clean, invalid, plain, whole } from "../standups/shared.js";
  * - **Work already running is stopped** (second slice). `stopRefused`, run on every dispatcher tick, looks at the attempts running in the development project and asks L02's Stop of the task for each one
  *   whose start the gate would refuse now (the approval withdrawn, the feature switched off, the task's text changed, or no approved request). The Stop pauses the task, lets the calls in flight settle, takes a
  *   checkpoint and ends the attempt (`abandoned`, its records kept); its reason is the gate's own words. The task stays stopped until the owner resumes it.
+ * - **Its own checkout** (third slice). The development project works only in a checkout of its own: enabling, approving and every start (so also the stop look) need every local place of the project
+ *   (`judgeSeparate`) to be apart from the running installation (its program files, runtime, data directory, database file, transfer state and release folders): not the same folder, not inside one and not
+ *   above one, after symbolic links and bind mounts are resolved. When it cannot tell, it refuses. The owner reads why in `settings`; anyone else is told only that the checkout is not confirmed separate.
  * - **Not here** (later slices): launch proposals and their explanation, review, revision binding and installation (the card's other clauses), chat wording for the owner's controls.
  */
 export const OWNCODE_STATUSES = ["pending", "approved", "rejected", "withdrawn"] as const;
@@ -58,6 +62,8 @@ const STOP_OVER = ["done", "recovery-required", "cancelled"];
 const REQUEST_ID = /^ocr-[a-z2-7]{20}$/;
 const SETTINGS: AggregateRef = { kind: "owncode-settings", id: "installation" };
 const INDEX: AggregateRef = { kind: "owncode-index", id: "installation" };
+/** What the start gate says when the development project's checkout is not confirmed apart from the running installation (the detail is the owner's, in `settings`). */
+export const ownCodeCheckoutRefused = (taskId: string): string => `task ${taskId} is in the NimbleNewt development project, but that project's own checkout is not confirmed to be apart from the running installation, so no work starts; the owner can see why in the feature's settings`;
 /** What a refusal says while the feature is off: the owner can enable it. */
 export const OWNCODE_OFF = "Work on NimbleNewt's own code is off in this installation. The owner can enable it (and name the NimbleNewt development project) if this work is wanted.";
 
@@ -91,6 +97,11 @@ interface TaskLink { readonly requestId: string }
 export interface OwnCodeOptions extends RunnerOptions {
   /** Creates the approved task in the development project. Without it nothing is approved (fail closed). */
   readonly projects?: Pick<ProjectService, "createTask">;
+  /**
+   * Card B06, third slice: where the development project works, and where it must never work. `places` reads the project's places from its records (`ProjectResourceService.localPlaces`); `guarded` are the
+   * running installation's folders (`installationGuards`, from what builds the controller). Without it nothing is enabled or approved and no work starts in the development project (fail closed).
+   */
+  readonly checkout?: { readonly places: (projectId: string, limit: number) => Promise<readonly OwnPlace[] | "too-many">; readonly guarded: readonly GuardedPlace[]; readonly fs?: SeparationFs; readonly platform?: string };
 }
 
 /** The command ID of the task an approval creates: derived from the request, so a repeat of the approval finds the same task. */
@@ -103,25 +114,30 @@ export const taskIdOf = (requestId: string): string => derivedId("task", taskCom
 export class OwnCodeService {
   readonly #runner: CommandRunner;
   readonly #projects: Pick<ProjectService, "createTask"> | undefined;
+  readonly #checkout: OwnCodeOptions["checkout"];
   /** Where the next stop look begins in the dispatcher's live list (card B06, second slice). */
   #stopFrom = 0;
 
-  private constructor(runner: CommandRunner, projects: Pick<ProjectService, "createTask"> | undefined) { this.#runner = runner; this.#projects = projects; }
+  private constructor(runner: CommandRunner, projects: Pick<ProjectService, "createTask"> | undefined, checkout: OwnCodeOptions["checkout"]) { this.#runner = runner; this.#projects = projects; this.#checkout = checkout; }
 
   static withEpoch(storage: ControllerStorage, epoch: number, options: OwnCodeOptions = {}): OwnCodeService {
-    const { projects, ...rest } = options;
-    return new OwnCodeService(new CommandRunner(storage, epoch, rest), projects);
+    const { projects, checkout, ...rest } = options;
+    return new OwnCodeService(new CommandRunner(storage, epoch, rest), projects, checkout);
   }
 
   // ---- the feature -----------------------------------------------------------------------------------------------------------
 
-  /** The feature's settings (the owner only; anyone else gets `undefined`). Never written: off, with no development project. */
-  async settings(viewer: Principal): Promise<{ revision: number; enabled: boolean; projectId?: string; history: OwnCodeSettings["history"] } | undefined> {
+  /**
+   * The feature's settings (the owner only; anyone else gets `undefined`). Never written: off, with no development project. Once a development project is named, `checkout` says whether its own checkout
+   * is apart from the running installation now (judged at each read, as at each start), and why not.
+   */
+  async settings(viewer: Principal): Promise<{ revision: number; enabled: boolean; projectId?: string; checkout?: { separate: boolean; reason?: string }; history: OwnCodeSettings["history"] } | undefined> {
     if (!this.#isOwner(viewer)) return undefined;
     const found = await this.#runner.get(SETTINGS.kind, SETTINGS.id);
     if (found === undefined) return { revision: 0, enabled: false, history: [] };
     const b = found.body as unknown as OwnCodeSettings;
-    return { revision: found.revision, enabled: b.enabled, ...(b.projectId === undefined ? {} : { projectId: b.projectId }), history: b.history };
+    const checkout = b.projectId === undefined ? undefined : await this.#separation(b.projectId);
+    return { revision: found.revision, enabled: b.enabled, ...(b.projectId === undefined ? {} : { projectId: b.projectId }), ...(checkout === undefined ? {} : { checkout: checkout.separate ? { separate: true } : { separate: false, reason: checkout.detail } }), history: b.history };
   }
 
   /**
@@ -148,6 +164,8 @@ export class OwnCodeService {
           if ((project.body as unknown as { state?: string }).state !== "active") invalid("projectId", `project ${projectId} is not active`);
         }
         if (b?.enabled === true) invalid("enabled", "work on NimbleNewt's own code is already enabled");
+        const apart = await this.#separation(projectId);
+        if (!apart.separate) throw new DomainError("unavailable", `work on NimbleNewt's own code is not enabled: ${apart.detail}`);
         const next: OwnCodeSettings = { enabled: true, projectId, history: this.#settingsHistory(b, by.id, true) };
         return { ref: SETTINGS, creates: found === undefined, changes: [found === undefined ? { type: "create", ref: SETTINGS, body: clean(next) } : { type: "update", ref: SETTINGS, expectedRevision: found.revision, body: clean(next) }], detail: { projectId } };
       },
@@ -234,6 +252,8 @@ export class OwnCodeService {
           const settings = await this.#enabledOrRefuse();
           const project = await this.#runner.get("project", settings.projectId);
           if (project === undefined || (project.body as unknown as { state?: string }).state !== "active") throw new DomainError("unavailable", `the NimbleNewt development project ${settings.projectId} is not active, so no work can be approved into it`);
+          const apart = await this.#separation(settings.projectId);
+          if (!apart.separate) throw new DomainError("unavailable", `no work can be approved into the NimbleNewt development project now: ${apart.detail}`);
           const taskId = taskIdOf(id);
           const link: AggregateRef = { kind: "owncode-task", id: taskId };
           if ((await this.#runner.get(link.kind, link.id)) !== undefined) throw new DomainError("integrity", `task ${taskId} is already linked to a request`);
@@ -311,7 +331,10 @@ export class OwnCodeService {
    * Why an attempt on this task may not start, or `undefined`. Only tasks of the development project are judged: while the feature is off, a task there that no approved request created, and one whose request
    * is no longer approved, are refused, and so is a task whose title or description is no longer the one the approval created. A task that cannot be read is left to the admission's own check (which refuses it). A settings or request record that cannot be read throws, so admission fails.
    */
-  async checkAttempt(taskId: string): Promise<string | undefined> {
+  async checkAttempt(taskId: string): Promise<string | undefined> { return this.#checkAttempt(taskId, undefined); }
+
+  /** `checkAttempt`, with the development project's checkout judged once per `memo` (one stop look judges it once, not once per attempt). */
+  async #checkAttempt(taskId: string, memo: { apart?: Promise<Separation> } | undefined): Promise<string | undefined> {
     const settings = await this.#runner.get(SETTINGS.kind, SETTINGS.id);
     const s = settings?.body as unknown as OwnCodeSettings | undefined;
     if (s?.projectId === undefined) return undefined;
@@ -327,7 +350,21 @@ export class OwnCodeService {
     const want = this.#taskText(link.requestId, request.body);
     const t = task.body as unknown as { title?: string; description?: string };
     if (t.title !== want.title || t.description !== want.description) return `task ${taskId} was changed after the owner approved request ${link.requestId} (its title or description is not the approved one), so no work starts; changed work needs a new request`;
+    // Third slice: the work happens in the project's own checkout, apart from the running installation. Judged at every start (a binding can be moved after the approval). The detail is the owner's.
+    const apart = memo === undefined ? this.#separation(s.projectId) : (memo.apart ??= this.#separation(s.projectId));
+    if (!(await apart).separate) return ownCodeCheckoutRefused(taskId);
     return undefined;
+  }
+
+  /**
+   * Whether a child task may be made in this project (card B06, third slice; asked by `swarm.spawn` before anything is made). Not in the development project, once it is named (on or off): the owner
+   * approved each task there by its own text, and a child's text is its parent's agent's, so a child there could never start (`checkAttempt` finds no approved request for it) and would only hold part of its
+   * parent's allowance. Work there is divided by new requests instead. A settings record that cannot be read throws, so the spawn fails.
+   */
+  async checkSpawn(projectId: string): Promise<string | undefined> {
+    const s = (await this.#runner.get(SETTINGS.kind, SETTINGS.id))?.body as unknown as OwnCodeSettings | undefined;
+    if (s?.projectId === undefined || s.projectId !== projectId) return undefined;
+    return "no child task is made in the NimbleNewt development project: the owner approves each piece of work there by its own request, so ask for the part as a new request (owncode.request)";
   }
 
   /**
@@ -344,6 +381,7 @@ export class OwnCodeService {
     const s = (await this.#runner.get(SETTINGS.kind, SETTINGS.id))?.body as unknown as OwnCodeSettings | undefined;
     if (s?.projectId === undefined) return { stopped, failed };
     const seen = new Set<string>();
+    const memo: { apart?: Promise<Separation> } = {};
     // The look begins where the last one stopped (in memory: after a restart it begins at the start again, which only means the first look after it covers the front of the list again).
     const look = await deps.running(this.#stopFrom, OWNCODE_STOP.look);
     this.#stopFrom = look.next;
@@ -353,7 +391,7 @@ export class OwnCodeService {
       if (a.projectId !== s.projectId || seen.has(a.taskId)) continue;
       seen.add(a.taskId);
       try {
-        const why = await this.checkAttempt(a.taskId);
+        const why = await this.#checkAttempt(a.taskId, memo);
         if (why === undefined) continue;
         // A Stop this look already asked for this attempt on an earlier tick is not asked for again (asking again would touch the task's pause, which may be the owner's own by now). In progress, it is the
         // Stop's sweep's to carry on, and the owner's notice is sent again under the same command ID (so a notice lost to a restart between the Stop and the notice is sent, and never twice). Over or
@@ -402,6 +440,17 @@ export class OwnCodeService {
     const { title, description } = this.#taskText(id, stored);
     const created = await this.#projects!.createTask({ commandId: taskCommandOf(id), actor: stored.decidedBy ?? by.id, projectId: stored.projectId!, title, description });
     if (created.id !== stored.taskId) throw new DomainError("integrity", `request ${id}: the task created (${created.id}) is not the one recorded (${stored.taskId})`);
+  }
+
+  /** Whether the development project's own checkout is apart from the running installation (`judgeSeparate`). Never throws: a failure to read is "cannot tell", which is not separate. */
+  async #separation(projectId: string): Promise<Separation> {
+    const c = this.#checkout;
+    if (c === undefined) return { separate: false, detail: "this controller cannot check where the development project's checkout is, so nothing is enabled, approved or started there" };
+    try {
+      return await judgeSeparate(await c.places(projectId, SEPARATE_LIMITS.places), c.guarded, { ...(c.fs === undefined ? {} : { fs: c.fs }), ...(c.platform === undefined ? {} : { platform: c.platform }) });
+    } catch (error) {
+      return { separate: false, detail: `the development project's places could not be read (${error instanceof DomainError ? error.message.slice(0, 200) : "a storage failure"}), so its checkout cannot be checked` };
+    }
   }
 
   async #enabledOrRefuse(): Promise<{ projectId: string }> {

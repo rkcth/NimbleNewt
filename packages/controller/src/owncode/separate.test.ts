@@ -1,0 +1,130 @@
+import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { after, test } from "node:test";
+import { SEPARATE_LIMITS, installationGuards, judgeSeparate, programRoot, type GuardedPlace, type OwnPlace, type SeparationFs } from "./separate.js";
+
+// Card B06, third slice: the NimbleNewt development project's own checkout must be apart from the running installation. These tests judge places against guarded folders on a real disk (symbolic links,
+// missing folders, loops) and on a file system the test makes up (a bind mount, a file system without folder identity, a folder too deep, a failing disk). Nothing here touches the controller's records.
+
+const root = realpathSync(mkdtempSync(join(tmpdir(), "nn-b06c-sep-")));
+after(() => rmSync(root, { recursive: true, force: true }));
+const dir = (...parts: string[]): string => { const p = join(root, ...parts); mkdirSync(p, { recursive: true }); return p; };
+const repo = (locator: string, label = "source", write = true): OwnPlace => ({ label, kind: "repository", locator, write });
+const install = dir("srv", "nimblenewt");
+const data = dir("var", "nimblenewt-data");
+const guarded: GuardedPlace[] = [{ what: "the running installation's program files", path: install }, { what: "the controller's data directory", path: data }];
+const refusedWith = async (places: readonly OwnPlace[] | "too-many", g: readonly GuardedPlace[], match: RegExp, o: Parameters<typeof judgeSeparate>[2] = {}): Promise<void> => {
+  const got = await judgeSeparate(places, g, o);
+  assert.equal(got.separate, false, `expected a refusal matching ${match}`);
+  if (!got.separate) { assert.match(got.detail, match); assert.ok(got.detail.length <= 400); }
+};
+
+test("a checkout of its own beside the installation is separate; the same folder, one inside it and one above it are not", async () => {
+  const own = dir("work", "nimblenewt-dev");
+  assert.deepEqual(await judgeSeparate([repo(own)], guarded), { separate: true });
+  // A sibling whose name starts with the installation's name is not inside it.
+  assert.deepEqual(await judgeSeparate([repo(dir("srv", "nimblenewt-dev"))], guarded), { separate: true });
+  await refusedWith([repo(install)], guarded, /is the same folder as the running installation's program files/);
+  await refusedWith([repo(dir("srv", "nimblenewt", "packages", "controller"))], guarded, /is inside the running installation's program files/);
+  await refusedWith([repo(join(root, "srv"))], guarded, /holds the running installation's program files/);
+  await refusedWith([repo(join(root, "var"))], guarded, /holds the controller's data directory/);
+  await refusedWith([repo(dir("var", "nimblenewt-data", "workspaces", "dev"))], guarded, /inside the controller's data directory/);
+  // Spelled with a trailing separator and with "." segments: the same folder.
+  await refusedWith([repo(`${install}/`)], guarded, /same folder/);
+  await refusedWith([repo(`${install}/./packages/.`)], guarded, /inside/);
+  // Every place is judged, not only the first: a separate checkout and an output folder inside the data directory are refused.
+  await refusedWith([repo(own), { label: "reports", kind: "output", locator: dir("var", "nimblenewt-data", "out"), write: true }], guarded, /output "reports" .* inside the controller's data directory/);
+});
+
+test("symbolic links are followed: a link into the installation, a link to a folder above it and a link loop are refused", async () => {
+  const links = dir("links");
+  symlinkSync(join(install, "packages"), join(links, "into"));
+  symlinkSync(join(root, "srv"), join(links, "up"));
+  symlinkSync(join(links, "loop-b"), join(links, "loop-a"));
+  symlinkSync(join(links, "loop-a"), join(links, "loop-b"));
+  symlinkSync(dir("work", "elsewhere"), join(links, "fine"));
+  await refusedWith([repo(join(links, "into"))], guarded, /inside the running installation's program files/);
+  await refusedWith([repo(join(links, "up"))], guarded, /holds the running installation's program files/);
+  await refusedWith([repo(join(links, "loop-a"))], guarded, /cannot be checked: it could not be read on the controller's machine \(ELOOP\)/);
+  assert.deepEqual(await judgeSeparate([repo(join(links, "fine"))], guarded), { separate: true });
+  // A guarded folder reached through a link is the folder itself.
+  await refusedWith([repo(dir("work", "elsewhere", "x"))], [{ what: "the release folder the launcher reads", path: join(links, "fine") }], /inside the release folder the launcher reads/);
+});
+
+test("it fails closed: no checkout of its own, a checkout that is not on this machine or not there, and no guarded folders are all refused", async () => {
+  const own = dir("work", "dev2");
+  await refusedWith([], guarded, /no checkout of its own/);
+  await refusedWith([repo(own, "source", false)], guarded, /no checkout of its own/, {});
+  await refusedWith([{ label: "notes", kind: "document", locator: own, write: true }], guarded, /no checkout of its own/);
+  await refusedWith([repo(own), repo("git@example.invalid:nn.git", "remote")], guarded, /repository "remote" is at git@example\.invalid:nn\.git, which is not a folder on the controller's machine/);
+  await refusedWith([repo(join(root, "nowhere", "dev"))], guarded, /could not be read on the controller's machine \(ENOENT\)/);
+  await refusedWith([repo(own)], [], /not told where the running installation is/);
+  await refusedWith([repo(own)], [{ what: "the running installation's program files", path: "relative/install" }], /is not given as a full path/);
+  await refusedWith("too-many", guarded, new RegExp(`more than ${SEPARATE_LIMITS.places} places`));
+  await refusedWith(Array.from({ length: SEPARATE_LIMITS.places + 1 }, (_, i) => repo(own, `r${i}`)), guarded, /more than/);
+  assert.deepEqual(await judgeSeparate(Array.from({ length: SEPARATE_LIMITS.places }, (_, i) => repo(own, `r${i}`)), guarded), { separate: true }, "exactly the limit is judged");
+  await refusedWith([repo(own)], Array.from({ length: SEPARATE_LIMITS.guarded + 1 }, (_, i) => ({ what: `g${i}`, path: dir("g", String(i)) })), /not told where/);
+  // A resource that is not a repository and not a local path (a service's address) is not a folder and is not judged.
+  assert.deepEqual(await judgeSeparate([repo(own), { label: "site", kind: "service", locator: "https://example.invalid/", write: true }], guarded), { separate: true });
+});
+
+test("a guarded folder not made yet: a checkout that would hold it is refused, one elsewhere is separate", async () => {
+  const own = dir("work", "dev3");
+  const later: GuardedPlace[] = [{ what: "the release folder the launcher reads", path: join(own, "releases", "current") }];
+  await refusedWith([repo(own)], later, /holds the release folder the launcher reads/);
+  assert.deepEqual(await judgeSeparate([repo(own)], [{ what: "the release folder the launcher reads", path: join(root, "opt", "nn-releases") }]), { separate: true });
+});
+
+/** A made-up file system: paths map to identities; `realpath` is the identity map's own spelling. */
+const fakeFs = (ids: Record<string, string>, o: { failStat?: string; code?: string } = {}): SeparationFs => ({
+  realpath: async (p) => { if (ids[p] === undefined) throw Object.assign(new Error("missing"), { code: "ENOENT" }); return p; },
+  stat: async (p) => {
+    if (o.failStat === p) throw Object.assign(new Error("denied"), { code: o.code ?? "EACCES" });
+    const id = ids[p];
+    if (id === undefined) throw Object.assign(new Error("missing"), { code: "ENOENT" });
+    const [dev, ino] = id.split(":");
+    return { dev: BigInt(dev!), ino: BigInt(ino!) };
+  },
+});
+const tree = { "/": "1:2", "/srv": "1:10", "/srv/nn": "1:11", "/mnt": "1:20", "/mnt/live": "1:11", "/mnt/top": "1:10", "/work": "1:30", "/work/dev": "1:31", "/mnt/live/pkg": "1:12" };
+
+test("a bind mount is the same folder: a checkout through a second mount of the installation, or of a folder above it, is refused", async () => {
+  const g: GuardedPlace[] = [{ what: "the running installation's program files", path: "/srv/nn" }];
+  assert.deepEqual(await judgeSeparate([repo("/work/dev")], g, { fs: fakeFs(tree), platform: "linux" }), { separate: true });
+  await refusedWith([repo("/mnt/live")], g, /same folder as the running installation's program files/, { fs: fakeFs(tree), platform: "linux" });
+  await refusedWith([repo("/mnt/live/pkg")], g, /inside the running installation's program files/, { fs: fakeFs(tree), platform: "linux" });
+  await refusedWith([repo("/mnt/top")], g, /holds the running installation's program files/, { fs: fakeFs(tree), platform: "linux" });
+});
+
+test("what the disk cannot answer is refused: no folder identity, a folder too deep, a failing read of a guarded folder or a checkout", async () => {
+  const g: GuardedPlace[] = [{ what: "the running installation's program files", path: "/srv/nn" }];
+  await refusedWith([repo("/work/dev")], g, /gives no folder identity/, { fs: fakeFs({ ...tree, "/work/dev": "1:0" }), platform: "linux" });
+  await refusedWith([repo("/work/dev")], g, /the running installation's program files \(\/srv\/nn\) cannot be checked: it could not be read \(EACCES\)/, { fs: fakeFs(tree, { failStat: "/srv" }), platform: "linux" });
+  await refusedWith([repo("/work/dev")], g, /at \/work\/dev cannot be checked: it could not be read on the controller's machine \(EIO\)/, { fs: fakeFs(tree, { failStat: "/work", code: "EIO" }), platform: "linux" });
+  const deep: Record<string, string> = { "/": "1:2" };
+  let p = "";
+  for (let i = 0; i < SEPARATE_LIMITS.depth + 2; i++) { p += `/d${i}`; deep[p] = `1:${100 + i}`; }
+  await refusedWith([repo(p)], [{ what: "the running installation's program files", path: "/" + "x" }], new RegExp(`more than ${SEPARATE_LIMITS.depth} folders deep`), { fs: fakeFs({ ...deep, "/x": "1:3" }), platform: "linux" });
+});
+
+test("on a platform whose file systems fold case, a differently cased spelling of the installation is refused even when the disk gives no shared identity", async () => {
+  const ids = { "/": "1:2", "/Srv": "1:10", "/Srv/NN": "1:11", "/srv": "1:40", "/srv/nn": "1:41", "/srv/nn/x": "1:42" };
+  const g: GuardedPlace[] = [{ what: "the running installation's program files", path: "/Srv/NN" }];
+  await refusedWith([repo("/srv/nn/x")], g, /inside the running installation's program files/, { fs: fakeFs(ids), platform: "darwin" });
+  await refusedWith([repo("/srv/nn/x")], g, /inside/, { fs: fakeFs(ids), platform: "win32" });
+  assert.deepEqual(await judgeSeparate([repo("/srv/nn/x")], g, { fs: fakeFs(ids), platform: "linux" }), { separate: true }, "Linux file systems keep case: two spellings with two identities are two folders");
+});
+
+test("the guarded folders come from what builds the controller; the program root is the source tree or release the controller runs from", () => {
+  const here = programRoot();
+  // This test runs from the built package, which lives in the source tree: the root is the folder whose package.json declares the workspaces, above packages/controller.
+  assert.ok(resolve(here, "packages", "controller") === resolve(new URL("../../", import.meta.url).pathname), `${here} holds this package`);
+  assert.deepEqual(installationGuards({ programRoot: "/opt/nn/", dataDirectory: "/var/lib/nn" }), [{ what: "the running installation's program files", path: "/opt/nn" }, { what: "the controller's data directory", path: "/var/lib/nn" }]);
+  const all = installationGuards({ programRoot: "/opt/nn", runtime: "/usr/bin", dataDirectory: "/d", databaseFile: "/d/c.sqlite", stateDirectory: "/s", releaseRoot: "/r", releaseIncoming: "/i" });
+  assert.deepEqual(all.map((g) => g.path), ["/opt/nn", "/usr/bin", "/d", "/d/c.sqlite", "/s", "/r", "/i"]);
+  // A package with no workspace root above it is its own root.
+  const lone = dir("lone", "pkg", "dist", "owncode");
+  assert.equal(programRoot(`file://${join(lone, "separate.js")}`), join(root, "lone", "pkg"));
+});

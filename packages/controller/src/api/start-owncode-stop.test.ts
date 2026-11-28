@@ -49,6 +49,7 @@ const intentsFor = async (c: C, taskId: string): Promise<Intent[]> => (await c.s
 
 test("work already running on NimbleNewt's own code is stopped through L02's Stop at the next tick once the owner withdraws the approval or switches the feature off; other work runs on (card B06)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-b06s-"));
+  const co = mkdtempSync(join(tmpdir(), "nn-b06c-co-"));
   const file = join(d, "c.sqlite");
   let c = await open(file, runUntilStopped());
   try {
@@ -57,6 +58,8 @@ test("work already running on NimbleNewt's own code is stopped through L02's Sto
     const owner = await c.services.principals.authenticate(boot.token);
     const devProject = (await c.services.projects.createProject({ commandId: "p-dev", actor: owner.id, name: "NimbleNewt development" })).id;
     const garden = (await c.services.projects.createProject({ commandId: "p-garden", actor: owner.id, name: "Garden" })).id;
+    // Card B06, third slice: the development project's own checkout, apart from the data directory (which holds the database) and the program files.
+    await c.services.resources.bindResource(owner, { commandId: "bind-co", projectId: devProject, kind: "repository", label: "NimbleNewt source", locator: co, access: "write" } as never);
     await c.services.principals.enroll(owner, { commandId: "e-w1", kind: "host", name: "w1", grants: [] });
     const hostP = await c.services.principals.authenticate((await c.services.principals.issueCredential(owner, "host:w1")).token);
     const hosts = HostService.withEpoch(c.storage, c.epoch, c.services.assignments);
@@ -173,5 +176,5 @@ test("work already running on NimbleNewt's own code is stopped through L02's Sto
     assert.deepEqual([(await intentsFor(c, t1)).length, (await intentsFor(c, t2)).length], [1, 1]);
     assert.equal((await notices()).length, 2);
     for (const a of [a1, a2]) assert.equal((await dispatchOf(c, a)).state, "finished");
-  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); rmSync(co, { recursive: true, force: true }); }
 });

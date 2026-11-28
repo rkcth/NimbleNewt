@@ -1701,7 +1701,7 @@ Arguments:
 
 - none
 
-Result: `{ revision, enabled, projectId?, history }` (revision 0: never written).
+Result: `{ revision, enabled, projectId?, checkout?, history }` (revision 0: never written). `checkout`, once a development project is named: whether its own checkout is apart from the running installation's folders now (`separate`), and `reason` when it is not; until it is, nothing is enabled, approved or started there.
 
 #### `owncode.get`
 

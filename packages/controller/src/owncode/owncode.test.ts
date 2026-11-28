@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { after, test } from "node:test";
 import { AssignmentService, type Owner } from "../domain/index.js";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
@@ -8,9 +11,10 @@ import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { scopedCommandId } from "../security/credentials.js";
 import { PauseService, StopService, type InventoryItem, type StopPorts } from "../lifecycle/index.js";
+import { ProjectResourceService } from "../projects/index.js";
 import { PrincipalService, type Principal } from "../security/index.js";
 import type { ControllerStorage } from "../storage/types.js";
-import { OWNCODE_OFF, OWNCODE_STOP, OwnCodeService, ownCodeStopNotice, ownCodeStopReason, taskIdOf, type OwnCodeOptions, type OwnCodeRunning, type OwnCodeStops } from "./index.js";
+import { OWNCODE_OFF, OWNCODE_STOP, OwnCodeService, ownCodeCheckoutRefused, ownCodeStopNotice, ownCodeStopReason, taskIdOf, type OwnCodeOptions, type OwnCodeRunning, type OwnCodeStops } from "./index.js";
 
 // Card B06, first slice: optional agent work on NimbleNewt's own code. Off by default (a request is refused with a message saying the owner can enable it); on, an agent asks first and only the owner approves;
 // no attempt starts in the development project without an approved request, and a withdrawn approval stops further starts. Real storage on each backend, real admissions through the attempt gate; the only
@@ -62,6 +66,8 @@ function fakeStops() {
 interface Ctx {
   owner: Principal; dev: Principal; dev2: Principal; host: Principal; confined: Principal;
   devProject: string; other: string; svc: OwnCodeService; projects: ProjectService; assign: AssignmentService; storage: ControllerStorage; epoch: number;
+  /** Card B06, third slice: the folder standing for the running installation (guarded), the development project's own checkout (bound with write access), and the bindings. */
+  install: string; checkout: string; scratch: string; resources: ProjectResourceService;
   make(o?: OwnCodeOptions): OwnCodeService;
   enable(): Promise<void>;
   ask(by?: Principal, over?: Record<string, unknown>): Promise<string>;
@@ -77,6 +83,7 @@ for (const backend of backends) {
     test(`${backend.name}: ${name}`, async () => {
       now = Date.parse("2026-11-27T15:00:00.000Z");
       const world = await backend.open();
+      const scratch = realpathSync(mkdtempSync(join(tmpdir(), "nn-b06c-")));
       try {
         const projects = await ProjectService.open(world.storage, { holder: "c1", ...options });
         const epoch = projects.epoch;
@@ -88,13 +95,18 @@ for (const backend of backends) {
         };
         const devProject = (await projects.createProject({ commandId: cid("pd"), actor: owner.id, name: "NimbleNewt development" })).id;
         const other = (await projects.createProject({ commandId: cid("po"), actor: owner.id, name: "Garden" })).id;
-        const make = (o: OwnCodeOptions = {}) => OwnCodeService.withEpoch(world.storage, epoch, { ...options, projects, ...o });
+        const install = join(scratch, "install");
+        const checkout = join(scratch, "checkout");
+        mkdirSync(install); mkdirSync(checkout);
+        const resources = ProjectResourceService.withEpoch(world.storage, epoch, options);
+        await resources.bindResource(owner, { commandId: cid("bind"), projectId: devProject, kind: "repository", label: "NimbleNewt source", locator: checkout, access: "write" } as never);
+        const make = (o: OwnCodeOptions = {}) => OwnCodeService.withEpoch(world.storage, epoch, { ...options, projects, checkout: { places: (p, l) => resources.localPlaces(p, l), guarded: [{ what: "the running installation's program files", path: install }] }, ...o });
         const svc = make();
         const assign = AssignmentService.withEpoch(world.storage, epoch, projects, { ...options, attemptGate: (taskId) => svc.checkAttempt(taskId) });
         const dev = await enroll("dev");
         const ctx: Ctx = {
           owner, dev, dev2: await enroll("dev2"), host: await enroll("box", "host"), confined: { ...owner, taskScope: { taskId: derivedId("task", "x"), projectId: other } },
-          devProject, other, svc, projects, assign, storage: world.storage, epoch, make,
+          devProject, other, svc, projects, assign, storage: world.storage, epoch, make, install, checkout, scratch, resources,
           enable: async () => { await svc.enable(owner, { commandId: cid("en"), projectId: devProject }); },
           ask: async (by = dev, over = {}) => (await svc.request(by, { commandId: cid("rq"), ...ASK, ...over } as never)).id,
           rev: async (id) => (await svc.get(owner, id))!.revision,
@@ -113,7 +125,7 @@ for (const backend of backends) {
           },
         };
         await body(ctx);
-      } finally { await world.close(); }
+      } finally { await world.close(); rmSync(scratch, { recursive: true, force: true }); }
     });
 
   suite("off by default: a request is refused with a message saying the owner can enable it, nothing is written, and only the owner reads the settings", async (c) => {
@@ -308,10 +320,11 @@ for (const backend of backends) {
     await c.enable();
     // The development project archived: nothing is approved into it; once active again, the same request is approved.
     const id = await c.ask();
-    await c.projects.updateProject({ commandId: cid("arch"), actor: c.owner.id, projectId: c.devProject, expectedRevision: 1, state: "archived" });
+    const pr = (await c.projects.getProject(c.devProject))!.revision;
+    await c.projects.updateProject({ commandId: cid("arch"), actor: c.owner.id, projectId: c.devProject, expectedRevision: pr, state: "archived" });
     await refuses("unavailable", () => c.svc.decide(c.owner, { commandId: cid("d"), requestId: id, expectedRevision: 1, decision: "approve" }), /not active/);
     assert.equal((await c.svc.get(c.owner, id))!.status, "pending");
-    await c.projects.updateProject({ commandId: cid("act"), actor: c.owner.id, projectId: c.devProject, expectedRevision: 2, state: "active" });
+    await c.projects.updateProject({ commandId: cid("act"), actor: c.owner.id, projectId: c.devProject, expectedRevision: pr + 1, state: "active" });
     const taskId = await c.approve(id);
     // Link records written past the service (a damaged store): the gate judges the request as it is now and refuses.
     const runner = new CommandRunner(c.storage, c.epoch, options);
@@ -663,5 +676,99 @@ for (const backend of backends) {
     assert.deepEqual((await look2()).stopped, ["att-w1", "att-w2", "att-w3", "att-w4", "att-w5"]);
     assert.deepEqual((await look2()).stopped, ["att-w0"]);
     assert.deepEqual(froms2, [0, 1, 0]);
+  });
+
+  suite("third slice: the development project works only in a checkout of its own: enabling, approving, every start and the stop look refuse a checkout in the installation; only the owner reads why", async (c) => {
+    // A second binding of the development project inside the running installation: the feature is not enabled, and the owner's refusal names the place and the folder.
+    const inside = join(c.install, "packages");
+    mkdirSync(inside);
+    const live = await c.resources.bindResource(c.owner, { commandId: cid("b"), projectId: c.devProject, kind: "repository", label: "live", locator: inside, access: "write" } as never);
+    await refuses("unavailable", () => c.enable(), /not enabled: the development project's repository "live" at .*\/install\/packages is inside the running installation's program files/);
+    assert.deepEqual(await c.svc.settings(c.owner), { revision: 0, enabled: false, history: [] }, "nothing was written");
+    await c.resources.unbindResource(c.owner, { commandId: cid("u"), resourceId: live.id, expectedRevision: live.revision });
+    await c.enable();
+    assert.deepEqual((await c.svc.settings(c.owner))!.checkout, { separate: true });
+    const first = await c.approve(await c.ask());
+    const second = await c.approve(await c.ask(c.dev2));
+    const a1 = await c.start(first);
+    // The checkout is moved after the approval, to a link that leads to the installation: the owner sees why; the gate's refusal (which reaches agents) says only that it is not confirmed separate.
+    symlinkSync(c.install, join(c.scratch, "via-link"));
+    const main = (await c.resources.list(c.owner, c.devProject, { state: "bound" }))!.find((r) => r.label === "NimbleNewt source")!;
+    await c.resources.moveResource(c.owner, { commandId: cid("mv"), resourceId: main.id, expectedRevision: main.revision, locator: join(c.scratch, "via-link") });
+    const shown = (await c.svc.settings(c.owner))!.checkout!;
+    assert.equal(shown.separate, false);
+    assert.match(shown.reason!, /repository "NimbleNewt source" at .*via-link is the same folder as the running installation's program files \(.*install\)/);
+    assert.equal(await c.svc.settings(c.dev), undefined);
+    const refused = await c.svc.checkAttempt(second);
+    assert.equal(refused, ownCodeCheckoutRefused(second));
+    assert.ok(!refused!.includes(c.scratch) && !refused!.includes("via-link"), "no path reaches the refusal");
+    await refuses("invalid_command", () => c.start(second), /not confirmed to be apart from the running installation/);
+    // Nothing new is approved while the checkout is not separate.
+    const third = await c.ask(c.dev2);
+    await refuses("unavailable", () => c.svc.decide(c.owner, { commandId: cid("d"), requestId: third, expectedRevision: 1, decision: "approve" }), /no work can be approved into the NimbleNewt development project now: .* same folder as the running installation's program files/);
+    assert.equal((await c.svc.get(c.owner, third))!.status, "pending");
+    // The work already running is stopped by the next look, with the gate's words; the project's places are read once for the whole look.
+    let reads = 0;
+    const counting = c.make({ checkout: { places: async (p, l) => { reads++; return c.resources.localPlaces(p, l); }, guarded: [{ what: "the running installation's program files", path: c.install }] } });
+    const f = fakeStops();
+    const look = await counting.stopRefused(c.owner, { stops: f.stops, running: async () => ({ items: [{ attemptId: a1, taskId: first, projectId: c.devProject }, { attemptId: "att-other", taskId: second, projectId: c.devProject }], next: 0 }) });
+    assert.deepEqual(look.stopped, [a1, "att-other"]);
+    assert.equal(reads, 1, "one look judges the checkout once");
+    assert.equal(f.asked[0]!.reason, ownCodeStopReason(ownCodeCheckoutRefused(first)));
+    // A checkout that is not there gets the same refusal as one in the installation: the answer tells nothing about which folders exist.
+    const moved = (await c.resources.get(c.owner, main.id))!;
+    await c.resources.moveResource(c.owner, { commandId: cid("mv"), resourceId: main.id, expectedRevision: moved.revision, locator: join(c.scratch, "not-there") });
+    assert.equal(await c.svc.checkAttempt(second), refused!.replace(second, second));
+    assert.match((await c.svc.settings(c.owner))!.checkout!.reason!, /could not be read on the controller's machine \(ENOENT\)/);
+    // Back in its own checkout: the waiting work starts and the waiting request is approved.
+    const back = (await c.resources.get(c.owner, main.id))!;
+    await c.resources.moveResource(c.owner, { commandId: cid("mv"), resourceId: main.id, expectedRevision: back.revision, locator: c.checkout });
+    await c.finish(first, a1);
+    assert.ok(await c.start(second));
+    assert.equal((await c.svc.decide(c.owner, { commandId: cid("d"), requestId: third, expectedRevision: 1, decision: "approve" })).status, "approved");
+    // Switching off and on again judges the checkout again.
+    const s = (await c.svc.settings(c.owner))!;
+    await c.svc.disable(c.owner, { commandId: cid("dis"), expectedRevision: s.revision });
+    const now2 = (await c.resources.get(c.owner, main.id))!;
+    await c.resources.moveResource(c.owner, { commandId: cid("mv"), resourceId: main.id, expectedRevision: now2.revision, locator: c.install });
+    await refuses("unavailable", () => c.svc.enable(c.owner, { commandId: cid("en"), expectedRevision: s.revision + 1 }), /same folder as the running installation's program files/);
+  });
+
+  suite("third slice: it fails closed: a service built without the check, or whose places cannot be read, enables, approves and starts nothing in the development project", async (c) => {
+    await c.enable();
+    const taskId = await c.approve(await c.ask());
+    const blind = OwnCodeService.withEpoch(c.storage, c.epoch, { ...options, projects: c.projects });
+    assert.equal(await blind.checkAttempt(taskId), ownCodeCheckoutRefused(taskId));
+    assert.match((await blind.settings(c.owner))!.checkout!.reason!, /cannot check where the development project's checkout is/);
+    const id2 = await c.ask(c.dev2);
+    await refuses("unavailable", () => blind.decide(c.owner, { commandId: cid("d"), requestId: id2, expectedRevision: 1, decision: "approve" }), /cannot check/);
+    const broken = c.make({ checkout: { places: async () => { throw new DomainError("unavailable", "project has more than 200 bindings, too many to check safely"); }, guarded: [{ what: "the running installation's program files", path: c.install }] } });
+    assert.equal(await broken.checkAttempt(taskId), ownCodeCheckoutRefused(taskId));
+    assert.match((await broken.settings(c.owner))!.checkout!.reason!, /places could not be read \(project has more than 200 bindings/);
+    const unguarded = c.make({ checkout: { places: (p, l) => c.resources.localPlaces(p, l), guarded: [] } });
+    assert.equal(await unguarded.checkAttempt(taskId), ownCodeCheckoutRefused(taskId));
+    // Tasks of other projects are never judged by it.
+    const garden = (await c.projects.createTask({ commandId: cid("t"), actor: c.owner.id, projectId: c.other, title: "weed" })).id;
+    assert.equal(await blind.checkAttempt(garden), undefined);
+    // A repository the project record lists (not bound) is judged too; one whose binding ended is not.
+    const pr = (await c.projects.getProject(c.devProject))!;
+    await c.projects.updateProject({ commandId: cid("up"), actor: c.owner.id, projectId: c.devProject, expectedRevision: pr.revision, addRepositories: [{ id: "live-copy", location: c.install }] });
+    assert.equal(await c.svc.checkAttempt(taskId), ownCodeCheckoutRefused(taskId));
+    assert.match((await c.svc.settings(c.owner))!.checkout!.reason!, /repository "live-copy" at .* is the same folder/);
+    // A listed repository cannot be removed from the project record; binding it and ending the binding ends it as a place.
+    const b = await c.resources.bindResource(c.owner, { commandId: cid("b"), projectId: c.devProject, kind: "repository", label: "old copy", locator: c.install, repositoryId: "live-copy" } as never);
+    assert.equal(await c.svc.checkAttempt(taskId), ownCodeCheckoutRefused(taskId), "while bound it is a place");
+    await c.resources.unbindResource(c.owner, { commandId: cid("u"), resourceId: b.id, expectedRevision: b.revision });
+    assert.equal(await c.svc.checkAttempt(taskId), undefined);
+  });
+
+  suite("third slice: no child task is made in the development project once it is named, on or off; other projects spawn as before", async (c) => {
+    assert.equal(await c.svc.checkSpawn(c.devProject), undefined, "before any development project is named nothing is closed");
+    await c.enable();
+    assert.match((await c.svc.checkSpawn(c.devProject))!, /no child task is made in the NimbleNewt development project/);
+    assert.equal(await c.svc.checkSpawn(c.other), undefined);
+    const s = (await c.svc.settings(c.owner))!;
+    await c.svc.disable(c.owner, { commandId: cid("dis"), expectedRevision: s.revision });
+    assert.match((await c.svc.checkSpawn(c.devProject))!, /no child task is made/, "switched off it stays closed");
   });
 }
