@@ -255,7 +255,7 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
   /** Authority is gone (card H08b): the turn is aborted, no further call leaves the process, and the reason is the turn's recorded result. */
   const authorityLost = async (reason: LossReason): Promise<void> => {
     relay?.refuse(`the lease ended (${reason})`);
-    relay?.closeAll(`the lease ended (${reason})`);
+    relay?.closeAll(`the lease ended (${reason})`, { abortAtHost: true });
     proxy?.close(`the lease ended (${reason})`);
     for (const resolve of bridgeWaiting.values()) resolve({ ok: false, code: "unavailable", message: `the lease ended (${reason})` });
     bridgeWaiting.clear();

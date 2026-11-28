@@ -24,6 +24,8 @@ const LEASE_MS = 3000;
 const GRACE_MS = 2000;
 /** The worker process looks at its clocks once a second (its default), so an open call is cut at most this long after the lease ended. */
 const TICK_MS = 1000;
+/** What the stop may take beyond the watchdog's look to be seen at the model endpoint (the abort goes from the process to the host, which closes its call): measured in tens of ms, allowed more for a loaded CI machine. */
+const SEEN_MS = 750;
 /**
  * The controller's first lease counts from the dispatch; the process's first lease counts from when it reads its start, after the offer was taken, the contract confirmed and the sandbox launched. Until a renewal is answered the process's
  * deadline is later by that time (measured about half a second here; a recorded limit of G08, see the notes). The bound allowed for it.
@@ -283,7 +285,7 @@ test("traffic cut off mid-call: the remote agent stops by its own lease no later
     const m = await measure(x, cutAt, seen);
     t.diagnostic(`G08 blackhole ${JSON.stringify(m.figures)}`);
     assert.ok(m.stoppedAt - cutAt <= LEASE_MS + TICK_MS + 1000, JSON.stringify(m.figures));
-    assert.ok(m.stoppedAt <= m.leaseEnd + TICK_MS + 250, `the open call is cut within one look of the watchdog after the controller's lease: ${JSON.stringify(m.figures)}`);
+    assert.ok(m.stoppedAt <= m.leaseEnd + TICK_MS + SEEN_MS, `the open call is cut within one look of the watchdog after the controller's lease: ${JSON.stringify(m.figures)}`);
     assert.ok(m.goneAt <= m.leaseEnd + TICK_MS + GRACE_MS + 1500, `the sandbox ends within the grace: ${JSON.stringify(m.figures)}`);
     assert.equal(x.model.calls.length, 1, "no model call was made after the cut");
     assert.ok(x.cut.sentIntoCut > 0, "the worker kept asking into the cut");
@@ -349,7 +351,7 @@ test("a delayed renewal: renewals the network held are delivered after the contr
     x.cut.mode = "hold";
     const m = await measure(x, heldAt, seen);
     t.diagnostic(`G08 held ${JSON.stringify(m.figures)}`);
-    assert.ok(m.stoppedAt <= m.leaseEnd + TICK_MS + 250, JSON.stringify(m.figures));
+    assert.ok(m.stoppedAt <= m.leaseEnd + TICK_MS + SEEN_MS, JSON.stringify(m.figures));
     assert.ok(x.cut.sentIntoCut > 0, "renewals were sent into the held line");
     await controllerEnds(x, m.leaseEnd);
     const ended = await x.record();

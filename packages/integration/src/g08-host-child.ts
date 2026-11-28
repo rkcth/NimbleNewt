@@ -25,6 +25,10 @@ async function readConfig(): Promise<Config> {
 }
 
 async function main(): Promise<void> {
+  // A test process that died (killed by a timeout, a crash) cannot stop this one: when its parent changes, it ends, and bubblewrap's parent-death signal takes the sandbox with it. Nothing is left polling a controller that is gone.
+  const parent = process.ppid;
+  const orphan = setInterval(() => { if (process.ppid !== parent) process.exit(4); }, 500);
+  orphan.unref();
   const config = await readConfig();
   const launcher = await SandboxLauncher.create({ protectedPaths: [], audit: () => undefined });
   if (!launcher.capacity.available || launcher.capacity.backend !== "bubblewrap") { say({ ev: "unusable", why: launcher.capacity.reason ?? "no bubblewrap" }); process.exit(3); }

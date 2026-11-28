@@ -20,12 +20,12 @@ test("closeAll fails every call in flight and asks the host to abort each one; a
   relay.accept({ t: "fetch.end", id: ids[2]! } as never);
   assert.equal((await c).status, 200);
   relay.refuse("the lease ended (silent)");
-  relay.closeAll("the lease ended (silent)");
+  relay.closeAll("the lease ended (silent)", { abortAtHost: true });
   await assert.rejects(a, /the lease ended \(silent\)/);
   await assert.rejects(b, /the lease ended \(silent\)/);
   assert.deepEqual(sent.filter((m) => m.t === "fetch.abort").map((m) => (m as { id: number }).id).sort(), [ids[0], ids[1]].sort(), "each call in flight, and only those, is aborted at the host");
   // nothing is aborted twice, and nothing new leaves
-  relay.closeAll("again");
+  relay.closeAll("again", { abortAtHost: true });
   assert.equal(sent.filter((m) => m.t === "fetch.abort").length, 2);
   await assert.rejects(relay.fetch("http://relay.local/m0/chat/completions", { method: "POST", body: "{}" }), /the lease ended/);
   assert.equal(sent.filter((m) => m.t === "fetch").length, 3);
@@ -42,7 +42,7 @@ test("a call whose reply is streaming is aborted at the host by closeAll, and it
   relay.accept({ t: "fetch.chunk", id, data: Buffer.from("data: {}\n\n").toString("base64") } as never);
   const reader = response.body!.getReader();
   assert.equal((await reader.read()).done, false);
-  relay.closeAll("the lease ended (explicit)");
+  relay.closeAll("the lease ended (explicit)", { abortAtHost: true });
   await assert.rejects(reader.read(), /the lease ended \(explicit\)/);
   assert.deepEqual(sent.filter((m) => m.t === "fetch.abort").map((m) => (m as { id: number }).id), [id]);
 });
@@ -54,7 +54,18 @@ test("a send that throws (the channel is gone) does not stop closeAll from faili
   const b = relay.fetch("http://relay.local/m0/x", { method: "POST", body: "{}" });
   await new Promise((ok) => setImmediate(ok));
   broken = true;
+  relay.closeAll("the lease ended (silent)", { abortAtHost: true });
+  await assert.rejects(a, /the lease ended \(silent\)/);
+  await assert.rejects(b, /the lease ended \(silent\)/);
+});
+
+test("the channel ending fails the calls in flight but sends nothing (the host ends its own calls with the channel, and the channel may be gone): the normal close is as before G08", async () => {
+  const sent: FromChild[] = [];
+  const relay = relayFetch("http://relay.local", (m) => { sent.push(m); });
+  const a = relay.fetch("http://relay.local/m0/x", { method: "POST", body: "{}" });
+  await new Promise((ok) => setImmediate(ok));
+  const before = sent.length;
   relay.closeAll("the channel closed");
   await assert.rejects(a, /the channel closed/);
-  await assert.rejects(b, /the channel closed/);
+  assert.equal(sent.length, before, "nothing was written to the channel");
 });

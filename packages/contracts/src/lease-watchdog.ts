@@ -70,9 +70,12 @@ export class LeaseWatchdog {
   /** The time to put on a renewal request before it is sent; give it back to `renewed`. */
   sending(): number { return this.#clock.mono(); }
 
-  /** A renewal was answered. It counts from `sentAt`, and never shortens the lease or revives a lost one. */
+  /**
+   * A renewal was answered. It counts from `sentAt`, and never shortens the lease or revives a lost one. One sent when the lease had already run out (the deadline was passed but no look had stopped the work yet) revives nothing either
+   * (card G08 review): the lease was over when it was asked for, and the next look stops the work.
+   */
   renewed(sentAt: number, leaseMs: number): void {
-    if (this.#lost !== undefined) return;
+    if (this.#lost !== undefined || sentAt >= this.#deadline) return;
     const next = sentAt + Math.min(leaseMs, this.#o.maxLeaseMs);
     if (next > this.#deadline) this.#deadline = next;
   }

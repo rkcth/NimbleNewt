@@ -554,6 +554,8 @@ test("H08b: a turn that ignores the abort is ended inside the grace: closing the
   await new Promise((r) => setTimeout(r, 20));
   k.advance(21_000); void got.dog!.tick(); // the stop waits for an abort the turn never honours
   assert.equal(got.dog!.reason, "silent");
+  // The host is told before the abort is waited for (card G08 review), so its own end after the grace counts from the loss even when the abort never returns.
+  assert.equal((await h.next("lease.lost")).reason, "silent");
   k.advance(3900); await got.dog!.tick();
   assert.deepEqual(exits, [], "still inside the grace");
   k.advance(200); await got.dog!.tick();

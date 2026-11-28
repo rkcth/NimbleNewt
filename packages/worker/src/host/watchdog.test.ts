@@ -40,6 +40,25 @@ test("a reply that comes late, or an old one replayed, never makes the lease lon
   assert.equal(dog.remainingMs(), 30_000, "a longer lease than the cap is cut to the cap");
 });
 
+test("a renewal sent after the lease ran out, before any look stopped the work, revives nothing: the next look stops it (card G08 review)", async () => {
+  const k = clock(); const { dog, log } = make(k);
+  k.advance(20_000); // the deadline is reached; no tick has run yet, so the work is not stopped
+  assert.equal(dog.productive, true);
+  const late = dog.sending();
+  dog.renewed(late, 20_000);
+  assert.equal(dog.remainingMs(), 0, "the lease was over when the renewal was asked for");
+  await dog.tick();
+  assert.deepEqual([dog.productive, dog.reason, log], [false, "silent", ["stop:silent"]]);
+  // one sent a moment before the deadline still counts from its send
+  const k2 = clock(); const b = make(k2);
+  k2.advance(19_999);
+  const inTime = b.dog.sending();
+  k2.advance(5);
+  b.dog.renewed(inTime, 20_000);
+  await b.dog.tick();
+  assert.equal(b.dog.productive, true, "sent 1 ms before the deadline: good for 20 s from the send");
+});
+
 test("explicit loss stops at once and a later renewal does not revive it", async () => {
   const k = clock(); const { dog, log } = make(k);
   await dog.lost();

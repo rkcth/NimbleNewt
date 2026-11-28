@@ -42,7 +42,7 @@ const open = (d: string, holder?: string): Promise<Controller> => startControlle
 } as never);
 
 /** The outside observer: every row of every store table, hashed, on a read-only connection of its own (`storeDigest`). */
-const digestOf = (d: string): { readonly digest: string; readonly rows: number } => storeDigest(join(d, "c.sqlite"));
+const digestOf = (d: string): ReturnType<typeof storeDigest> => storeDigest(join(d, "c.sqlite"));
 
 async function admit(c: Controller, actor: string, projectId: string, n: string): Promise<{ taskId: string; attemptId: string }> {
   const taskId = (await c.services.projects.createTask({ commandId: `t${n}`, actor, projectId, title: `Order seeds ${n}` })).id;
@@ -187,6 +187,10 @@ test("the selected recovery policy, with the old controller still running beside
 
     // 5. and afterwards the old primary still cannot add anything
     const after = digestOf(d);
+    // The observer's other control: the work the successor accepted is seen by it (a digest that could not change would prove nothing), over every table in the file.
+    assert.notEqual(after.digest, idle.digest, "the successor's accepted work changed the digest");
+    assert.ok(after.rows > idle.rows);
+    for (const table of ["state", "aggregates", "operations", "audit", "deliveries", "effects", "timers"]) assert.ok(after.tables.includes(table), table);
     const third = await oldPrimaryTries(old, client, attempt, offer.order, rob.id, project, "3");
     assert.deepEqual(Object.entries(third).filter(([, v]) => v === "accepted"), [], JSON.stringify(third));
     refusedByTheFence(third);

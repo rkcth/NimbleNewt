@@ -18,20 +18,27 @@ export function makeForeignDatabase(path: string): void {
   try { db.exec("CREATE TABLE t (x)"); } finally { db.close(); }
 }
 
-/** The store tables a whole-store digest covers. */
+/** The store tables a whole-store digest must find (the schema's own); any other table in the file is covered as well. */
 const STORE_TABLES = ["state", "aggregates", "operations", "audit", "deliveries", "effects", "timers"] as const;
 
 /**
- * An outside reader of a controller database (card G08): every row of every store table, hashed, read on a read-only connection of its own, so no controller code is asked. Two equal digests mean nothing in the store changed between them.
+ * An outside reader of a controller database (card G08): every row of every table in the file (read from SQLite's own catalogue, so a table added later is covered too), hashed, read on a read-only connection of its own, so no controller
+ * code is asked. Rows are compared as text in a sorted order of their own, so the digest does not depend on the order SQLite returns them in. Two equal digests mean nothing in the database changed between them. A file that lacks one of
+ * the store's tables throws: a digest of the wrong file would prove nothing.
  */
-export function storeDigest(path: string): { readonly digest: string; readonly rows: number } {
+export function storeDigest(path: string): { readonly digest: string; readonly rows: number; readonly tables: readonly string[] } {
   const db = new DatabaseSync(path, { readOnly: true });
   try {
+    const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as { name: string }[]).map((r) => r.name);
+    const missing = STORE_TABLES.filter((t) => !tables.includes(t));
+    if (missing.length > 0) throw new Error(`not a controller store: no table ${missing.join(", ")}`);
     const hash = createHash("sha256");
     let rows = 0;
-    for (const table of STORE_TABLES) {
-      for (const row of db.prepare(`SELECT * FROM ${table} ORDER BY 1, 2`).all()) { hash.update(`${table}\n${JSON.stringify(row)}\n`); rows += 1; }
+    for (const table of tables) {
+      const texts = db.prepare(`SELECT * FROM "${table.replace(/"/g, '""')}"`).all().map((row) => JSON.stringify(row, (_k, v: unknown) => (typeof v === "bigint" ? `${v}n` : v instanceof Uint8Array ? Buffer.from(v).toString("base64") : v))).sort();
+      hash.update(`${table}\n${texts.length}\n`);
+      for (const text of texts) { hash.update(`${text}\n`); rows += 1; }
     }
-    return { digest: hash.digest("hex"), rows };
+    return { digest: hash.digest("hex"), rows, tables };
   } finally { db.close(); }
 }
