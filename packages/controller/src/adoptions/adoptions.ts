@@ -30,12 +30,19 @@ import { clean, invalid, plain, whole } from "../standups/shared.js";
  *   waiting for a review in a project at once, so asking and taking back cannot fill the project. The list keeps the newest `ADOPTION_LIMITS.listed`; when it is full, the oldest ENDED adoption (declined
  *   or withdrawn) leaves the list in the same write as the new request and is counted as `archived`. An archived adoption is kept unchanged and stays readable by its ID with the same rights.
  *
- * Not here (later slices): telling the tasks and paused work that use an adopted change, reconciling them on withdrawal (paused dependencies, completed external effects), and setting a withdrawn tool
- * version aside in the catalog.
+ * - **Honest future use (standing slice).** A tool version set aside in the catalog (deprecated, or rolled back past) is not adopted, and a tool adoption approved earlier is not in force while the
+ *   catalog no longer offers its exact version (revoked, set aside, gone, or another digest). Asking writes nothing; `standing` says why it is not used.
+ * - **Nothing else is undone.** Withdrawal (by a decision or a regression) writes only the adoption and its index: no task, effect, timer or catalog record is touched, so a completed external effect
+ *   stays as it was recorded.
+ *
+ * Not here (later slices): telling the tasks and paused work that use an adopted change and reconciling them on withdrawal (paused dependencies), and setting a withdrawn tool version aside in the
+ * catalog.
  */
 export const ADOPTION_STATUSES = ["requested", "active", "declined", "withdrawn"] as const;
 export type AdoptionStatus = (typeof ADOPTION_STATUSES)[number];
 
+/** Where an adopted tool version stands in the catalog now (`live` is the only one in force); a practice is always `live` while its adoption is active. */
+export type ToolStanding = "live" | "revoked" | "set-aside" | "gone" | "unavailable";
 export type AdoptionTarget = { readonly kind: "practice" } | { readonly kind: "tool"; readonly name: string; readonly version: string };
 export interface Report {
   readonly n: number;
@@ -94,15 +101,19 @@ const OPEN: readonly AdoptionStatus[] = ["requested", "active"];
 export const targetKey = (experimentId: string, t: AdoptionTarget): string => (t.kind === "practice" ? `practice:${experimentId}` : `tool:${t.name}@${t.version}`);
 
 export interface AdoptionOptions extends RunnerOptions {
-  /** The catalog, to find a tool version as the reviewer sees it. Without it no tool is adopted (fail closed); practices still are. */
-  readonly tools?: Pick<CatalogService, "get">;
+  /**
+   * The catalog: `get` finds a tool version as the reviewer sees it; `standingOf` says whether it is revoked or set aside now (asked at approval and by every `inForce` of a tool). Without it no tool is
+   * adopted and no tool adoption is answered as in force (fail closed); practices still are.
+   */
+  readonly tools?: AdoptionCatalog;
 }
+export type AdoptionCatalog = Pick<CatalogService, "get" | "standingOf">;
 
 export class AdoptionService {
   readonly #runner: CommandRunner;
-  readonly #tools: Pick<CatalogService, "get"> | undefined;
+  readonly #tools: AdoptionCatalog | undefined;
 
-  private constructor(runner: CommandRunner, tools: Pick<CatalogService, "get"> | undefined) { this.#runner = runner; this.#tools = tools; }
+  private constructor(runner: CommandRunner, tools: AdoptionCatalog | undefined) { this.#runner = runner; this.#tools = tools; }
 
   static withEpoch(storage: ControllerStorage, epoch: number, options: AdoptionOptions = {}): AdoptionService {
     const { tools, ...rest } = options;
@@ -239,6 +250,8 @@ export class AdoptionService {
   /**
    * The adoption of a target now in force in a project, if any: what a later use consults. A practice is named with its experiment; a tool version is one target in the project whichever experiment
    * adopted it (`experimentId` is then ignored). Whoever may read the project's adoptions; anyone else, or a target with none in force, gets `undefined`.
+   * A tool adoption approved earlier is not in force while the catalog no longer offers that exact version: revoked, set aside (deprecated or rolled back past), gone, or with another digest. Nothing is
+   * written by asking: the adoption stays `active` (a manager withdraws it; a set-aside version is in force again once the owner rolls back to it), and `standing` tells its readers why it is not used.
    */
   async inForce(viewer: Principal, query: { projectId: string; experimentId?: string; target: unknown }): Promise<{ adoptionId: string; experimentId: string; revision: number; targetDigest?: string } | undefined> {
     const projectId = checkProjectId(query.projectId);
@@ -249,7 +262,19 @@ export class AdoptionService {
     const found = open === undefined ? undefined : await this.#runner.get("adoption", open);
     const b = found?.body as unknown as AdoptionBody | undefined;
     if (found === undefined || b === undefined || b.status !== "active" || b.projectId !== projectId || targetKey(b.experimentId, b.target) !== targetKey(experimentId, target)) return undefined;
+    // A tool adoption is in force only while the catalog still offers the exact version it approved: not revoked, not set aside, the same digest (fail closed without a catalog).
+    if (b.target.kind === "tool" && (await this.#toolStanding(b.target, b.targetDigest)) !== "live") return undefined;
     return { adoptionId: open!, experimentId: b.experimentId, revision: found.revision, ...(b.targetDigest === undefined ? {} : { targetDigest: b.targetDigest }) };
+  }
+
+  /**
+   * Why an adoption in force is or is not used now (card B05): `live` for an active practice, or an active tool whose exact version the catalog still offers; otherwise the tool's standing (`revoked`,
+   * `set-aside`, `gone`, `unavailable`). An adoption that is not active, or one the viewer may not read, answers `undefined` (the same as an ID that does not exist).
+   */
+  async standing(viewer: Principal, adoptionId: string): Promise<ToolStanding | undefined> {
+    const got = await this.get(viewer, adoptionId);
+    if (got === undefined || got.status !== "active") return undefined;
+    return got.target.kind === "practice" ? "live" : this.#toolStanding(got.target, got.targetDigest);
   }
 
   /** One adoption: the owner, a reader or manager of the project's meetings, or its asker. Anyone else gets `undefined`. */
@@ -323,10 +348,30 @@ export class AdoptionService {
       if (error instanceof DomainError && (error.code === "not_found" || error.code === "forbidden" || error.code === "invalid_command")) found = undefined; else throw error;
     }
     if (found === undefined || found.version !== t.version || found.name !== t.name) throw new DomainError("not_found", `${t.name} ${t.version} is not a published version you can read; adopting does not publish a tool (that is the toolbox's own review)`);
+    // The reviewer's own independence (a right) is checked before anything about where the version stands (state).
+    if (by.kind !== "owner" && (found.registeredBy === by.id || found.instructional.author === by.id || found.executable?.author === by.id)) throw new DomainError("forbidden", `${by.id} registered or wrote ${t.name} ${t.version}, so its review of the adoption is not independent`);
     if (found.layer !== "toolbox") throw new DomainError("invalid_command", `${t.name} is not a shared toolbox tool; only a shared version already published through the toolbox's review is adopted (a personal or protected one is not)`, { field: "target" });
     if (found.revoked !== undefined) throw new DomainError("invalid_command", `${t.name} ${t.version} is revoked and is not adopted`, { field: "target" });
-    if (by.kind !== "owner" && (found.registeredBy === by.id || found.instructional.author === by.id || found.executable?.author === by.id)) throw new DomainError("forbidden", `${by.id} registered or wrote ${t.name} ${t.version}, so its review of the adoption is not independent`);
+    // Where the version stands now: revoked by the entry's own list, or set aside (deprecated, or a rollback went below it), is not adopted; a digest other than the one just read is not that version.
+    const standing = await this.#toolStanding(t, found.digest);
+    if (standing === "revoked") throw new DomainError("invalid_command", `${t.name} ${t.version} is revoked and is not adopted`, { field: "target" });
+    if (standing === "set-aside") throw new DomainError("invalid_command", `${t.name} ${t.version} was set aside in the catalog (deprecated, or rolled back past) and is not adopted; a version still chosen is`, { field: "target" });
+    if (standing !== "live") throw new DomainError("not_found", `${t.name} ${t.version} is not a published version you can read; adopting does not publish a tool (that is the toolbox's own review)`);
     return found.digest;
+  }
+
+  /**
+   * Where an approved (or about to be approved) tool version stands in the catalog now: `live`, `revoked`, `set-aside`, `gone` (not published, dropped, or another digest than `digest`), or `unavailable`
+   * (no catalog here). A catalog refusal is `gone`; any other error is passed on, never taken for `live`.
+   */
+  async #toolStanding(t: { name: string; version: string }, digest: string | undefined): Promise<ToolStanding> {
+    if (this.#tools === undefined) return "unavailable";
+    let s: Awaited<ReturnType<CatalogService["standingOf"]>>;
+    try { s = await this.#tools.standingOf(t.name, t.version); } catch (error) {
+      if (error instanceof DomainError && (error.code === "not_found" || error.code === "forbidden" || error.code === "invalid_command")) return "gone"; else throw error;
+    }
+    if (s === undefined || digest === undefined || s.digest !== digest) return "gone";
+    return s.revoked ? "revoked" : s.setAside ? "set-aside" : "live";
   }
 
   #target(raw: unknown): AdoptionTarget {

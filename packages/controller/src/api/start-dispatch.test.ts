@@ -297,6 +297,7 @@ test("the tick runs the reconciler and stall detection; stall detection needs th
     const owner = await c.services.principals.authenticate((await c.services.principals.bootstrapOwner({ name: "rob" })).token);
     const ran = async () => (await c.dispatch!.dispatcher.tick()).loops.filter((l) => l.name.startsWith("recovery."));
     const notices = async () => (await c.storage.listAggregates("notification-item", { limit: 100 })).filter((n) => JSON.stringify(n.body).includes("recovery.stall-scan")).length;
+    // The workers hold's review (card K05, clause 3) is a recovery sweep of every tick too; with no promotion there is no hold, and it needs no right, so it passes as well.
     assert.deepEqual((await ran()).map((l) => [l.name, l.ok]), [["recovery.workers-hold", true], ["recovery.reconcile", true], ["recovery.stall-scan", true], ["recovery.auto-step", true]], "no failing loop without the right");
     await ran();
     assert.equal(await notices(), 1, "the owner is told once");

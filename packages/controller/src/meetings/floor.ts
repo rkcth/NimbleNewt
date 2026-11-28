@@ -5,7 +5,7 @@ import { onlyKnown, type View } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import { allows, allowsExactly, inTaskScope } from "../security/access.js";
 import type { NoActor, Principal } from "../security/principals.js";
-import type { Aggregate, ControllerStorage, JsonObject } from "../storage/types.js";
+import type { Aggregate, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { DeskRecordBody } from "../context/desks.js";
 import type { MeetingRecordService } from "./record.js";
 import type { MeetingDeskReadService } from "./desk-reads.js";
@@ -30,6 +30,11 @@ export { TurnWaitsOnTool } from "./floor-types.js";
 export type * from "./floor-types.js";
 
 const KIND = "meeting-floor";
+/**
+ * The floors whose owner inquiry is open, in the order they opened: one record, kept in the same write as every floor change that opens or ends an inquiry. The idle-inquiry reminder (run on every scheduled turn), the Needs-you list
+ * and the status view read it instead of every floor record ever kept, so their cost follows the open inquiries, not the meetings held.
+ */
+const INQUIRIES = { kind: "meeting-floor-inquiries", id: "installation" } as const;
 const RECORD_ID = /^mrc-[a-z2-7]{20}$/;
 const AGENT = /^agent:[a-z0-9][a-z0-9-]{0,39}$/;
 const DESK_ID = /^dsk-[a-z2-7]{20}$/;
@@ -37,10 +42,11 @@ const ENTRY_ID = /^mte-[a-z2-7]{20}-[0-9]{1,5}$/;
 const ms = (iso: string): number => Date.parse(iso);
 const json = (value: unknown): JsonObject => value as unknown as JsonObject;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
+const tooManyFloors = (): never => { throw new DomainError("unavailable", "too many meeting floors to list the open inquiries"); };
 const forbidden = (by: Principal, what: string): DomainError => new DomainError("forbidden", `${by.id} may not ${what}`);
 
 /** What the floor keeps, at most: the record it belongs to is bounded the same way (every list is a window). */
-export const FLOOR_LIMITS = { sources: 10, followUpTries: 3, turns: 300, notices: 60, queue: 60, heldAnswers: 40, ownerAnswers: 60, chairQuestions: 30, investigations: 30, followUps: 60, stepsPerDrive: 400, unitRetries: 16, text: 3900, desk: 20, deskRead: 5, replies: 60, summaries: 80, tickUnits: 20, tickMeetings: 20, tickPages: 10 } as const;
+export const FLOOR_LIMITS = { sources: 10, followUpTries: 3, turns: 300, notices: 60, queue: 60, heldAnswers: 40, ownerAnswers: 60, chairQuestions: 30, investigations: 30, followUps: 60, stepsPerDrive: 400, unitRetries: 16, text: 3900, desk: 20, deskRead: 5, replies: 60, summaries: 80, tickUnits: 20, tickMeetings: 20, tickPages: 10, openInquiries: 200, indexPages: 500 } as const;
 
 /** What the facilitator needs from the rest of the controller. Nothing is reached by any other road. */
 export interface FloorDeps {
@@ -108,6 +114,16 @@ export class MeetingFloorService {
   readonly #deps: FloorDeps;
   /** Where the scheduled turn (`tick`) goes on from: in memory only (a restart begins at the start, which is safe). */
   #tickAfter: string | undefined;
+  /**
+   * Whether this controller has checked the stored list of open inquiries against the floors since it started. A well-formed list can still leave out an inquiry that an earlier release opened (after a release rollback, that
+   * release writes floors without the list), so the first use after each start walks the floors once. Only a write path (the reminder, `sweep`, and opening an inquiry) stores the list again when it differs; a read writes nothing.
+   */
+  #inquiriesChecked = false;
+  /**
+   * The open inquiries a read walked from the floors, with the revision of the stored list it found then (0: no list). A read writes nothing (card U05: answering a status question writes no record), so until a write path stores the
+   * list, later reads use this while the stored list keeps that revision, instead of walking every floor again. Every inquiry that opens or ends changes the stored list, so its revision moves and the walk is done again.
+   */
+  #walked: { revision: number; ids: readonly string[] } | undefined;
   private constructor(runner: CommandRunner, deps: FloorDeps) { this.#runner = runner; this.#deps = deps; }
 
   static withEpoch(storage: ControllerStorage, epoch: number, deps: FloorDeps, options: RunnerOptions = {}): MeetingFloorService {
@@ -147,9 +163,12 @@ export class MeetingFloorService {
       const body = capped(next);
       const commandId = `flr-${hash(recordId, String(f.agg.revision), tag, JSON.stringify(body))}`;
       try {
+        // An inquiry that opens or ends changes the list of open inquiries in the same write, so the list is never out of step with the floors.
+        const change = (f.body.inquiry !== undefined) === (body.inquiry !== undefined) ? undefined : await this.#inquiryChange(recordId, body.inquiry !== undefined);
+        const index = change === undefined ? [] : [change];
         await this.#runner.command("meeting.floor.update", { commandId, actor: by.id }, async () => ({
           payload: { recordId, tag, revision: f.agg.revision },
-          build: async () => ({ ref: { kind: KIND, id: f.agg.id }, creates: false, changes: [{ type: "update" as const, ref: { kind: KIND, id: f.agg.id }, expectedRevision: f.agg.revision, body: json(body) }], detail: { projectId: body.projectId, tag } }),
+          build: async () => ({ ref: { kind: KIND, id: f.agg.id }, creates: false, changes: [{ type: "update" as const, ref: { kind: KIND, id: f.agg.id }, expectedRevision: f.agg.revision, body: json(body) }, ...index], detail: { projectId: body.projectId, tag } }),
         }));
         return body;
       } catch (error) {
@@ -157,6 +176,98 @@ export class MeetingFloorService {
         throw error;
       }
     }
+  }
+
+  /** The stored list of open inquiries, or undefined when there is none yet or it cannot be trusted (malformed, too long, a repeated ID): then the list is built again from the floors. */
+  async #inquiryIndex(): Promise<{ revision: number; ids: readonly string[] | undefined }> {
+    const found = await this.#runner.get(INQUIRIES.kind, INQUIRIES.id);
+    if (found === undefined) return { revision: 0, ids: undefined };
+    const ids = (found.body as { ids?: unknown }).ids;
+    const ok = Array.isArray(ids) && ids.length <= FLOOR_LIMITS.openInquiries && ids.every((x) => typeof x === "string" && RECORD_ID.test(x)) && new Set(ids).size === ids.length;
+    return { revision: found.revision, ids: ok ? (ids as string[]) : undefined };
+  }
+
+  /**
+   * The open inquiries read from every floor record: when the list does not exist yet (floors kept before it), cannot be trusted, or has not been checked since this controller started. Bounded: undefined when the walk does not
+   * finish, so no caller answers with part of the list.
+   */
+  async #scanInquiries(): Promise<string[] | undefined> {
+    const open: { id: string; since: string }[] = [];
+    let after: string | undefined;
+    for (let pages = 0; ; pages++) {
+      if (pages >= FLOOR_LIMITS.indexPages) return undefined;
+      const page = await this.#runner.list(KIND, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const a of page) {
+        after = a.id;
+        const b = a.body as unknown as FloorBody;
+        if (b.inquiry !== undefined && typeof b.recordId === "string" && RECORD_ID.test(b.recordId)) open.push({ id: b.recordId, since: b.inquiry.openedAt });
+      }
+      if (page.length < 200) break;
+    }
+    open.sort((x, y) => (x.since < y.since ? -1 : x.since > y.since ? 1 : x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+    return [...new Set(open.map((o) => o.id))];
+  }
+
+  /**
+   * The change to the list of open inquiries when this floor's inquiry opens (`add`) or ends. At most `FLOOR_LIMITS.openInquiries` are open at once: one more is refused, and ending one is never refused. With no list to trust and
+   * too many floors to build one, an end changes no list (there is none to take it off; a read builds it from the floors) and an open is refused.
+   */
+  async #inquiryChange(recordId: string, add: boolean): Promise<Change | undefined> {
+    const index = await this.#inquiryIndex();
+    const ids = index.ids ?? (await this.#scanInquiries()) ?? (add ? tooManyFloors() : undefined);
+    if (ids === undefined) return undefined;
+    if (add && !ids.includes(recordId) && ids.length >= FLOOR_LIMITS.openInquiries) throw new DomainError("invalid_command", `at most ${FLOOR_LIMITS.openInquiries} owner inquiries can be open at once; end one first`, { field: "recordId" });
+    const next = add ? (ids.includes(recordId) ? [...ids] : [...ids, recordId]) : ids.filter((x) => x !== recordId);
+    return this.#indexWrite(index.revision, next);
+  }
+
+  #indexWrite(revision: number, ids: readonly string[]): Change {
+    const body = json({ ids: [...ids] });
+    return revision === 0 ? { type: "create", ref: INQUIRIES, body } : { type: "update", ref: INQUIRIES, expectedRevision: revision, body };
+  }
+
+  /**
+   * The record IDs of the floors whose inquiry is open, oldest first. When the list does not exist yet, cannot be trusted or has not been checked since the start, it is built from the floors. With `store` (the reminder and opening an
+   * inquiry, which write anyway) the built list is stored (written as the floor's service), so later reads do not walk every floor again; a write that loses a race is left: whoever won wrote the list in the same write as its floor
+   * change. Without it (the Needs-you list and the status view) nothing is written: the walk is kept in memory for the list's current revision.
+   */
+  async #openInquiryIds(store: boolean): Promise<readonly string[]> {
+    const index = await this.#inquiryIndex();
+    if (index.ids !== undefined && this.#inquiriesChecked) return index.ids;
+    if (!store && this.#walked !== undefined && this.#walked.revision === index.revision) return this.#walked.ids;
+    const ids = await this.#scanInquiries();
+    if (ids === undefined) {
+      // Too many floors to check them all: a well-formed list is believed (not checked again until the next start); with none, the read is refused.
+      if (index.ids === undefined) tooManyFloors();
+      this.#inquiriesChecked = true;
+      return index.ids!;
+    }
+    if (index.ids !== undefined && index.ids.length === ids.length && ids.every((x) => index.ids!.includes(x))) { this.#inquiriesChecked = true; return index.ids; }
+    if (!store) { this.#walked = { revision: index.revision, ids }; return ids; }
+    // More than the limit (floors kept before the list existed) is never stored cut short: the floors are walked again until inquiries are ended. The write is revision-guarded: a floor change that opens or ends an inquiry after the
+    // list was read also changes the list, so this write then loses, and the next read checks again.
+    if (ids.length <= FLOOR_LIMITS.openInquiries) {
+      const stored = await this.#runner.command("meeting.floor.inquiries", { commandId: `flr-inq-${index.revision}-${hash("", ...ids)}`, actor: this.#deps.service.id }, async () => ({
+        payload: { revision: index.revision, ids: ids.length },
+        build: async () => ({ ref: INQUIRIES, creates: index.revision === 0, changes: [this.#indexWrite(index.revision, ids)], detail: {} }),
+      })).then(() => true, () => false);
+      if (stored) this.#inquiriesChecked = true;
+    }
+    return ids;
+  }
+
+  /** Takes listed IDs off the list of open inquiries when their floor is gone or has no inquiry (a record removed by retention, for example): each is checked again against the floor as it stands now. */
+  async #forgetInquiries(candidates: readonly string[]): Promise<void> {
+    const index = await this.#inquiryIndex();
+    if (index.ids === undefined) return;
+    const drop = new Set<string>();
+    for (const id of candidates) if (index.ids.includes(id) && (await this.#load(id))?.body.inquiry === undefined) drop.add(id);
+    if (drop.size === 0) return;
+    const next = index.ids.filter((x) => !drop.has(x));
+    await this.#runner.command("meeting.floor.inquiries", { commandId: `flr-inq-${index.revision}-${hash("", ...next)}`, actor: this.#deps.service.id }, async () => ({
+      payload: { revision: index.revision, ids: next.length },
+      build: async () => ({ ref: INQUIRIES, creates: false, changes: [this.#indexWrite(index.revision, next)], detail: {} }),
+    })).catch(() => undefined);
   }
 
   async #meeting(recordId: string): Promise<View<RecordBody>> {
@@ -172,9 +283,9 @@ export class MeetingFloorService {
    * The meeting's motion whose vote is open (voting, or tied and waiting for the casting vote), whoever runs it: the floor's own vote, the meeting procedure's (card M06) or one opened on the record. One vote at a time, so the newest
    * such motion is the one. Answers to the owner are held from the voters while it is there, and an inquiry holds it.
    */
-  async #votingMotion(rec: RecordBody): Promise<(MotionBody & { id: string }) | undefined> {
+  async #votingMotion(rec: RecordBody): Promise<(MotionBody & { id: string; revision: number }) | undefined> {
     for (const id of [...rec.motions].reverse()) {
-      const m = (await this.#deps.records.motion(this.#deps.service, id)) as unknown as MotionBody | undefined;
+      const m = (await this.#deps.records.motion(this.#deps.service, id)) as unknown as (MotionBody & { revision: number }) | undefined;
       if (m !== undefined && (m.state === "voting" || m.state === "tie-pending")) return { ...m, id };
     }
     return undefined;
@@ -1024,13 +1135,23 @@ export class MeetingFloorService {
     const { recordId, rec } = await this.#open(command.recordId);
     const f = await this.#need(recordId);
     if (f.body.inquiry !== undefined) return { voteHeld: f.body.inquiry.voteHeld, replayed: true };
+    // Refused before anything is written (the owner's note, a held vote) when the open inquiries are at their limit; the write below checks again.
+    const openIds = await this.#openInquiryIds(true);
+    if (!openIds.includes(recordId) && openIds.length >= FLOOR_LIMITS.openInquiries) throw new DomainError("invalid_command", `at most ${FLOOR_LIMITS.openInquiries} owner inquiries can be open at once; end one first`, { field: "recordId" });
     // The vote open on the record is held, whoever runs it (the floor, the meeting procedure of card M06, or the record itself); one a crash already held is not held twice.
+    // The motion's revision is in the hold's command ID: the same command sent again after a refusal that resumed the vote holds it again instead of being answered with the earlier hold.
     const voting = await this.#votingMotion(rec);
     const open = voting !== undefined && voting.state === "voting";
-    if (open && voting.heldAt === undefined) await this.#deps.records.hold(this.#deps.service, { commandId: `fl-hold-${base(recordId)}-${hash(by.id, command.commandId)}`, motionId: voting.id });
+    if (open && voting.heldAt === undefined) await this.#deps.records.hold(this.#deps.service, { commandId: `fl-hold-${base(recordId)}-${hash(by.id, command.commandId, String(voting.revision))}`, motionId: voting.id });
     const msg = await this.#ownerNote(by, recordId, `fl-inq-${base(recordId)}-${hash(by.id, command.commandId)}`, `The owner opens an inquiry: the meeting clock and turn limits stop${open ? " and the vote is held" : ""} until the owner ends it.`);
     const now = this.#runner.now();
-    await this.#update(recordId, by, `inq-open-${msg.id}`, (b) => (b.inquiry !== undefined ? undefined : { ...b, clock: { ...b.clock, pausedAt: now }, inquiry: { openedAt: now, lastActivityAt: now, questions: 0, voteHeld: open, ...(open ? { heldMotionId: voting.id } : {}), addressed: [], messages: [msg.id] } }));
+    try {
+      await this.#update(recordId, by, `inq-open-${msg.id}`, (b) => (b.inquiry !== undefined ? undefined : { ...b, clock: { ...b.clock, pausedAt: now }, inquiry: { openedAt: now, lastActivityAt: now, questions: 0, voteHeld: open, ...(open ? { heldMotionId: voting.id } : {}), addressed: [], messages: [msg.id] } }));
+    } catch (error) {
+      // Refused at the write (another inquiry took the last place meanwhile): a vote this call held is resumed, so nothing stays held without an inquiry. The owner's note stays on the record, which is append-only.
+      if (open && voting.heldAt === undefined && (await this.#load(recordId))?.body.inquiry === undefined) await this.#deps.records.resume(this.#deps.service, { commandId: `fl-unhold-${base(recordId)}-${hash(by.id, command.commandId, String(voting.revision))}`, motionId: voting.id }).catch(() => undefined);
+      throw error;
+    }
     await this.#deps.work?.release(recordId, this.#present(rec)).catch(() => undefined);
     await this.#deps.notifyOwner?.({ recordId, projectId: rec.projectId, kind: "inquiry-open", key: base(msg.id), text: "An owner inquiry is open on a meeting; it waits for you to say you are done with questions." }).catch(() => undefined);
     return { voteHeld: open, replayed: false };
@@ -1253,23 +1374,20 @@ export class MeetingFloorService {
     if (!isService(by)) throw forbidden(by, "sweep meetings");
     const now = this.#runner.now();
     const reminded: string[] = [];
-    let after: string | undefined;
-    for (;;) {
-      const page = await this.#runner.list(KIND, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
-      for (const a of page) {
-        after = a.id;
-        const b = a.body as unknown as FloorBody;
-        if (b.inquiry === undefined || (command.projectId !== undefined && b.projectId !== command.projectId)) continue;
-        const idleFrom = b.inquiry.remindedAt ?? b.inquiry.lastActivityAt;
-        if (ms(now) - ms(idleFrom) < b.settings.inquiryIdleMinutes * 60_000) continue;
-        // A meeting closed by other means ends its inquiry instead of reminding; an archived project's meeting reminds nobody until it is restored.
-        if (b.state !== "running" || !(await this.#live(by, b))) continue;
-        await this.#deps.notifyOwner?.({ recordId: b.recordId, projectId: b.projectId, kind: "inquiry-idle", key: `remind-${now}`, text: `Your inquiry on a meeting has been idle for ${b.settings.inquiryIdleMinutes} minutes; say when you are done with questions.` }).catch(() => undefined);
-        await this.#update(b.recordId, by, `remind-${now}`, (x) => (x.inquiry === undefined ? undefined : { ...x, inquiry: { ...x.inquiry, remindedAt: now } }));
-        reminded.push(b.recordId);
-      }
-      if (page.length < 200) break;
+    const gone: string[] = [];
+    for (const id of await this.#openInquiryIds(true)) {
+      const b = (await this.#load(id))?.body;
+      if (b === undefined || b.inquiry === undefined) { gone.push(id); continue; }
+      if (command.projectId !== undefined && b.projectId !== command.projectId) continue;
+      const idleFrom = b.inquiry.remindedAt ?? b.inquiry.lastActivityAt;
+      if (ms(now) - ms(idleFrom) < b.settings.inquiryIdleMinutes * 60_000) continue;
+      // A meeting closed by other means ends its inquiry instead of reminding; an archived project's meeting reminds nobody until it is restored.
+      if (b.state !== "running" || !(await this.#live(by, b))) continue;
+      await this.#deps.notifyOwner?.({ recordId: b.recordId, projectId: b.projectId, kind: "inquiry-idle", key: `remind-${now}`, text: `Your inquiry on a meeting has been idle for ${b.settings.inquiryIdleMinutes} minutes; say when you are done with questions.` }).catch(() => undefined);
+      await this.#update(b.recordId, by, `remind-${now}`, (x) => (x.inquiry === undefined ? undefined : { ...x, inquiry: { ...x.inquiry, remindedAt: now } }));
+      reminded.push(b.recordId);
     }
+    if (gone.length > 0) await this.#forgetInquiries(gone);
     return { reminded };
   }
 
@@ -1277,15 +1395,10 @@ export class MeetingFloorService {
   async ownerPending(by: Principal, limit = 50): Promise<{ items: { recordId: string; projectId: string; since: string; lastActivityAt: string; questions: number; voteHeld: boolean }[] }> {
     this.#ownerOnly(by, "list open inquiries");
     const items: { recordId: string; projectId: string; since: string; lastActivityAt: string; questions: number; voteHeld: boolean }[] = [];
-    let after: string | undefined;
-    for (;;) {
-      const page = await this.#runner.list(KIND, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
-      for (const a of page) {
-        after = a.id;
-        const b = a.body as unknown as FloorBody;
-        if (b.inquiry !== undefined && items.length < limit) items.push({ recordId: b.recordId, projectId: b.projectId, since: b.inquiry.openedAt, lastActivityAt: b.inquiry.lastActivityAt, questions: b.inquiry.questions, voteHeld: b.inquiry.voteHeld });
-      }
-      if (page.length < 200) break;
+    for (const id of await this.#openInquiryIds(false)) {
+      if (items.length >= limit) break;
+      const b = (await this.#load(id))?.body;
+      if (b?.inquiry !== undefined) items.push({ recordId: b.recordId, projectId: b.projectId, since: b.inquiry.openedAt, lastActivityAt: b.inquiry.lastActivityAt, questions: b.inquiry.questions, voteHeld: b.inquiry.voteHeld });
     }
     return { items };
   }
@@ -1648,7 +1761,8 @@ export class MeetingFloorService {
     if (!isService(by)) throw forbidden(by, "run the meetings' turn");
     const units = command.units === undefined ? FLOOR_LIMITS.tickUnits : Number.isInteger(command.units) && command.units >= 1 && command.units <= FLOOR_LIMITS.stepsPerDrive ? command.units : invalid("units", `must be 1 to ${FLOOR_LIMITS.stepsPerDrive}`);
     const most = command.meetings === undefined ? FLOOR_LIMITS.tickMeetings : Number.isInteger(command.meetings) && command.meetings >= 1 && command.meetings <= 500 ? command.meetings : invalid("meetings", "must be 1 to 500");
-    const { reminded } = await this.sweep(by);
+    // A reminder that cannot run (the open inquiries cannot be listed) does not stop the meetings' own steps.
+    const { reminded } = await this.sweep(by).catch(() => ({ reminded: [] as readonly string[] }));
     let driven = 0, failed = 0;
     // At most `most` meetings a turn, going on from where the last turn stopped (wrapping round at the end), so every running meeting is reached in turn however many there are.
     let after = this.#tickAfter;
@@ -1697,16 +1811,10 @@ export class MeetingFloorService {
     if (!(viewer.kind === "owner" && viewer.taskScope === undefined)) return { items: [], truncated: false };
     const items: { recordId: string; projectId: string; since: string; idleMinutes: number; questions: number }[] = [];
     const now = ms(this.#runner.now());
-    let after: string | undefined;
-    for (;;) {
-      const page = await this.#runner.list(KIND, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
-      for (const a of page) {
-        after = a.id;
-        const b = a.body as unknown as FloorBody;
-        if (b.state !== "running" || b.inquiry === undefined) continue;
-        items.push({ recordId: b.recordId, projectId: b.projectId, since: b.inquiry.openedAt, idleMinutes: Math.max(0, Math.floor((now - ms(b.inquiry.lastActivityAt)) / 60_000)), questions: b.inquiry.questions });
-      }
-      if (page.length < 200) break;
+    for (const id of await this.#openInquiryIds(false)) {
+      const b = (await this.#load(id))?.body;
+      if (b === undefined || b.state !== "running" || b.inquiry === undefined) continue;
+      items.push({ recordId: b.recordId, projectId: b.projectId, since: b.inquiry.openedAt, idleMinutes: Math.max(0, Math.floor((now - ms(b.inquiry.lastActivityAt)) / 60_000)), questions: b.inquiry.questions });
     }
     items.sort((x, y) => (x.since < y.since ? -1 : x.since > y.since ? 1 : 0));
     return { items: items.slice(0, limit), truncated: items.length > limit };
