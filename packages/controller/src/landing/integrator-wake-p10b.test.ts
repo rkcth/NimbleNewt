@@ -286,7 +286,7 @@ for (const backend of backends) {
       const linkOk = { projectId: a, branch: "main", frontTaskId: frontA, agentId: "ivy", wakeId: IntegratorWake.wakeIdOf(a, "main"), at: "2026-01-01T00:00:00.000Z" };
       assert.equal((await (async () => { await r.raw(LANDING_TASK_KIND, foreign, linkOk); return r.wake.landingOf(foreign); })()), undefined, "a well-formed record is read (and answers nothing while nobody is assigned)");
       let h = 0;
-      for (const bad of [{ ...linkOk, frontTaskId: "../../x" }, { ...linkOk, projectId: 7 }, { ...linkOk, branch: "main\n", wakeId: IntegratorWake.wakeIdOf(a, "main\n") }, { ...linkOk, projectId: "../p", wakeId: IntegratorWake.wakeIdOf("../p", "main") }, { ...linkOk, agentId: "../x" }, (({ wakeId: _w, ...rest }) => rest)(linkOk), { ...linkOk, wakeId: IntegratorWake.wakeIdOf(a, "old") }, {}]) {
+      for (const bad of [{ ...linkOk, frontTaskId: "../../x" }, { ...linkOk, frontTaskId: 7 }, { ...linkOk, branch: "dev" }, { ...linkOk, projectId: 7 }, { ...linkOk, branch: "main\n", wakeId: IntegratorWake.wakeIdOf(a, "main\n") }, { ...linkOk, projectId: "../p", wakeId: IntegratorWake.wakeIdOf("../p", "main") }, { ...linkOk, agentId: "../x" }, (({ wakeId: _w, ...rest }) => rest)(linkOk), { ...linkOk, wakeId: IntegratorWake.wakeIdOf(a, "old") }, {}]) {
         h++;
         await r.raw(LANDING_TASK_KIND, `task-hostile${h}`, bad);
         await assert.rejects(() => r.wake.landingOf(`task-hostile${h}`), (e: unknown) => e instanceof DomainError && e.code === "integrity", JSON.stringify(bad));
