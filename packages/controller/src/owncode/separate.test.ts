@@ -485,7 +485,13 @@ test("the nearest .git above a folder is followed, as git finds it, for the inst
   writeFileSync(join(homeWt, ".git"), `gitdir: ${elseGit}\n`);
   const homeLinked = mk("home", "dev", "linked");
   symlinkSync(elseGit, join(homeLinked, ".git"));
-  assert.deepEqual(await judgeSeparate([repo(homeWt), repo(homeLinked)], installationGuards({ programRoot: rel })), { separate: true });
+  if (posixDots) assert.deepEqual(await judgeSeparate([repo(homeWt), repo(homeLinked)], installationGuards({ programRoot: rel })), { separate: true });
+  else {
+    // Windows takes the link's relative commondir (`linked\.git\..\..`) by its spelling, as git for Windows does: it names `home\dev`, which has no objects or refs, so that `.git` is not a git
+    // folder there and git goes on up to the home folder's repository, which holds the installation. The `.git` file is followed by its full path and is separate on every platform.
+    assert.deepEqual(await judgeSeparate([repo(homeWt)], installationGuards({ programRoot: rel })), { separate: true });
+    await refusedWith([repo(homeLinked)], installationGuards({ programRoot: rel }), new RegExp(`the work tree git uses for .* \\(${esc(join(base, "home"))}\\) holds the running installation's program files`));
+  }
   // A `.git` passed over is still one of the place's folders: a link into the installation that git does not take as a git folder is refused, with no repository above it.
   const into = mk("work", "into");
   symlinkSync(mk("home", "opt", "nn", "releases", "1", "sub"), join(into, ".git"));
@@ -645,6 +651,29 @@ test("Windows, simulated: git's .git files with forward slashes and CRLF are fol
   await refusedWith([repo("C:\\work\\wt")], winProgram(), /git folder .* is inside the running installation's program files/, win({ "C:\\work\\wt\\.git": "gitdir: c:\\SRV\\nn\\.git\\worktrees\\dev\r" }));
   // A .git file that names nothing: cannot tell.
   await refusedWith([repo("C:\\work\\wt")], winProgram(), /does not name a git folder/, win({ "C:\\work\\wt\\.git": "not a pointer\r\n" }));
+});
+
+test("Windows, simulated: a .git link to a worktree's git folder takes its relative commondir by spelling, so git goes on up and the repository above is judged; a .git file is followed", async () => {
+  // A home folder kept in git holds a release; a worktree of an unrelated repository (its git folder in C:\else\.git\worktrees\w, commondir `../..`) is reached from C:\home\dev by a .git file
+  // and, from C:\home\dev\linked, by a .git junction to that git folder.
+  const ids: Record<string, string> = {
+    "C:\\": "8:1", "C:\\home": "8:2", "C:\\home\\.git": "8:3", "C:\\home\\.git\\objects": "8:4", "C:\\home\\.git\\refs": "8:5", "C:\\home\\.git\\HEAD": "8:6",
+    "C:\\home\\opt": "8:7", "C:\\home\\opt\\nn": "8:8", "C:\\home\\opt\\nn\\releases": "8:9", "C:\\home\\opt\\nn\\releases\\1": "8:10",
+    "C:\\home\\dev": "8:11", "C:\\home\\dev\\wt": "8:12", "C:\\home\\dev\\linked": "8:13",
+    "C:\\else": "8:20", "C:\\else\\.git": "8:21", "C:\\else\\.git\\objects": "8:22", "C:\\else\\.git\\refs": "8:23", "C:\\else\\.git\\HEAD": "8:24",
+    "C:\\else\\.git\\worktrees": "8:25", "C:\\else\\.git\\worktrees\\w": "8:26", "C:\\else\\.git\\worktrees\\w\\HEAD": "8:27", "C:\\else\\.git\\worktrees\\w\\commondir": "8:28",
+  };
+  const files = {
+    "C:\\home\\.git\\HEAD": "ref: refs/heads/main\n", "C:\\else\\.git\\HEAD": "ref: refs/heads/main\n",
+    "C:\\else\\.git\\worktrees\\w\\HEAD": "ref: refs/heads/w\n", "C:\\else\\.git\\worktrees\\w\\commondir": "../..\n", "C:\\home\\dev\\wt\\.git": "gitdir: C:/else/.git/worktrees/w\n",
+  };
+  const win = { fs: winFs(ids, { files, real: { "C:\\home\\dev\\linked\\.git": "C:\\else\\.git\\worktrees\\w" } }), platform: "win32" };
+  const rel: GuardedPlace[] = [{ what: "the running installation's program files", path: "C:\\home\\opt\\nn\\releases\\1", git: true }];
+  assert.deepEqual(await judgeSeparate([repo("C:\\home\\dev\\wt")], rel, win), { separate: true });
+  await refusedWith([repo("C:\\home\\dev\\linked")], rel, /the work tree git uses for the development project's repository "source" \(C:\\home\) holds the running installation's program files/, win);
+  // The same git folder with a full commondir: the link's git folder is a git folder (its common folder has objects and refs), so git stops there and the place is separate.
+  const full = { fs: winFs(ids, { files: { ...files, "C:\\else\\.git\\worktrees\\w\\commondir": "C:/else/.git\n" }, real: { "C:\\home\\dev\\linked\\.git": "C:\\else\\.git\\worktrees\\w" } }), platform: "win32" };
+  assert.deepEqual(await judgeSeparate([repo("C:\\home\\dev\\linked")], rel, full), { separate: true });
 });
 
 test("the judge's path rules follow the platform it judges for, so a Linux judgement made on Windows is the Linux one", async () => {
