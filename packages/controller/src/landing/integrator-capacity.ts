@@ -11,7 +11,9 @@ import { servesProject } from "./integrator-pool.js";
  * is busy while it holds a live integrator lease of any project it serves (one project at a time), and free otherwise. The answer is:
  * - `held`: an active agent holds the branch's live lease (whoever it is; the pool passes such a branch over too), with until when, and whether it may still land under it (`lands`: it still serves the project; a
  *   holder whose right was taken away cannot land, so the queue waits until the hold is released or runs out);
- * - `free`: nobody active holds it and at least one integrator that serves the project is free, so the pool gives it this queue when it asks (oldest waiting queue first);
+ * - `woken`: nobody active holds it and the controller woke an integrator for it (`IntegratorWake`) whose landing task has not ended;
+ * - `free`: nobody active holds it and at least one integrator that serves the project is free (not holding a lease of a project it serves, not woken for a landing), so the controller wakes one at its next round
+ *   or the pool gives it this queue when it asks (oldest waiting queue first);
  * - `busy`: every integrator that serves the project holds a lease already, so no capacity is left;
  * - `nobody`: no active agent serves the project, so no capacity exists;
  * - `unknown`: the leases could not all be read, so nobody is said to be free or busy (fail closed).
@@ -26,7 +28,10 @@ export const CAPACITY_LIMITS = { principalPages: 10, agents: 500, grantPages: 50
 
 export type CapacityAnswer =
   | { readonly state: "held"; readonly holder: string; readonly expiresAt: string; readonly lands: boolean }
-  | { readonly state: "free"; readonly free: number; readonly busy: number; readonly partial: boolean }
+  /** Card P10b (wake): nobody active holds the branch, and the controller woke an integrator for it (a landing task assigned to it that has not ended). */
+  | { readonly state: "woken"; readonly agentId: string; readonly taskId: string; readonly at: string }
+  /** `wakesSpent`: the controller already woke an integrator this many times for the work now first in the queue and wakes nobody more for it (`INTEGRATOR_WAKE_LIMITS.perFront`). */
+  | { readonly state: "free"; readonly free: number; readonly busy: number; readonly partial: boolean; readonly wakesSpent?: number }
   | { readonly state: "busy"; readonly busy: number; readonly partial: boolean }
   | { readonly state: "nobody"; readonly partial: boolean }
   | { readonly state: "unknown"; readonly reason: string };
@@ -36,6 +41,18 @@ export interface IntegratorCapacityOptions {
   readonly agents: () => Promise<{ readonly ids: readonly string[]; readonly partial: boolean }>;
   /** The principal as it stands now (grants as of now), or nothing when it is not an active principal: `PrincipalService.current`. */
   readonly principal: (principalId: string) => Promise<Principal | undefined>;
+  /**
+   * Card P10b (wake): the integrators the controller woke whose landing task has not ended (each is busy: one project at a time), and the queues whose first work it woke an integrator for as often as it does. Absent: no
+   * wakes are kept. A list that could not all be read makes the answer `unknown` (nobody is said to be free).
+   */
+  readonly wakes?: () => Promise<WakesNow>;
+}
+
+/** What the wakes say now (see `IntegratorCapacityOptions.wakes`). */
+export interface WakesNow {
+  readonly open: readonly { readonly projectId: string; readonly branch: string; readonly agentId: string; readonly taskId: string; readonly at: string }[];
+  readonly spent: readonly { readonly projectId: string; readonly branch: string; readonly frontTaskId: string; readonly wakes: number }[];
+  readonly partial: boolean;
 }
 
 /**
@@ -88,30 +105,65 @@ export class IntegratorCapacity {
     this.#leases = leases; this.#options = options;
   }
 
-  /** Who can land `branch` of `projectId` now (see the class). The caller decides who may see it (the status view: the owner only, since it counts holds on other projects). */
-  async of(projectId: string, branch: string): Promise<CapacityAnswer> {
+  /**
+   * Who can land `branch` of `projectId` now (see the class). `frontTaskId`, the task first in the queue, says whether the controller has used up its wakes for that work. The caller decides who may see it (the status
+   * view: the owner only, since it counts holds on other projects).
+   */
+  async of(projectId: string, branch: string, frontTaskId?: string): Promise<CapacityAnswer> {
     const { leases, partial: leasesPartial } = await this.#leases.liveLeases();
     if (leasesPartial) return { state: "unknown", reason: "the integrator leases could not all be read" };
+    const wakes = await this.#wakes();
+    if (wakes === undefined) return { state: "unknown", reason: "the integrators the controller woke could not all be read" };
     const own = leases.find((l) => l.projectId === projectId && l.branch === branch);
     if (own !== undefined) {
       const holder = await this.#options.principal(`agent:${own.holder}`);
       // A live hold of an agent that is no longer active is ended when the next integrator takes the branch (the lease door), so it is not capacity in use.
       if (holder !== undefined && holder.kind === "agent") return { state: "held", holder: own.holder, expiresAt: own.expiresAt, lands: holder.id === `agent:${own.holder}` && servesProject(holder, projectId) };
     }
+    const woken = wakes.open.find((w) => w.projectId === projectId && w.branch === branch);
+    if (woken !== undefined) return { state: "woken", agentId: woken.agentId, taskId: woken.taskId, at: woken.at };
+    const judged = await this.#judge(projectId, leases, wakes);
+    const free = judged.free.length, busy = judged.busy;
+    const spent = frontTaskId === undefined ? undefined : wakes.spent.find((x) => x.projectId === projectId && x.branch === branch && x.frontTaskId === frontTaskId);
+    if (free > 0) return { state: "free", free, busy, partial: judged.partial, ...(spent === undefined ? {} : { wakesSpent: spent.wakes }) };
+    if (busy > 0) return { state: "busy", busy, partial: judged.partial };
+    return { state: "nobody", partial: judged.partial };
+  }
+
+  /**
+   * The integrators of a project now, by the pool's rule (card P10b, wake): the free ones' agent IDs (bare, in ID order) and how many are busy, a busy one holding a live lease of a project it serves or being woken
+   * for a landing that has not ended. `alsoBusy` names agents the caller has just woken. Undefined when the leases or the wakes could not all be read (nobody is said to be free).
+   */
+  async integrators(projectId: string, alsoBusy: ReadonlySet<string> = new Set()): Promise<{ readonly free: readonly string[]; readonly busy: number; readonly partial: boolean } | undefined> {
+    const { leases, partial } = await this.#leases.liveLeases();
+    if (partial) return undefined;
+    const wakes = await this.#wakes();
+    if (wakes === undefined) return undefined;
+    return this.#judge(projectId, leases, wakes, alsoBusy);
+  }
+
+  async #wakes(): Promise<WakesNow | undefined> {
+    if (this.#options.wakes === undefined) return { open: [], spent: [], partial: false };
+    const w = await this.#options.wakes();
+    return w.partial ? undefined : w;
+  }
+
+  async #judge(projectId: string, leases: readonly IntegratorLease[], wakes: WakesNow, alsoBusy: ReadonlySet<string> = new Set()): Promise<{ free: string[]; busy: number; partial: boolean }> {
     const byHolder = new Map<string, IntegratorLease[]>();
     for (const l of leases) { const list = byHolder.get(l.holder); if (list === undefined) byHolder.set(l.holder, [l]); else list.push(l); }
+    const woken = new Set(wakes.open.map((w) => w.agentId));
     const agents = await this.#options.agents();
-    let free = 0, busy = 0;
+    const free: string[] = [];
+    let busy = 0;
     for (const id of agents.ids) {
       const name = bare(id);
       if (name === undefined) continue;
       const p = await this.#options.principal(id);
       if (p === undefined || p.kind !== "agent" || p.id !== id || !servesProject(p, projectId)) continue;
-      // Busy as the pool judges it: a live hold on a project it still serves (a hold where its right was taken away does not count).
-      if ((byHolder.get(name) ?? []).some((l) => servesProject(p, l.projectId))) busy++; else free++;
+      // Busy as the pool judges it: a live hold on a project it still serves (a hold where its right was taken away does not count); or woken for a landing that has not ended.
+      if ((byHolder.get(name) ?? []).some((l) => servesProject(p, l.projectId)) || woken.has(name) || alsoBusy.has(name)) busy++; else free.push(name);
     }
-    if (free > 0) return { state: "free", free, busy, partial: agents.partial };
-    if (busy > 0) return { state: "busy", busy, partial: agents.partial };
-    return { state: "nobody", partial: agents.partial };
+    free.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    return { free, busy, partial: agents.partial };
   }
 }

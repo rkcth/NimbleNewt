@@ -138,6 +138,11 @@ export interface DispatcherDeps {
   /** The worker hosts, local or remote, in the order they are tried. They all implement the same contract. */
   readonly workers: readonly WorkerHost[];
   readonly contracts: Pick<ContractService, "priorityOf" | "recoveryOf"> & Partial<Pick<ContractService, "workClassOf">>;
+  /**
+   * Card P10b: whether a task is a landing task (an integrator woken to land a project's approved work, `IntegratorWake`). Its attempt asks admission for a `landing` place, in the control lane that productive work can
+   * never take, and its budget is checked and held on the task whose approved work it lands (`budgetTaskId`), so landing is paid from that work's own allowance. Absent: no task is a landing task.
+   */
+  readonly landingOf?: (taskId: string) => Promise<{ readonly budgetTaskId: string } | undefined>;
   readonly harnesses: HarnessCatalog;
   readonly policy: Pick<PolicyService, "evaluate"> & Partial<Pick<PolicyService, "contextFor">>;
   /**
@@ -2226,7 +2231,7 @@ export class DispatcherService {
     if (typeof resumed === "string") return skip("resume", resumed);
     // 6. Budget, from accounting.
     if (this.#deps.budgets !== undefined) {
-      const report = await this.#deps.budgets.accounting(this.#deps.principal, taskId);
+      const report = await this.#deps.budgets.accounting(this.#deps.principal, await this.#budgetTaskOf(taskId));
       // A spawned child spends only what its parent delegated to it (card H10): one with no allowance of its own (its spawn crashed before handing it over) does not run on no budget at all.
       if (report === undefined && (await this.#runner.get("swarm-link", taskId)) !== undefined) return block("budget", "dispatch_blocked", "this task was spawned by another task and has no allowance of its own; delegate part of the parent's budget to it or cancel it");
       if (report !== undefined && (exhausted(report.limit.costMicros, report.spent.costMicros + report.uncertain.costMicros) || exhausted(report.limit.computeMs, report.spent.computeMs + report.uncertain.computeMs))) {
@@ -2594,7 +2599,7 @@ export class DispatcherService {
     if (d.body.reservationId !== undefined) return undefined;
     let want = d.body.reserving;
     if (want === undefined) {
-      const report = await budgets.accounting(this.#deps.principal, d.body.taskId);
+      const report = await budgets.accounting(this.#deps.principal, await this.#budgetTaskOf(d.body.taskId));
       if (report === undefined) return undefined; // the task has no budget: nothing is held
       const contract = await this.#contractOf(d.body.taskId);
       // Only a dimension that has a limit is held (a limit of 0 states none), and no more than is still available: the contract's time, the attempt's own expiry and the allowance agree on the smallest.
@@ -2613,7 +2618,7 @@ export class DispatcherService {
       want = (await this.#update(d.body.attemptId, (x) => ({ ...x, reserving: x.reserving ?? intended }))).reserving!;
     }
     let id: string;
-    try { id = (await budgets.reserve(this.#deps.principal, { commandId: `dpa-res:${d.body.attemptId}${(d.body.reserveRound ?? 0) === 0 ? "" : `:${d.body.reserveRound}`}`, taskId: d.body.taskId, agentId: d.body.agentId, purpose: `attempt ${d.body.attemptId}`, ...want })).id; } catch (error) {
+    try { id = (await budgets.reserve(this.#deps.principal, { commandId: `dpa-res:${d.body.attemptId}${(d.body.reserveRound ?? 0) === 0 ? "" : `:${d.body.reserveRound}`}`, taskId: await this.#budgetTaskOf(d.body.taskId), agentId: d.body.agentId, purpose: `attempt ${d.body.attemptId}`, ...want })).id; } catch (error) {
       if (isDomainError(error, "not_found")) return undefined;
       if (error instanceof BudgetClosedError) {
         // The owner closed the task's budget: nothing can be held for it, now or later, so the owner is told with a blocker rather than the attempt waiting in silence.
@@ -2638,6 +2643,11 @@ export class DispatcherService {
     return undefined;
   }
 
+  /** The task whose budget an attempt of `taskId` is checked and held on: its own, or for a landing task the task whose approved work it lands (card P10b). */
+  async #budgetTaskOf(taskId: string): Promise<string> {
+    return (await this.#deps.landingOf?.(taskId))?.budgetTaskId ?? taskId;
+  }
+
   async #request(d: Loaded, host: WorkerHost): Promise<string> {
     if (d.body.requestId !== undefined) {
       const where = await this.#deps.admission.where(d.body.requestId);
@@ -2652,8 +2662,10 @@ export class DispatcherService {
       // Who the work counts for under the owner's optional caps: its project, its agent and (for a child task) the agent of the task it reports to. A supervisor that cannot be read is simply not counted.
       const reportsTo = await this.#supervisor(d.body.taskId);
       // The P or PC class (card B01) is decided here with the priority and kept on the attempt, so a relabel after this cannot move the attempt's place or its slot time to the other kind.
-      const workClass = this.#deps.contracts.workClassOf === undefined ? undefined : await this.#deps.contracts.workClassOf(d.body.taskId);
-      ask = { n, priority, ...(reportsTo === undefined ? {} : { reportsTo }), ...(workClass === undefined ? {} : { workClass }) };
+      // A landing task's attempt (card P10b) takes a place of the reserved control lane; such a place has no P or PC class.
+      const landing = (await this.#deps.landingOf?.(d.body.taskId)) !== undefined;
+      const workClass = landing || this.#deps.contracts.workClassOf === undefined ? undefined : await this.#deps.contracts.workClassOf(d.body.taskId);
+      ask = { n, priority, ...(reportsTo === undefined ? {} : { reportsTo }), ...(workClass === undefined ? {} : { workClass }), ...(landing ? { landing: true as const } : {}) };
       const chosen = ask;
       await this.#update(d.body.attemptId, (b) => (b.ask?.n === n ? b : { ...b, ask: chosen }));
       ask = (await this.#load(d.body.attemptId))?.body.ask ?? ask;
@@ -2661,7 +2673,7 @@ export class DispatcherService {
     const commandId = `dpa-req:${d.body.attemptId}:${n}`;
     let asked: { id: string };
     try {
-      asked = await this.#deps.admission.request({ commandId, actor: DISPATCHER_ACTOR, class: "productive", ...(ask.workClass === undefined ? {} : { workClass: ask.workClass }), priority: ask.priority, host: host.hostId, project: d.body.projectId, agent: d.body.agentId, ...(ask.reportsTo === undefined ? {} : { reportsTo: ask.reportsTo }), cpus: host.resources.cpus, memoryMb: host.resources.memoryMb });
+      asked = await this.#deps.admission.request({ commandId, actor: DISPATCHER_ACTOR, class: ask.landing === true ? "landing" : "productive", ...(ask.workClass === undefined || ask.landing === true ? {} : { workClass: ask.workClass }), priority: ask.priority, host: host.hostId, project: d.body.projectId, agent: d.body.agentId, ...(ask.reportsTo === undefined ? {} : { reportsTo: ask.reportsTo }), cpus: host.resources.cpus, memoryMb: host.resources.memoryMb });
     } catch (error) {
       // An entry committed under this very command ID by a request that then could not be repeated as it was (a crash, then a different host or size): the entry is ours. Take it over when it is the same
       // place, otherwise give it back and ask afresh under the next number, so a place is never leaked.

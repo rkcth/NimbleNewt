@@ -93,7 +93,7 @@ export interface DispatchBody {
   readonly requestId?: string;
   readonly requests?: number;
   /** What request number `n` asks for, kept BEFORE the request is made so that a replay after a crash asks for exactly the same thing (the request's command digest covers these) and a changed parent or priority cannot make the replay conflict. */
-  readonly ask?: { readonly n: number; readonly priority: number; readonly reportsTo?: string; /** P or PC as the contract said when the request was decided (card B01); absent on asks made before it, which count as P. */ readonly workClass?: "P" | "PC" };
+  readonly ask?: { readonly n: number; readonly priority: number; readonly reportsTo?: string; /** P or PC as the contract said when the request was decided (card B01); absent on asks made before it, which count as P. */ readonly workClass?: "P" | "PC"; /** Card P10b: the attempt of a landing task, admitted in a `landing` place of the reserved control lane; decided with the rest of the ask and kept. */ readonly landing?: true };
   readonly claimedAt: string;
   /** After this time the attempt is over whatever the worker says (the attempt's own expiry). Absent: the attempt has no time limit (the worker's lease still has to be kept). */
   readonly expiresAt?: string;

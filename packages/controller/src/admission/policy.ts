@@ -1,17 +1,20 @@
 import { DomainError } from "../domain/errors.js";
 
-/** `productive` attempts do the work; `inquiry` and `review` are the small, quick calls that must stay possible while the work is saturated. */
+/**
+ * `productive` attempts do the work; `inquiry` and `review` are the small, quick calls that must stay possible while the work is saturated. `landing` is an integrator's attempt to land a project's approved work
+ * (card P10b): it is mechanical (the integrator writes no content) and takes a place of the same reserved `control` lane, so a full lane or queue of author attempts can never keep approved work from landing.
+ */
 export type Lane = "productive" | "control";
-export type RequestClass = "productive" | "inquiry" | "review";
+export type RequestClass = "productive" | "inquiry" | "review" | "landing";
 
 export interface Limits {
   /** Productive attempts running at once, in total. */
   readonly productive: number;
   /** Productive attempts running at once on one host. */
   readonly perHost: number;
-  /** Reserved capacity for inquiries and reviews together: productive work can never take it. */
+  /** Reserved capacity for inquiries, reviews and landing together: productive work can never take it. */
   readonly control: number;
-  /** Most requests waiting. A further request is refused rather than queued without bound. */
+  /** Most requests waiting in each lane. A further request is refused rather than queued without bound. */
   readonly queue: number;
   /** How deep a chain of attempts starting attempts may go (an attempt started by the controller is depth 0). */
   readonly depth: number;

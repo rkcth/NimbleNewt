@@ -1,0 +1,244 @@
+import { createHash } from "node:crypto";
+import { DomainError } from "../domain/errors.js";
+import type { AssignmentService } from "../domain/assignments.js";
+import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
+import type { ProjectService } from "../domain/service.js";
+import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
+import type { IntegratorCapacity, WakesNow } from "./integrator-capacity.js";
+import type { IntegratorLeaseService } from "./integrator-lease.js";
+import { frontOf, type LandingQueueService } from "./landing-queue.js";
+
+/**
+ * Waking a free integrator for queued work (card P10b, second part of the first clause: "another is woken through admission and budget, with reserved capacity").
+ *
+ * On each of the controller's rounds, a landing branch whose first place holds approved work, whose lease no active agent holds live, and for which no integrator is woken already, gets one: the free integrator of
+ * the project (the pool's rule, `IntegratorCapacity.integrators`: the exact right `integration.lease`, no live lease of a project it serves and no other wake that has not ended; the first by ID) is given a landing
+ * task in that project ("Land the approved work queued on <branch>"), made ready and assigned to it. From there the attempt starts the way every attempt starts: the inbox admits it and the dispatcher claims it; the
+ * dispatcher knows it as a landing task (`landingOf`), so its budget is checked and held (R05) on the task whose approved work it lands, and it asks admission (H03) for a `landing` place of the control lane, which
+ * productive (author) attempts can never take and whose queue they cannot fill.
+ *
+ * A wake ends when its landing task is done or cancelled; the branch may then be woken for again. The same work first in the queue is woken for at most `INTEGRATOR_WAKE_LIMITS.perFront` times, so an integrator that cannot
+ * land it does not get new tasks without end; the owner's `landing_queue` view says so. Queues are visited in the pool's order (the first place that waited longest first).
+ *
+ * Bounded and fail closed: the queues by `queuesWithEntries` (50 pages of 200), the wake records in `INTEGRATOR_WAKE_LIMITS.pages` pages of 200, at most `INTEGRATOR_WAKE_LIMITS.policyReads` landing policies, `INTEGRATOR_WAKE_LIMITS.judged`
+ * judgements of a project's integrators and `INTEGRATOR_WAKE_LIMITS.perRound` wakes per round. Leases or wake records that cannot all be read, or a damaged wake record, wake nobody in that round. Every write is a command with an ID derived from the branch and the wake's number, so a round repeated
+ * after a crash makes the same task, the same assignment and the same record, never a second.
+ */
+export const INTEGRATOR_WAKE_LIMITS = { pages: 10, policyReads: 100, judged: 10, perRound: 5, perFront: 3 } as const;
+/** The dispatcher's wake round (`round` with `throttled`) runs at most this often. */
+export const WAKE_EVERY_MS = 30_000;
+export const WAKE_KIND = "integrator-wake";
+export const LANDING_TASK_KIND = "landing-task";
+export const WAKE_ACTOR = "service:integrator-wake";
+
+/** The current wake of one landing branch (one record per project and branch). `frontWakes` counts the wakes for `frontTaskId`, the work first in the queue when it was made; `wakes` counts them all. */
+export interface IntegratorWakeBody {
+  readonly projectId: string;
+  readonly branch: string;
+  readonly frontTaskId: string;
+  readonly taskId: string;
+  readonly agentId: string;
+  /** Always `open` when written; the wake ends when its landing task ends (read from the task, never from this field). */
+  readonly state: "open";
+  readonly frontWakes: number;
+  readonly wakes: number;
+  readonly at: string;
+}
+/** What a landing task lands: the dispatcher's `landingOf` reads it. */
+export interface LandingTaskBody { readonly projectId: string; readonly branch: string; readonly frontTaskId: string; readonly agentId: string; readonly wakeId: string; readonly at: string }
+
+export interface WakeRound {
+  readonly woken: readonly { readonly projectId: string; readonly branch: string; readonly agentId: string; readonly taskId: string }[];
+  /** Branches passed over: their lease is held by an active agent, an integrator is woken for them already, no integrator is free, or their wakes for the first work are used up. */
+  readonly held: number; readonly open: number; readonly noneFree: number; readonly spent: number;
+  /** Queues that could not be judged (landing settings unreadable, a record that does not match its task, a wake that could not be made). */
+  readonly unreadable: number;
+  /** Not every queue was looked at, or the round stopped at one of its bounds. */
+  readonly partial: boolean;
+  /** Set when the round woke nobody because the leases or the wake records could not all be read. */
+  readonly stopped?: string;
+  /** A throttled round that did not run (the last one was less than `WAKE_EVERY_MS` ago). */
+  readonly skipped?: true;
+}
+
+export interface IntegratorWakeDeps {
+  readonly queue: Pick<LandingQueueService, "queuesWithEntries">;
+  readonly leases: Pick<IntegratorLeaseService, "liveLeases" | "projectOfTask">;
+  readonly capacity: Pick<IntegratorCapacity, "integrators">;
+  readonly projects: Pick<ProjectService, "createTask" | "getTask" | "transitionTask">;
+  readonly assignments: Pick<AssignmentService, "assignTask" | "getAssignment">;
+  /** The landing branch the owner's policy names for the project (the lease door's function). */
+  readonly landingBranch: (call: { taskId: string; projectId: string }) => Promise<string | undefined>;
+  /** Whether an agent ID names an active agent: a live hold of one that is not active does not keep the branch from a wake (the lease door ends it at the next take). */
+  readonly activeAgent: (agentId: string) => Promise<boolean>;
+}
+
+const json = (value: object): JsonObject => JSON.parse(JSON.stringify(value)) as JsonObject;
+const hash = (...parts: string[]): string => createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 32);
+const sinceMs = (at: string | undefined): number => { const t = typeof at === "string" ? Date.parse(at) : NaN; return Number.isFinite(t) ? t : Number.POSITIVE_INFINITY; };
+const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+const ID = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,119}$/;
+const BRANCH = /^[A-Za-z0-9._/-]{1,200}$/;
+const TIME = (v: unknown): v is string => typeof v === "string" && Number.isFinite(Date.parse(v));
+const count = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) >= 1;
+
+/** A stored wake record checked field by field; undefined when it is not what `IntegratorWake` writes (damage is never read as "no wake"). */
+export function wakeBodyOf(body: unknown): IntegratorWakeBody | undefined {
+  const b = body as Record<string, unknown> | null;
+  if (b === null || typeof b !== "object" || Array.isArray(b)) return undefined;
+  const ok = typeof b["projectId"] === "string" && ID.test(b["projectId"]) && typeof b["branch"] === "string" && BRANCH.test(b["branch"])
+    && typeof b["frontTaskId"] === "string" && ID.test(b["frontTaskId"]) && typeof b["taskId"] === "string" && ID.test(b["taskId"]) && typeof b["agentId"] === "string" && ID.test(b["agentId"])
+    && b["state"] === "open" && count(b["frontWakes"]) && count(b["wakes"]) && (b["frontWakes"] as number) <= (b["wakes"] as number) && TIME(b["at"]);
+  return ok ? (b as unknown as IntegratorWakeBody) : undefined;
+}
+
+export class IntegratorWake {
+  readonly #runner: CommandRunner;
+  readonly #deps: IntegratorWakeDeps;
+  private constructor(runner: CommandRunner, deps: IntegratorWakeDeps) { this.#runner = runner; this.#deps = deps; }
+
+  static withEpoch(storage: ControllerStorage, epoch: number, deps: IntegratorWakeDeps, options: RunnerOptions = {}): IntegratorWake {
+    return new IntegratorWake(new CommandRunner(storage, epoch, options), deps);
+  }
+
+  static wakeIdOf(projectId: string, branch: string): string { return `iwk-${hash(projectId, branch)}`; }
+
+  /** What a landing task lands, for the dispatcher (budget on `budgetTaskId`, the work's own task; a `landing` admission place). Undefined for any other task, or a record that does not read as one. */
+  async landingOf(taskId: string): Promise<{ readonly budgetTaskId: string; readonly projectId: string; readonly branch: string; readonly agentId: string } | undefined> {
+    const found = await this.#runner.get(LANDING_TASK_KIND, taskId);
+    const b = found?.body as Partial<LandingTaskBody> | undefined;
+    if (b === undefined || typeof b.frontTaskId !== "string" || !ID.test(b.frontTaskId) || typeof b.projectId !== "string" || typeof b.branch !== "string" || typeof b.agentId !== "string") return undefined;
+    return { budgetTaskId: b.frontTaskId, projectId: b.projectId, branch: b.branch, agentId: b.agentId };
+  }
+
+  /**
+   * The wakes now, for `IntegratorCapacity` (`wakes`): those whose landing task has not ended (a task that is done, cancelled or gone ends its wake) and the branches whose first work used up its wakes. `partial` when the
+   * records could not all be read or one is damaged.
+   */
+  async now(): Promise<WakesNow> {
+    const open: { projectId: string; branch: string; agentId: string; taskId: string; at: string }[] = [];
+    const spent: { projectId: string; branch: string; frontTaskId: string; wakes: number }[] = [];
+    let after: string | undefined;
+    for (let page = 0; page < INTEGRATOR_WAKE_LIMITS.pages; page++) {
+      const batch = await this.#runner.list(WAKE_KIND, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const a of batch) {
+        const w = wakeBodyOf(a.body);
+        if (w === undefined || a.id !== IntegratorWake.wakeIdOf(w.projectId, w.branch)) return { open: [], spent: [], partial: true };
+        if (w.state === "open" && (await this.#taskOpen(w.taskId))) open.push({ projectId: w.projectId, branch: w.branch, agentId: w.agentId, taskId: w.taskId, at: w.at });
+        else if (w.frontWakes >= INTEGRATOR_WAKE_LIMITS.perFront) spent.push({ projectId: w.projectId, branch: w.branch, frontTaskId: w.frontTaskId, wakes: w.frontWakes });
+      }
+      if (batch.length < 200) return { open, spent, partial: false };
+      after = batch[batch.length - 1]!.id;
+    }
+    return { open, spent, partial: true };
+  }
+
+  async #taskOpen(taskId: string): Promise<boolean> {
+    const t = await this.#deps.projects.getTask(taskId);
+    return t !== undefined && t.state !== "done" && t.state !== "cancelled";
+  }
+
+  /** When the throttled round last ran (this runner's clock, in ms); in memory only, so a restart runs at its first round. */
+  #lastAt: number | undefined;
+
+  /** One round (see the class). With `throttled` (the dispatcher's call, every tick) it runs at most once per `WAKE_EVERY_MS` of the controller's clock. */
+  async round(options: { readonly throttled?: boolean } = {}): Promise<WakeRound> {
+    if (options.throttled === true) {
+      const nowMs = Date.parse(this.#runner.now());
+      if (Number.isFinite(nowMs) && this.#lastAt !== undefined && nowMs >= this.#lastAt && nowMs - this.#lastAt < WAKE_EVERY_MS) return { woken: [], held: 0, open: 0, noneFree: 0, spent: 0, unreadable: 0, partial: false, skipped: true };
+      this.#lastAt = nowMs;
+    }
+    let held = 0, open = 0, noneFree = 0, spent = 0, unreadable = 0;
+    const woken: { projectId: string; branch: string; agentId: string; taskId: string }[] = [];
+    const nothing = (stopped: string): WakeRound => ({ woken, held, open, noneFree, spent, unreadable, partial: true, stopped });
+    const { leases, partial: leasesPartial } = await this.#deps.leases.liveLeases();
+    if (leasesPartial) return nothing("the integrator leases could not all be read");
+    const wakes = await this.now();
+    if (wakes.partial) return nothing("the wake records could not all be read");
+    const openOn = new Set(wakes.open.map((w) => `${w.projectId}\0${w.branch}`));
+    const justWoken = new Set<string>();
+
+    const { queues, partial: queuesPartial } = await this.#deps.queue.queuesWithEntries();
+    const candidates = queues.flatMap((q) => {
+      const first = frontOf(q);
+      if (first?.entry === undefined) return [];
+      return [{ q, taskId: first.taskId, since: q.front !== undefined && q.front.taskId === first.taskId ? q.front.since : first.entry.queuedAt }];
+    }).sort((a, b) => sinceMs(a.since) - sinceMs(b.since) || cmp(a.q.projectId, b.q.projectId) || cmp(a.q.branch, b.q.branch));
+
+    let reads = 0, judgedCount = 0, stopped = false;
+    for (const c of candidates) {
+      const { projectId, branch } = c.q;
+      if (openOn.has(`${projectId}\0${branch}`)) { open++; continue; }
+      const own = leases.find((l) => l.projectId === projectId && l.branch === branch);
+      if (own !== undefined && (await this.#deps.activeAgent(own.holder))) { held++; continue; }
+      if (reads >= INTEGRATOR_WAKE_LIMITS.policyReads || woken.length >= INTEGRATOR_WAKE_LIMITS.perRound) { stopped = true; break; }
+      reads++;
+      let landing: string | undefined;
+      try { landing = await this.#deps.landingBranch({ taskId: c.taskId, projectId }); } catch { unreadable++; continue; }
+      if (landing !== branch) continue;
+      if ((await this.#deps.leases.projectOfTask(c.taskId)) !== projectId) { unreadable++; continue; }
+      const wakeId = IntegratorWake.wakeIdOf(projectId, branch);
+      const before = await this.#runner.get(WAKE_KIND, wakeId);
+      const prev = before === undefined ? undefined : wakeBodyOf(before.body);
+      if (before !== undefined && (prev === undefined || prev.projectId !== projectId || prev.branch !== branch)) { unreadable++; continue; }
+      // A record whose landing task ended (`now` did not list it as open) is replaced by the next wake in one guarded write.
+      const frontWakes = prev !== undefined && prev.frontTaskId === c.taskId ? prev.frontWakes : 0;
+      if (frontWakes >= INTEGRATOR_WAKE_LIMITS.perFront) { spent++; continue; }
+      if (judgedCount >= INTEGRATOR_WAKE_LIMITS.judged) { stopped = true; break; }
+      judgedCount++;
+      const judged = await this.#deps.capacity.integrators(projectId, justWoken);
+      if (judged === undefined) return { ...nothing("the integrator leases or wakes could not all be read"), woken };
+      const agentId = judged.free[0];
+      if (agentId === undefined) { noneFree++; continue; }
+      try {
+        const made = await this.#wake({ wakeId, before, prev, projectId, branch, frontTaskId: c.taskId, frontWakes: frontWakes + 1, agentId });
+        justWoken.add(made.agentId);
+        woken.push({ projectId, branch, agentId: made.agentId, taskId: made.taskId });
+      } catch (error) {
+        if (!(error instanceof DomainError)) throw error;
+        unreadable++;
+      }
+    }
+    return { woken, held, open, noneFree, spent, unreadable, partial: queuesPartial || stopped };
+  }
+
+  /** Makes one wake: the landing task, ready and assigned, then the records. Each step has a derived command ID, so a repeat after a crash does each step once. */
+  async #wake(w: { wakeId: string; before: { revision: number } | undefined; prev: IntegratorWakeBody | undefined; projectId: string; branch: string; frontTaskId: string; frontWakes: number; agentId: string }): Promise<{ taskId: string; agentId: string }> {
+    const wakes = (w.prev?.wakes ?? 0) + 1;
+    const base = `iwk:${w.wakeId.slice(4)}:${wakes}`;
+    const taskId = (await this.#deps.projects.createTask({
+      commandId: `${base}:task`, actor: WAKE_ACTOR, projectId: w.projectId, title: `Land the approved work queued on ${w.branch}`.slice(0, 150),
+      description: `The controller woke an integrator to land the approved work in the landing queue of branch ${w.branch}, first task ${w.frontTaskId}. Take the branch's integrator lease, land the queue's first place, and finish this task when the queue is landed or nothing more can land now.`.slice(0, 2000),
+    })).id;
+    const task = await this.#deps.projects.getTask(taskId);
+    if (task === undefined) throw new DomainError("not_found", `landing task ${taskId} is missing`);
+    if (task.state === "proposed") await this.#deps.projects.transitionTask({ commandId: `${base}:ready`, actor: WAKE_ACTOR, taskId, expectedRevision: task.revision, to: "ready" });
+    // Already assigned (a round that crashed after the assignment): the wake is that agent's, whoever this round would have chosen.
+    const assigned = await this.#deps.assignments.getAssignment(taskId);
+    let agentId = w.agentId;
+    if (assigned?.owner !== undefined) {
+      if (assigned.owner.kind !== "agent") throw new DomainError("invalid_command", `landing task ${taskId} is owned by someone other than an agent`);
+      agentId = assigned.owner.id;
+    } else {
+      await this.#deps.assignments.assignTask({ commandId: `${base}:own:${hash(agentId).slice(0, 12)}`, actor: WAKE_ACTOR, taskId, owner: { kind: "agent", id: agentId }, reason: `woken to land the approved work queued on ${w.branch}`.slice(0, 300) });
+    }
+    const at = this.#runner.now();
+    const body: IntegratorWakeBody = { projectId: w.projectId, branch: w.branch, frontTaskId: w.frontTaskId, taskId, agentId, state: "open", frontWakes: w.frontWakes, wakes, at };
+    const link: LandingTaskBody = { projectId: w.projectId, branch: w.branch, frontTaskId: w.frontTaskId, agentId, wakeId: w.wakeId, at };
+    const ref: AggregateRef = { kind: WAKE_KIND, id: w.wakeId };
+    const linkRef: AggregateRef = { kind: LANDING_TASK_KIND, id: taskId };
+    await this.#runner.command("landing.wake", { commandId: `${base}:record`, actor: WAKE_ACTOR }, async () => ({
+      payload: { projectId: w.projectId, branch: w.branch, frontTaskId: w.frontTaskId, taskId, agentId, wakes },
+      build: async () => {
+        const now = await this.#runner.get(WAKE_KIND, w.wakeId);
+        if ((now?.revision ?? 0) !== (w.before?.revision ?? 0)) throw new DomainError("stale_revision", `the wake of branch ${w.branch} changed meanwhile`);
+        const changes: Change[] = [
+          now === undefined ? { type: "create", ref, body: json(body) } : { type: "update", ref, expectedRevision: now.revision, body: json(body) },
+          { type: "create", ref: linkRef, body: json(link) },
+        ];
+        return { ref, creates: now === undefined, changes, detail: { taskId, agentId, wakes } };
+      },
+    }));
+    return { taskId, agentId };
+  }
+}
