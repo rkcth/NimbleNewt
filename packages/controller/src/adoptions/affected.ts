@@ -63,10 +63,11 @@ export interface LookBody {
   readonly notified?: true;
   /**
    * The look was stopped before it finished (card K06, retention of the B05 records): it was still failing `LOOK_LIMITS.stopDays` after it began, so it left the pending list instead of holding a place there
-   * for good. What it found and told stays in the record, and `partial` is set. `told`: whether the owner's notice of the stop went out (a look whose notice is what kept failing may not reach the owner;
-   * the count stays in `retention.status` and the line in the experiments view either way).
+   * for good. What it found and told stays in the record. `told`: whether the owner's notice of the stop went out (a look whose notice is what kept failing may not reach the owner; the count stays in
+   * `retention.status` and the line in the experiments view either way). `finished`: every page had been read before the stop (only telling the owner kept failing): the record keeps its own `partial`
+   * and the stop notice carries the look's result. Otherwise the look had not finished and `partial` is set.
    */
-  readonly stopped?: { readonly at: string; readonly told: boolean };
+  readonly stopped?: { readonly at: string; readonly told: boolean; readonly finished?: true };
 }
 
 /** What the look needs from the rest of the controller. Every call acts as the controller, never as whoever withdrew the adoption. */
@@ -98,6 +99,10 @@ export async function lookStartChanges(runner: CommandRunner, start: Pick<LookBo
   }
   return changes;
 }
+
+/** A look's stop, read from a record that may be damaged: only an object counts (as in `retention.status`). */
+export const stoppedOf = (look: { readonly stopped?: unknown }): { readonly told?: unknown; readonly finished?: unknown } | undefined =>
+  typeof look.stopped === "object" && look.stopped !== null ? (look.stopped as { told?: unknown; finished?: unknown }) : undefined;
 
 const pendingOf = (body: unknown): string[] => {
   const p = (body as { pending?: unknown } | undefined)?.pending;
@@ -131,9 +136,10 @@ export class AffectedWorkLook {
       if (got === undefined) return undefined;
       const look = got.body;
       // A stopped look is over: it is not carried on and the owner's finish notice is not sent for it.
-      if (look.stopped !== undefined) return look;
+      if (stoppedOf(look) !== undefined) return look;
       if (look.state === "done") {
-        if (look.notified !== true) await this.#finish(ports, adoptionId, look, got.revision);
+        // A told look still in the pending list (only a damaged or restored store holds one: the told write also unlists) leaves it, so it does not take a place there for good.
+        if (look.notified !== true) await this.#finish(ports, adoptionId, look, got.revision); else await this.#unlist(adoptionId);
         return (await this.read(adoptionId))?.body;
       }
       if (i === pages) return look;
@@ -180,12 +186,17 @@ export class AffectedWorkLook {
    */
   async #stopIfOverdue(ports: AdoptionLookPorts, id: string): Promise<boolean> {
     const got = await this.read(id);
-    if (got === undefined || got.body.stopped !== undefined || !AffectedWorkLook.overdue(got.createdAt, this.#runner.now())) return false;
+    if (got === undefined || stoppedOf(got.body) !== undefined || !AffectedWorkLook.overdue(got.createdAt, this.#runner.now())) return false;
     const look = got.body;
+    // A look that had read every page is finished: its result stands (no `partial` is added), and only telling the owner kept failing. An owner who was told already (the told write was what failed) is not
+    // told again; anyone else gets the result in the stop notice (first K06 review: the stop notice had dropped it and called a finished look partial).
+    const finished = look.state === "done";
     let told = true;
-    try { await ports.notify({ commandId: `adoption-look-stopped-${id}`, adoptionId: id, projectId: typeof look.projectId === "string" ? look.projectId : "", detail: stoppedText(look, id) }); } catch (error) { if (!(error instanceof DomainError && error.code === "command_conflict")) told = false; }
+    if (!(finished && look.notified === true)) {
+      try { await ports.notify({ commandId: `adoption-look-stopped-${id}`, adoptionId: id, projectId: typeof look.projectId === "string" ? look.projectId : "", detail: stoppedText(look, id) }); } catch (error) { if (!(error instanceof DomainError && error.code === "command_conflict")) told = false; }
+    }
     const at = this.#runner.now();
-    const next = { ...look, state: "done" as const, partial: true as const, doneAt: typeof look.doneAt === "string" ? look.doneAt : at, stopped: { at, told } };
+    const next = { ...look, state: "done" as const, ...(finished ? {} : { partial: true as const }), doneAt: typeof look.doneAt === "string" ? look.doneAt : at, stopped: { at, told, ...(finished ? { finished: true as const } : {}) } };
     await this.#runner.command("adoption.look.stop", { commandId: `adp-stop-${id}-${got.revision}`, actor: "controller" }, async () => ({
       payload: { adoptionId: id, revision: got.revision },
       build: async () => {
@@ -323,8 +334,18 @@ export function noticeText(look: LookBody): string {
   return (base.length + ids.length <= 200 ? `${base}${ids}` : base).slice(0, 200);
 }
 
-/** The owner's notice that a look was stopped (at most the notification detail limit of 200 characters). Counts only, from a record that may be damaged. */
+/**
+ * The owner's notice that a look was stopped (at most the notification detail limit of 200 characters). Counts only, from a record that may be damaged. A finished look's notice is its result (the counts the
+ * finish notice would have given), marked as sent at the limit.
+ */
 export function stoppedText(look: Partial<LookBody>, adoptionId: string): string {
+  if (look.state === "done") {
+    const sent = ` (Sent at the look's ${LOOK_LIMITS.stopDays}-day limit; the first notice kept failing.)`;
+    if (look.scope === "not-recorded") return `Adoption ${adoptionId} withdrawn. Which tasks applied a practice is not recorded, so no task was told.${sent}`.slice(0, 200);
+    const c = affectedCounts(typeof look.tasks === "object" && look.tasks !== null ? look.tasks : {});
+    const more = look.partial === true || (typeof look.untracked === "number" && look.untracked > 0) ? " (more not read)" : "";
+    return `Adoption ${adoptionId} withdrawn. ${c.paused + c.open + c.finished + c.missing} task(s) ran it${more}: ${c.paused} paused, ${c.open} open (told), ${c.finished + c.missing} finished.${sent}`.slice(0, 200);
+  }
   const told = typeof look.told === "number" && Number.isSafeInteger(look.told) && look.told >= 0 ? look.told : 0;
   return `The look at the work that used withdrawn adoption ${adoptionId} kept failing for ${LOOK_LIMITS.stopDays} days and was stopped. ${told} task(s) were told before it stopped; others may not have been.`.slice(0, 200);
 }
@@ -334,9 +355,12 @@ export function affectedLine(look: Pick<LookBody, "state" | "scope" | "runs" | "
   // A viewer who may not read the project's run records gets the counts without the task IDs (`AdoptionService.affected`).
   const counts = look.counts ?? affectedCounts(look.tasks ?? {});
   const total = counts.paused + counts.open + counts.finished + counts.missing;
-  if (look.stopped !== undefined) return `The look at the work that ran this version kept failing for ${LOOK_LIMITS.stopDays} days and was stopped: ${total} task(s) found and ${typeof look.told === "number" ? look.told : 0} told before then; others may not have been.${look.stopped.told ? "" : " The owner's notice of this could not be sent."}`;
-  if (look.scope === "not-recorded") return "Which tasks applied the practice is not recorded, so no task was found or told.";
+  const stop = stoppedOf(look);
+  if (stop !== undefined && stop.finished !== true) return `The look at the work that ran this version kept failing for ${LOOK_LIMITS.stopDays} days and was stopped: ${total} task(s) found and ${typeof look.told === "number" ? look.told : 0} told before then; others may not have been.${stop.told === true ? "" : " The owner's notice of this could not be sent."}`;
+  // A finished look that was stopped because telling the owner kept failing: its result stands, and the line says how the owner heard of it.
+  const closed = stop === undefined || look.notified === true ? "" : ` Telling the owner kept failing for ${LOOK_LIMITS.stopDays} days, so the look was closed${stop.told === true ? " and the result sent then" : "; the owner's notice of this could not be sent"}.`;
+  if (look.scope === "not-recorded") return `Which tasks applied the practice is not recorded, so no task was found or told.${closed}`;
   if (look.state === "looking") return `The look at the work that ran this version is not finished yet (${look.runs} run(s) and ${total} task(s) found so far; it goes on at the next tick).`;
   const limit = look.partial === true || look.untracked > 0 ? " Not every run record was read or recorded (the look's limit), so there may be more." : "";
-  return `Affected work, from the tool's run records: ${total} task(s) ran this version; ${counts.paused} paused and ${counts.open} open were told in their activity and keep the version, ${counts.finished + counts.missing} finished or gone were left as they are.${limit}${look.notified === true ? "" : " The owner has not been told yet."}`;
+  return `Affected work, from the tool's run records: ${total} task(s) ran this version; ${counts.paused} paused and ${counts.open} open were told in their activity and keep the version, ${counts.finished + counts.missing} finished or gone were left as they are.${limit}${look.notified === true || stop !== undefined ? "" : " The owner has not been told yet."}${closed}`;
 }

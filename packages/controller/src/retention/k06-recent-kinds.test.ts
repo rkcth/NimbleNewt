@@ -143,14 +143,15 @@ for (const backend of backends) {
     assert.deepEqual(await c.make({ looks: c.ports() }).sweepAffected(), { looked: 0, failed: 2, stopped: 2 });
     assert.deepEqual(await c.pending(), []);
     const look = (await c.make().affected(c.owner, failing))!;
-    assert.deepEqual([look.state, look.partial, look.stopped, look.notified, look.why, look.scope], ["done", true, { at: new Date(clockAt).toISOString(), told: true }, undefined, "decision", "not-recorded"]);
+    // The practice's look had finished (only its notice failed): its result stands, it is not called partial, and the stop notice gives the owner that result (first review).
+    assert.deepEqual([look.state, look.partial, look.stopped, look.notified, look.why, look.scope], ["done", undefined, { at: new Date(clockAt).toISOString(), told: true, finished: true }, undefined, "decision", "not-recorded"]);
     assert.equal(c.notices.length, 2);
     const mine = c.notices.find((x) => x.adoptionId === failing)!;
     assert.deepEqual([mine.commandId, mine.projectId], [`adoption-look-stopped-${failing}`, c.a]);
     assert.ok(mine.detail.length <= 200);
     assert.equal(mine.detail, stoppedText(look, failing));
-    assert.match(mine.detail, /kept failing for 14 days and was stopped\. 0 task\(s\) were told/);
-    assert.match(affectedLine(look), /kept failing for 14 days and was stopped: 0 task\(s\) found and 0 told/);
+    assert.equal(mine.detail, `Adoption ${failing} withdrawn. Which tasks applied a practice is not recorded, so no task was told. (Sent at the look's 14-day limit; the first notice kept failing.)`);
+    assert.equal(affectedLine(look), "Which tasks applied the practice is not recorded, so no task was found or told. Telling the owner kept failing for 14 days, so the look was closed and the result sent then.");
     assert.doesNotMatch(affectedLine(look), /could not be sent/);
     // A reader of the adoption sees the stop the same way (counts, no task IDs).
     assert.deepEqual((await c.make().affected(c.reader, failing))?.stopped, look.stopped);
@@ -201,9 +202,9 @@ for (const backend of backends) {
     for (let i = 0; i < 4 && (await c.pending()).length > 0; i++) await svc.sweepAffected();
     assert.deepEqual(await c.pending(), []);
     const q = (await c.make().affected(c.owner, quiet))!;
-    assert.deepEqual(q.stopped, { at: new Date(clockAt).toISOString(), told: false });
-    assert.match(affectedLine(q), /The owner's notice of this could not be sent\./);
-    assert.deepEqual((await c.make().affected(c.owner, given))!.stopped, { at: new Date(clockAt).toISOString(), told: true }, "a conflict on the stop notice's ID means it was given before");
+    assert.deepEqual(q.stopped, { at: new Date(clockAt).toISOString(), told: false, finished: true });
+    assert.match(affectedLine(q), /the owner's notice of this could not be sent\./i);
+    assert.deepEqual((await c.make().affected(c.owner, given))!.stopped, { at: new Date(clockAt).toISOString(), told: true, finished: true }, "a conflict on the stop notice's ID means it was given before");
     // The still-looking one was never failing: the same sweep finished it and told the owner.
     assert.deepEqual([(await c.make().affected(c.owner, waiting))!.notified, (await c.make().affected(c.owner, waiting))!.stopped], [true, undefined]);
     st = await c.retention().status(c.owner) as unknown as { adoptionLooks: Record<string, unknown> };
@@ -233,6 +234,48 @@ for (const backend of backends) {
     assert.match(note.detail, / 0 task\(s\) were told/);
     assert.match(affectedLine(stopped), /0 task\(s\) found and 0 told/);
     assert.equal((await c.storage.getAggregate({ kind: "adoption-look", id: forged }))!.body["stopped"], undefined);
+    // A finished tool look whose finish notice kept failing: stopped with its result in the notice (counts, partial kept as it was, no `partial` added).
+    const toolDone = "adp-eeeeeeeeeeeeeeeeeeee"; const toldDone = "adp-ffffffffffffffffffff"; const nul = "adp-gggggggggggggggggggg";
+    await c.put("adoption-look", toolDone, { adoptionId: toolDone, projectId: c.a, state: "done", scope: "tool-runs", target: { kind: "tool", name: "toolbox.fetch", version: "1.0.0" }, pages: 1, runs: 3, tasks: { "task-a": "paused", "task-b": "open", "task-c": "finished", "task-d": "missing" }, untracked: 0, told: 2, why: "regression", startedAt: new Date(t0 - 20 * DAY).toISOString(), doneAt: new Date(t0 - 19 * DAY).toISOString() }, t0 - 20 * DAY);
+    // A finished look whose owner was told, yet still pending (a damaged store): it leaves the list at its turn, with no second notice and no stop.
+    await c.put("adoption-look", toldDone, { adoptionId: toldDone, projectId: c.a, state: "done", scope: "tool-runs", target: null, pages: 1, runs: 0, tasks: {}, untracked: 0, told: 0, notified: true, why: "decision", startedAt: new Date(t0 - 20 * DAY).toISOString() }, t0 - 20 * DAY);
+    // A damaged `stopped` (null) is not a stop: the look is carried on (and here finished), and the view line does not throw.
+    await c.put("adoption-look", nul, { adoptionId: nul, projectId: c.a, state: "looking", scope: "not-recorded", target: { kind: "practice" }, pages: 0, runs: 0, tasks: {}, untracked: 0, told: 0, why: "decision", startedAt: new Date(t0).toISOString(), stopped: null }, t0);
+    assert.doesNotThrow(() => affectedLine({ ...(stopped as object), stopped: null } as never));
+    await c.put("adoption-looks", "installation", { pending: [forged, toolDone, toldDone, nul] });
+    const before2 = c.notices.length;
+    const svc2 = c.make({ looks: c.ports({ failOnly: [toolDone, toldDone] }) });
+    for (let i = 0; i < 6; i++) await svc2.sweepAffected();
+    assert.deepEqual(await c.pending(), [forged]);
+    const td = (await c.storage.getAggregate({ kind: "adoption-look", id: toolDone }))!.body as unknown as LookBody;
+    assert.deepEqual([td.state, td.partial, td.stopped?.finished, td.stopped?.told, td.doneAt], ["done", undefined, true, true, new Date(t0 - 19 * DAY).toISOString()]);
+    const tdNote = c.notices.find((x) => x.adoptionId === toolDone)!;
+    assert.equal(tdNote.detail, `Adoption ${toolDone} withdrawn. 4 task(s) ran it: 1 paused, 1 open (told), 2 finished. (Sent at the look's 14-day limit; the first notice kept failing.)`);
+    assert.doesNotMatch(affectedLine({ ...td, counts: undefined } as never), /has not been told yet/);
+    assert.match(affectedLine({ ...td, counts: undefined } as never), /^Affected work, from the tool's run records: 4 task\(s\) ran this version; 1 paused and 1 open were told .* Telling the owner kept failing for 14 days, so the look was closed and the result sent then\.$/);
+    const tk = (await c.storage.getAggregate({ kind: "adoption-look", id: toldDone }))!.body as unknown as LookBody;
+    assert.deepEqual([tk.stopped, tk.partial, tk.notified], [undefined, undefined, true]);
+    assert.equal(c.notices.filter((x) => x.adoptionId === toldDone).length, 0, "an owner who was told is not told again");
+    assert.doesNotMatch(affectedLine(tk), /kept failing|closed/);
+    const nb = (await c.storage.getAggregate({ kind: "adoption-look", id: nul }))!.body as unknown as LookBody;
+    assert.deepEqual([nb.state, nb.notified], ["done", true]);
+    assert.equal(c.notices.length - before2, 2, "the tool look's stop notice and the null-stopped look's finish notice");
+    // A finished, told look that is still pending and whose leaving the list keeps failing: at its limit it is stopped in one write that also unlists it, and the owner, already told, is not told again.
+    const stuck = "adp-hhhhhhhhhhhhhhhhhhhh";
+    await c.put("adoption-look", stuck, { adoptionId: stuck, projectId: c.a, state: "done", scope: "not-recorded", target: { kind: "practice" }, pages: 0, runs: 0, tasks: {}, untracked: 0, told: 0, notified: true, why: "decision", startedAt: new Date(t0 - 20 * DAY).toISOString() }, t0 - 20 * DAY);
+    await c.put("adoption-looks", "installation", { pending: [forged, stuck] });
+    const unlistFails = new Proxy(c.storage, { get(target, prop) {
+      if (prop === "applyOperation") return async (input: OperationInput) => { if (input.changes.length === 1 && input.changes[0]!.ref.kind === "adoption-looks") throw new Error("the list cannot be written"); return target.applyOperation(input); };
+      const v = Reflect.get(target, prop, target) as unknown; return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+    } });
+    const before3 = c.notices.length;
+    const svc3 = c.make({ looks: c.ports({ notifyOk: true }), storage: unlistFails });
+    for (let i = 0; i < 4; i++) await svc3.sweepAffected();
+    assert.deepEqual(await c.pending(), [forged]);
+    const sk = (await c.storage.getAggregate({ kind: "adoption-look", id: stuck }))!.body as unknown as LookBody;
+    assert.deepEqual([sk.stopped?.told, sk.stopped?.finished, sk.partial, sk.notified], [true, true, undefined, true]);
+    assert.equal(c.notices.length, before3, "no stop notice for an owner already told");
+    assert.equal(affectedLine(sk), "Which tasks applied the practice is not recorded, so no task was found or told.");
     // Bad and odd clocks never stop a look.
     assert.equal(AffectedWorkLook.overdue("not a time", new Date(t0).toISOString()), false);
     assert.equal(AffectedWorkLook.overdue(new Date(t0).toISOString(), "not a time"), false);
@@ -241,7 +284,7 @@ for (const backend of backends) {
     // A pending list that is not a list: the status counts none, and the sweep reads none.
     await c.put("adoption-looks", "installation", { pending: { 0: forged, length: 1 } });
     const st = await c.retention().status(c.owner) as unknown as { adoptionLooks: Record<string, unknown> };
-    assert.deepEqual(st.adoptionLooks, { pending: 0, looking: 1, notTold: 0, stopped: 2 });
+    assert.deepEqual(st.adoptionLooks, { pending: 0, looking: 1, notTold: 0, stopped: 4 });
     assert.deepEqual(await svc.sweepAffected(), { looked: 0, failed: 0 });
   });
 
@@ -293,6 +336,13 @@ for (const backend of backends) {
     const first = await svc().request(c.reader, { commandId: replayId, experimentId: exp, target: { kind: "tool", name: "toolbox.other", version: "1.0.0" }, reason: "once" });
     values.v = { ...off, quotaProjectBytes: 1 };
     assert.equal((await svc().request(c.reader, { commandId: replayId, experimentId: exp, target: { kind: "tool", name: "toolbox.other", version: "1.0.0" }, reason: "once" })).id, first.id);
+    // The same at the guard itself (a repeat that reaches the storage, as after a lost answer): a stored operation that created an adoption is answered, not refused for room.
+    const op: OperationInput = { operationId: cid("raw"), epoch: c.epoch, actor: "test", correlationId: "raw", at: new Date(clockAt).toISOString(), changes: [{ type: "create", ref: { kind: "adoption", id: "adp-rrrrrrrrrrrrrrrrrrrr" }, body: { projectId: c.a, requestedBy: c.reader.id, status: "declined" } as JsonObject }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] };
+    values.v = off;
+    await guarded.applyOperation(op);
+    values.v = { ...off, quotaProjectBytes: 1 };
+    await guarded.applyOperation(op);
+    await assert.rejects(guarded.applyOperation({ ...op, operationId: cid("raw"), changes: [{ type: "create", ref: { kind: "adoption", id: "adp-ssssssssssssssssssss" }, body: { projectId: c.a, requestedBy: c.reader.id } as JsonObject }] }), /over its storage quota/);
   });
 
   suite("the owner's project export carries the project's adoptions, experiments and looks, masks secret-shaped text in them, and leaves another project's out", async (c) => {
@@ -301,6 +351,10 @@ for (const backend of backends) {
     // A record with secret-shaped text (as a damaged or older store could hold) and one of project B.
     await c.put("adoption", "adp-zzzzzzzzzzzzzzzzzzzz", { projectId: c.a, experimentId: "exp-zzzzzzzzzzzzzzzzzzzz", status: "declined", requestedBy: c.reader.id, reason: "see sk-abcdefghijklmnopqrstuvwx for it", reports: [], reportCount: 0, history: [] });
     await c.put("adoption", "adp-yyyyyyyyyyyyyyyyyyyy", { projectId: c.b, status: "declined", requestedBy: c.eve.id, reason: "B's own", reports: [], reportCount: 0, history: [] });
+    // Own-code requests: exported with the project they were approved into; a waiting one (no project yet) and another project's are not.
+    await c.put("owncode-request", "ocr-aaaaaaaaaaaaaaaaaaaa", { requestedBy: c.dev.id, status: "approved", projectId: c.a, taskId: "task-zzzzzzzzzzzzzzzzzzzz", request: { what: "w", why: "token sk-abcdefghijklmnopqrstuvwy" }, history: [] });
+    await c.put("owncode-request", "ocr-bbbbbbbbbbbbbbbbbbbb", { requestedBy: c.dev.id, status: "pending", request: { what: "waiting one" }, history: [] });
+    await c.put("owncode-request", "ocr-cccccccccccccccccccc", { requestedBy: c.eve.id, status: "approved", projectId: c.b, taskId: "task-yyyyyyyyyyyyyyyyyyyy", request: { what: "B's request" }, history: [] });
     const items: { kind: string; id: string; body: JsonObject }[] = []; let redactions = 0;
     for (let after: string | undefined; ;) {
       const page = await c.retention().export(c.owner, { projectId: c.a, limit: 200, ...(after === undefined ? {} : { after }) });
@@ -312,7 +366,9 @@ for (const backend of backends) {
     assert.deepEqual(ids("adoption"), [live, "adp-zzzzzzzzzzzzzzzzzzzz"].sort());
     assert.equal(ids("experiment").length, 1);
     assert.deepEqual(ids("adoption-look"), [live]);
-    assert.ok(redactions >= 1);
+    assert.deepEqual(ids("owncode-request"), ["ocr-aaaaaaaaaaaaaaaaaaaa"]);
+    assert.doesNotMatch(JSON.stringify(items), /waiting one|sk-abcdefghijklmnopqrstuvwy/);
+    assert.ok(redactions >= 2);
     assert.doesNotMatch(JSON.stringify(items), /sk-abcdefghijklmnopqrstuvwx/);
     assert.doesNotMatch(JSON.stringify(items), /B's own/);
     // The new kinds come after the older ones, so a cursor from an earlier export still names the same kind.
